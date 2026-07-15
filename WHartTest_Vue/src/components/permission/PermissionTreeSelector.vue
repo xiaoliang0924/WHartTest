@@ -163,7 +163,11 @@ const allPermissions = ref<Permission[]>([]);
 const userPermissions = ref<Permission[]>([]);
 
 // 树形数据
-const permissionTreeData = ref<PermissionTreeNode[]>([]);
+const permissionTreeData = computed(() => {
+  // 依赖 isEnglish.value 触发重新计算，确保语言切换时重新渲染权限树
+  isEnglish.value;
+  return buildPermissionTree(allPermissions.value, userPermissions.value);
+});
 const checkedKeys = ref<(string | number)[]>([]);
 const halfCheckedKeys = ref<(string | number)[]>([]);
 const expandedKeys = ref<(string | number)[]>([]); // 默认全部收起
@@ -370,9 +374,6 @@ const loadPermissions = async () => {
 const updateCheckedKeys = () => {
   const userPermIds = userPermissions.value.map(p => p.id);
   checkedKeys.value = userPermIds;
-
-  // 构建权限树
-  permissionTreeData.value = buildPermissionTree(allPermissions.value, userPermissions.value);
 };
 
 // 权限选择处理

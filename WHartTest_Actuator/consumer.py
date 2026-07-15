@@ -328,7 +328,7 @@ class TaskConsumer:
             logger.info(f"使用环境配置: {env_config.get('name')}, base_url: {base_url}")
         
         # 构建配置，传入 base_url 和数据处理器
-        config = self._build_page_step_config(page_step_data, base_url, data_processor)
+        config = self._build_page_step_config(page_step_data, base_url, data_processor, env_config)
         
         # 执行（使用同一浏览器会话）
         logger.info(f"开始执行页面步骤: {config.page_name}")
@@ -618,20 +618,60 @@ class TaskConsumer:
         
         return data_processor
 
-    def _build_page_step_config(self, data: dict, base_url: str = '', data_processor: Optional[DataProcessor] = None) -> PageStepConfig:
+    def _build_page_step_config(
+        self,
+        data: dict,
+        base_url: str = '',
+        data_processor: Optional[DataProcessor] = None,
+        case_data_override: Optional[dict] = None,
+        env_config: Optional[dict] = None,
+    ) -> PageStepConfig:
         """构建页面步骤配置
         
         Args:
             data: 页面步骤数据
             base_url: 环境基础URL
             data_processor: 变量处理器，用于替换 ${{变量名}} 语法
+            case_data_override: 用例步骤的覆盖数据
+            env_config: 执行环境配置，用于 SQL 步骤获取数据库连接
         """
         steps = []
         
         for detail in data.get('step_details', []):
+            step_type = detail.get('step_type', 0)
+            detail_id = str(detail.get('id', ''))
+            
             # 从 ope_value 中提取输入值
-            # 支持多种格式：{"text": "admin"}, {"value": "xxx"}, {"timeout": 3000}, 或纯字符串/数字
             ope_value = detail.get('ope_value', {})
+            sql_execute = detail.get('sql_execute') or {}
+            
+            # 应用用例步骤的覆盖数据
+            if case_data_override and detail_id in case_data_override:
+                val = case_data_override[detail_id]
+                if isinstance(val, dict):
+                    # 如果覆盖数据本身是字典，直接合并
+                    if isinstance(ope_value, dict):
+                        ope_value = {**ope_value, **val}
+                    else:
+                        ope_value = val
+                else:
+                    # 否则，如果是字符串等简单类型，覆盖已有的主要参数
+                    if isinstance(ope_value, dict):
+                        for key in ['text', 'value', 'timeout', 'url', 'key', 'expected']:
+                            if key in ope_value:
+                                ope_value[key] = val
+                                break
+                        else:
+                            # 没找到已知键，且字典不为空，取第一个键
+                            if ope_value:
+                                first_key = next(iter(ope_value.keys()))
+                                ope_value[first_key] = val
+                            else:
+                                ope_value = {'text': val}
+                    else:
+                        ope_value = val
+            
+            # 支持多种格式：{"text": "admin"}, {"value": "xxx"}, {"timeout": 3000}, 或纯字符串/数字
             if isinstance(ope_value, dict):
                 # 按优先级尝试提取常见字段
                 input_value = (
@@ -640,6 +680,7 @@ class TaskConsumer:
                     ope_value.get('timeout') or  # wait 操作使用 timeout
                     ope_value.get('url') or      # goto 操作可能使用 url
                     ope_value.get('key') or      # press 操作可能使用 key
+                    ope_value.get('expected') or # 断言使用 expected
                     ''
                 )
                 # 如果所有已知字段都没有，且字典不为空，取第一个值
@@ -652,9 +693,15 @@ class TaskConsumer:
             
             # 定位器值也可能包含变量
             locator_value = detail.get('locator_value', '')
+            locator_value_2 = detail.get('locator_value_2', '')
+            locator_value_3 = detail.get('locator_value_3', '')
             
             # 变量替换：替换 input_value 和 locator_value 中的 ${{变量名}}
             if data_processor:
+                sql_execute = data_processor.replace(sql_execute)
+                if not isinstance(sql_execute, (dict, str)):
+                    sql_execute = {}
+
                 original_input = input_value
                 input_value = data_processor.replace(input_value)
                 if original_input != input_value:
@@ -664,23 +711,58 @@ class TaskConsumer:
                 locator_value = data_processor.replace(locator_value)
                 if original_locator != locator_value:
                     logger.info(f"变量替换 (定位器): '{original_locator}' -> '{locator_value}'")
+
+                if locator_value_2:
+                    original_locator_2 = locator_value_2
+                    locator_value_2 = data_processor.replace(locator_value_2)
+                    if original_locator_2 != locator_value_2:
+                        logger.info(f"变量替换 (定位器2): '{original_locator_2}' -> '{locator_value_2}'")
+
+                if locator_value_3:
+                    original_locator_3 = locator_value_3
+                    locator_value_3 = data_processor.replace(locator_value_3)
+                    if original_locator_3 != locator_value_3:
+                        logger.info(f"变量替换 (定位器3): '{original_locator_3}' -> '{locator_value_3}'")
                 
                 # 确保替换后的值是字符串类型
                 if not isinstance(input_value, str):
                     input_value = str(input_value)
                 if not isinstance(locator_value, str):
                     locator_value = str(locator_value)
+                if locator_value_2 and not isinstance(locator_value_2, str):
+                    locator_value_2 = str(locator_value_2)
+                if locator_value_3 and not isinstance(locator_value_3, str):
+                    locator_value_3 = str(locator_value_3)
             else:
                 logger.warning(f"data_processor 为 None，跳过变量替换")
+
+            def _parse_index(value):
+                if value is None or value == '':
+                    return None
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return None
             
             steps.append(StepConfig(
                 step_id=detail.get('id', 0),
-                operation_type=detail.get('ope_key', ''),  # 操作类型如 click, type
-                locator_type=detail.get('locator_type', 'xpath'),  # 定位方式
-                locator_value=locator_value,  # 定位表达式
+                operation_type=detail.get('ope_key') or '',  # 操作类型如 click, type
+                locator_type=detail.get('locator_type') or 'xpath',  # 定位方式
+                locator_value=locator_value or '',  # 定位表达式
+                step_type=step_type,
                 input_value=input_value,  # 输入值
-                description=detail.get('element_name', ''),  # 元素名称作为描述
+                description=detail.get('description') or detail.get('element_name') or ('SQL操作' if step_type == 2 else ''),
                 wait_time=detail.get('wait_time', 0),
+                is_iframe=detail.get('is_iframe', False),
+                iframe_locator=detail.get('iframe_locator') or '',
+                locator_index=detail.get('locator_index'),
+                locator_type_2=detail.get('locator_type_2'),
+                locator_value_2=locator_value_2 or None,
+                locator_index_2=_parse_index(detail.get('locator_index_2')),
+                locator_type_3=detail.get('locator_type_3'),
+                locator_value_3=locator_value_3 or None,
+                locator_index_3=_parse_index(detail.get('locator_index_3')),
+                sql_execute=sql_execute,
             ))
         
         # 页面URL处理：支持相对路径与 base_url 拼接
@@ -706,7 +788,8 @@ class TaskConsumer:
             page_step_id=data.get('id', 0),
             page_url=page_url,
             page_name=data.get('name', ''),  # 页面步骤名称
-            steps=steps
+            steps=steps,
+            env_config=env_config,
         )
     
     def _build_test_case_config(self, data: dict, env_config: Optional[dict] = None, data_processor: Optional[DataProcessor] = None) -> TestCaseConfig:
@@ -727,8 +810,9 @@ class TaskConsumer:
         
         for case_step in data.get('case_step_details', []):
             page_step_data = case_step.get('page_step', {})
+            case_data_override = case_step.get('case_data') or {}
             if page_step_data:
-                page_steps.append(self._build_page_step_config(page_step_data, base_url, data_processor))
+                page_steps.append(self._build_page_step_config(page_step_data, base_url, data_processor, case_data_override, env_config))
         
         return TestCaseConfig(
             case_id=data.get('id', 0),

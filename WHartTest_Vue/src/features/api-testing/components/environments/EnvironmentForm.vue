@@ -3,6 +3,7 @@ import { ref, onMounted, computed, watch, onBeforeMount } from 'vue'
 import type { Environment, EnvironmentVariable, CreateEnvironmentVariableData, NewEnvironmentVariableData, VariableType } from '../../services/environmentService'
 import { deleteEnvironmentVariable, createEnvironmentVariable, updateEnvironmentVariable, VARIABLE_TYPES } from '../../services/environmentService'
 import { getDatabaseConfigs, type DatabaseConfig } from '../../services/databaseConfigService'
+import { toArray } from '../../services/responseHelpers'
 import { Message } from '@arco-design/web-vue'
 import {
   IconPlus,
@@ -151,29 +152,14 @@ const fetchDatabaseConfigs = async () => {
     const response = await getDatabaseConfigs(projectId)
     console.log('数据库配置原始响应:', JSON.stringify(response))
     
-    // 检查实际返回的数据结构
-    const responseData = response.data;
-    
-    // 判断responseData是否是一个对象并且包含results属性
-    if (responseData && typeof responseData === 'object' && 'results' in responseData && Array.isArray(responseData.results)) {
-      databaseConfigs.value = responseData.results.map((item: any) => ({
-        id: item.id,
-        name: item.name,
-        host: item.host || '',
-        db_type: item.db_type || item.type,
-        is_active: item.is_active !== false
-      } as DatabaseConfig));
-      console.log('从分页结果中获取数据库配置列表，数量:', databaseConfigs.value.length);
-    } else if (Array.isArray(responseData)) {
-      databaseConfigs.value = responseData.map((item: any) => ({
-        id: item.id,
-        name: item.name,
-        host: item.host || '',
-        db_type: item.db_type || item.type,
-        is_active: item.is_active !== false
-      } as DatabaseConfig));
-      console.log('直接使用数据库配置数组，数量:', databaseConfigs.value.length);
-    }
+    databaseConfigs.value = toArray<any>(response.data?.results ?? response.data).map((item: any) => ({
+      id: item.id,
+      name: item.name,
+      host: item.host || '',
+      db_type: item.db_type || item.type,
+      is_active: item.is_active !== false
+    } as DatabaseConfig));
+    console.log('获取数据库配置列表数量:', databaseConfigs.value.length);
     
     // 如果当前环境有database_config_info但不在列表中，添加到列表
     const env = props.modelValue as any;
@@ -647,7 +633,7 @@ const handleSubmit = async () => {
                   <div class="flex items-center gap-3">
                     <a-switch
                       v-model="props.modelValue.verify_ssl"
-                      :default-checked="props.modelValue.verify_ssl !== false"
+                      :default-checked="props.modelValue.verify_ssl === true"
                     />
                     <span class="form-text-muted">验证SSL证书</span>
                     <a-tooltip content="启用时会验证HTTPS请求的SSL证书，禁用可以跳过SSL验证（不安全但在开发环境可能需要）">

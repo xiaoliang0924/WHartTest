@@ -11,7 +11,7 @@ class ApiEnvironment(models.Model):
 
     name = models.CharField(_("Name"), max_length=100)
     base_url = models.URLField(_("Base URL"), max_length=200)
-    verify_ssl = models.BooleanField(_("Verify SSL"), default=True)
+    verify_ssl = models.BooleanField(_("Verify SSL"), default=False)
     description = models.TextField(_("Description"), blank=True)
     project = models.ForeignKey(
         'projects.Project',

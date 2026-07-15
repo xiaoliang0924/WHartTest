@@ -15,8 +15,8 @@ dolloar_regex_compile = re.compile(r"\$\$")
 # variable notation, e.g. ${var} or $var
 # variable should start with a-zA-Z_
 variable_regex_compile = re.compile(r"\$\{([a-zA-Z_]\w*)\}|\$([a-zA-Z_]\w*)")
-# function notation, e.g. ${func1($var_1, $var_3)}
-function_regex_compile = re.compile(r"\$\{([a-zA-Z_]\w*)\(([\$\w\.\-/\s=,]*)\)\}")
+# function notation, e.g. ${func1($var_1, ${var_3})}
+function_regex_compile = re.compile(r"\$\{([a-zA-Z_]\w*)\((.*?)\)\}", re.DOTALL)
 
 
 def parse_string_value(str_value: Text) -> Any:

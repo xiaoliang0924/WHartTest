@@ -3,6 +3,7 @@ import { ref, onMounted, watch, computed } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
 import { IconRefresh } from '@arco-design/web-vue/es/icon'
 import { syncApi, type SyncHistory } from '../../services/syncService'
+import { normalizeListPayload } from '../../services/responseHelpers'
 import type { TableColumnData } from '@arco-design/web-vue'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
@@ -221,10 +222,14 @@ const fetchHistories = async () => {
     })
 
     const responseData = response.data
+    const normalized = normalizeListPayload<SyncHistory>(responseData)
 
-    if (Array.isArray((responseData as any)?.results)) {
-      histories.value = (responseData as any).results
-      total.value = Number((responseData as any).count || histories.value.length)
+    if (
+      normalized.results.length > 0
+      || (responseData && typeof responseData === 'object' && 'results' in (responseData as any))
+    ) {
+      histories.value = normalized.results
+      total.value = normalized.count
     } else if (Array.isArray((responseData as any)?.histories)) {
       histories.value = (responseData as any).histories
       total.value = Number((responseData as any).total || histories.value.length)

@@ -258,6 +258,7 @@ import { IconPlus, IconUpload, IconFile, IconDelete } from '@arco-design/web-vue
 import { useAppI18n } from '@/composables/useAppI18n';
 import { useProjectStore } from '@/store/projectStore';
 import { RequirementDocumentService } from '../services/requirementService';
+import { normalizeListPayload } from '@/features/api-testing/services/responseHelpers';
 import type {
   RequirementDocument,
   DocumentStatus,
@@ -672,19 +673,9 @@ const loadDocuments = async () => {
     console.log('API响应:', response); // 调试日志
 
     if (response.status === 'success') {
-      // 适配后端返回的数据结构
-      if (Array.isArray(response.data)) {
-        // 如果直接返回数组
-        documentList.value = response.data;
-        pagination.total = response.data.length;
-      } else if (response.data.results) {
-        // 如果是分页格式
-        documentList.value = response.data.results;
-        pagination.total = response.data.count;
-      } else {
-        documentList.value = [];
-        pagination.total = 0;
-      }
+      const { results, count } = normalizeListPayload<RequirementDocument>(response.data);
+      documentList.value = results;
+      pagination.total = count;
     } else {
       Message.error(response.message || pageText.value.loadDocumentsFailed);
     }

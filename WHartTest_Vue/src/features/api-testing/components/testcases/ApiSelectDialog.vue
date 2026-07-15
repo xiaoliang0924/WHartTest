@@ -5,6 +5,7 @@ import { useThemeStore } from '@/store/themeStore'
 import { Message } from '@arco-design/web-vue'
 import { moduleService } from '../../services/moduleService'
 import { interfaceService } from '../../services/interfaceService'
+import { toArray } from '../../services/responseHelpers'
 import type { ApiInterface } from '../../types/interface'
 import type { ApiModule } from '../../types/module'
 import ApiSelectDialogHeader from './ApiSelectDialogHeader.vue'
@@ -27,7 +28,7 @@ const props = defineProps<{
       variables: string | Record<string, any>
       parameters: string | Record<string, any>
       export: string | string[]
-      verify: string | boolean
+      verify?: boolean
     }
   }
 }>()
@@ -65,7 +66,7 @@ const loadModules = async () => {
   try {
     const res = await moduleService.tree(projectStore.currentProjectId)
     if (res.success && res.data) {
-      modules.value = Array.isArray(res.data) ? res.data : (res.data as any).results || []
+      modules.value = toArray<ApiModule>((res.data as any)?.results ?? res.data)
     }
   } catch (error) {
     console.error('Failed to load modules:', error)
@@ -94,7 +95,7 @@ const loadModuleInterfaces = async (moduleId: number, page = 1) => {
       page_size: pagination.value.pageSize
     })
     if (res.success && res.data) {
-      interfaces.value = Array.isArray(res.data) ? res.data : (res.data as any).results || []
+      interfaces.value = toArray<ApiInterface>((res.data as any)?.results ?? res.data)
       pagination.value.total = (res.data as any).count || interfaces.value.length
       pagination.value.current = page
     }

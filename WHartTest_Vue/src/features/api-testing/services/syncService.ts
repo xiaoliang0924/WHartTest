@@ -1,6 +1,7 @@
 import { request } from '@/utils/request';
 import { useProjectStore } from '@/store/projectStore';
 import type { ApiSyncConfig, ApiSyncHistory, ApiGlobalSyncConfig } from '../types/sync';
+import { wrapListResponse, wrapOneResponse, type WrappedList, type WrappedOne } from './responseHelpers';
 
 const syncBase = (projectId: number) => `/projects/${projectId}/api-sync-configs`;
 const historyBase = (projectId: number) => `/projects/${projectId}/api-sync-histories`;
@@ -70,39 +71,12 @@ function _pid(): number {
   return useProjectStore().currentProjectId ?? 0;
 }
 
-function _wrapList(res: any): { data: { results: any[]; count: number }; status: 'success'; message: string } {
-  if (!res.success) {
-    const err: any = new Error(res.error || res.message || '操作失败');
-    err.errors = res.errors;
-    throw err;
-  }
-
-  const payload = res.data;
-  let results: any[];
-  let count: number;
-
-  if (Array.isArray(payload)) {
-    results = payload;
-    count = res.total ?? payload.length;
-  } else if (payload && typeof payload === 'object' && Array.isArray(payload.results)) {
-    results = payload.results;
-    count = payload.count ?? res.total ?? results.length;
-  } else {
-    results = [];
-    count = res.total ?? 0;
-  }
-
-  return { data: { results, count }, status: 'success', message: '' };
+function _wrapList(res: any): WrappedList {
+  return wrapListResponse(res);
 }
 
-function _wrapOne<T = any>(res: any): { data: T | null; status: 'success'; message: string } {
-  if (!res.success) {
-    const err: any = new Error(res.error || res.message || '操作失败');
-    err.errors = res.errors;
-    throw err;
-  }
-
-  return { data: res.data ?? null, status: 'success', message: '' };
+function _wrapOne<T = any>(res: any): WrappedOne<T> {
+  return wrapOneResponse<T>(res);
 }
 
 // Type aliases for component imports

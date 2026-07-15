@@ -169,6 +169,8 @@ urlpatterns = [
     path("api/ui-automation/", include("ui_automation.urls")),
     # 挂载微信集成路由。
     path("api/weixin/", include("weixin_integration.urls")),
+    # 挂载操作日志路由。
+    path("api/operation-logs/", include("operation_logs.urls")),
     # 挂载 OpenAPI schema 接口。
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     # 挂载 Swagger UI。

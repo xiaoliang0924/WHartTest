@@ -167,6 +167,35 @@ class ApiCustomFunctionAPITest(TestCase):
         self.assertEqual(func.project, self.project)
         self.assertEqual(func.created_by, self.user)
 
+    def test_create_duplicate_function_name_returns_validation_error(self):
+        """同一项目下函数名重复时返回字段校验错误"""
+        ApiCustomFunction.objects.create(
+            name='duplicate_func',
+            code='def duplicate_func():\n    return "old"',
+            project=self.project,
+            created_by=self.user,
+        )
+
+        response = self.client.post(
+            self.base_url,
+            {
+                'name': 'duplicate_func',
+                'code': 'def duplicate_func():\n    return "new"',
+                'description': 'Duplicate function',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response.data)
+        self.assertEqual(
+            ApiCustomFunction.objects.filter(
+                project=self.project,
+                name='duplicate_func',
+            ).count(),
+            1,
+        )
+
     def test_retrieve_function(self):
         """测试获取单个函数"""
         func = ApiCustomFunction.objects.create(

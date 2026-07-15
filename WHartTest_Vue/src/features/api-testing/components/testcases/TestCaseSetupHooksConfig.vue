@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue'
 import { functionService } from '../../services/functionService'
+import { toArray } from '../../services/responseHelpers'
 import { useProjectStore } from '@/store/projectStore'
 import type { ApiCustomFunction } from '../../types/function'
 
@@ -27,7 +28,7 @@ const loadFunctions = async () => {
   try {
     const res = await functionService.list(projectStore.currentProjectId)
     if (res.success && res.data) {
-      state.value.functions = Array.isArray(res.data) ? res.data : (res.data as any).results || []
+      state.value.functions = toArray<ApiCustomFunction>((res.data as any)?.results ?? res.data)
     }
     if (props.hooks && props.hooks.length > 0) {
       state.value.selectedFunctions = props.hooks.map(hook => {

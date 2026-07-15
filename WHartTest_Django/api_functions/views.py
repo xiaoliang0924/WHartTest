@@ -87,6 +87,8 @@ class ApiCustomFunctionViewSet(BaseModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        logger.info("Attempting to execute custom function with test_args: %s", test_args)
+
         temp_file = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -104,9 +106,15 @@ class ApiCustomFunctionViewSet(BaseModelViewSet):
 
             result = func(**test_args) if test_args else func()
 
+            logger.info("Successfully executed custom function %s.", func_name)
             return Response({'result': str(result)})
 
         except Exception as e:
+            logger.exception(
+                "Failed to execute custom function.\nCode:\n%s\ntest_args: %s",
+                code,
+                test_args,
+            )
             return Response(
                 {'detail': str(e)},
                 status=status.HTTP_400_BAD_REQUEST,

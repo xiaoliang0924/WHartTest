@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from typing import Any, Dict, List, Text, Union
 
@@ -345,6 +346,105 @@ def pretty_format(v) -> str:
     return repr(utils.omit_long_data(v))
 
 
+placeholder_function_regex_compile = re.compile(r"\$\{([a-zA-Z_]\w*)\(")
+placeholder_variable_regex_compile = re.compile(r"\$\{([a-zA-Z_]\w*)\}|\$([a-zA-Z_]\w*)")
+
+
+def _limited_names(mapping: Dict, limit: int = 30) -> List[Text]:
+    if not isinstance(mapping, dict):
+        return []
+
+    names = [str(name) for name in mapping.keys()]
+    if len(names) > limit:
+        return names[:limit] + [f"...(+{len(names) - limit})"]
+    return names
+
+
+def _summarize_value_for_parse_log(value: Any) -> Dict:
+    if value is None:
+        return {"type": "NoneType", "is_empty": True}
+
+    if isinstance(value, bytes):
+        return {"type": "bytes", "length": len(value), "is_empty": len(value) == 0}
+
+    if isinstance(value, str):
+        return {"type": "str", "length": len(value), "is_empty": value == ""}
+
+    if isinstance(value, dict):
+        keys = [str(key) for key in list(value.keys())[:20]]
+        return {
+            "type": type(value).__name__,
+            "size": len(value),
+            "is_empty": len(value) == 0,
+            "keys": keys,
+            "truncated_keys": len(value) > 20,
+        }
+
+    if isinstance(value, list):
+        return {
+            "type": "list",
+            "length": len(value),
+            "is_empty": len(value) == 0,
+            "item_types": [type(item).__name__ for item in value[:5]],
+            "truncated_items": len(value) > 5,
+        }
+
+    return {"type": type(value).__name__, "is_empty": False}
+
+
+def _placeholder_labels(raw_value: Text) -> List[Text]:
+    labels = []
+    for match in placeholder_function_regex_compile.finditer(raw_value):
+        labels.append(f"function:{match.group(1)}")
+    for match in placeholder_variable_regex_compile.finditer(raw_value):
+        labels.append(f"variable:{match.group(1) or match.group(2)}")
+    return sorted(set(labels))
+
+
+def _collect_unresolved_placeholders(
+    value: Any,
+    path: Text = "request",
+    limit: int = 20,
+) -> List[Dict]:
+    findings = []
+
+    def walk(current_value: Any, current_path: Text) -> None:
+        if len(findings) >= limit:
+            return
+
+        if isinstance(current_value, str):
+            labels = _placeholder_labels(current_value)
+            if labels:
+                findings.append({"path": current_path, "labels": labels})
+            return
+
+        if isinstance(current_value, dict):
+            for key, item in current_value.items():
+                if len(findings) >= limit:
+                    return
+
+                if isinstance(key, str):
+                    labels = _placeholder_labels(key)
+                    if labels:
+                        findings.append({
+                            "path": f"{current_path}.[key]",
+                            "labels": labels,
+                        })
+
+                safe_key = str(key).replace("\n", " ")[:80]
+                walk(item, f"{current_path}.{safe_key}")
+            return
+
+        if isinstance(current_value, (list, tuple)):
+            for index, item in enumerate(current_value):
+                if len(findings) >= limit:
+                    return
+                walk(item, f"{current_path}[{index}]")
+
+    walk(value, path)
+    return findings
+
+
 def run_step_request(runner: HttpRunner, step: TStep) -> StepResult:
     """run teststep: request"""
     step_result = StepResult(
@@ -364,6 +464,25 @@ def run_step_request(runner: HttpRunner, step: TStep) -> StepResult:
     request_dict = step.request.dict()
     request_dict.pop("upload", None)
     parsed_request_dict = runner.parser.parse_data(request_dict, step_variables)
+    unresolved_placeholders = _collect_unresolved_placeholders(parsed_request_dict)
+    body_target = "req_json" if parsed_request_dict.get("req_json") not in (None, {}) else "data"
+    logger.info(
+        "Request parse completed: "
+        f"case_id={runner.case_id} step_name={step.name} "
+        f"variables_count={len(step_variables)} "
+        f"variable_keys={_limited_names(step_variables)} "
+        f"functions_count={len(functions)} "
+        f"function_names={_limited_names(functions)} "
+        f"body_target={body_target} "
+        f"body_summary={_summarize_value_for_parse_log(parsed_request_dict.get(body_target))} "
+        f"unresolved_count={len(unresolved_placeholders)}"
+    )
+    if unresolved_placeholders:
+        logger.warning(
+            "Request placeholders remained after parse: "
+            f"case_id={runner.case_id} step_name={step.name} "
+            f"unresolved={unresolved_placeholders}"
+        )
 
     request_headers = parsed_request_dict.pop("headers", {})
     # omit pseudo header names for HTTP/1, e.g. :authority, :method, :path, :scheme

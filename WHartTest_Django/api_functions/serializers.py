@@ -3,6 +3,7 @@ from .models import ApiCustomFunction
 
 
 class ApiCustomFunctionSerializer(serializers.ModelSerializer):
+    code = serializers.CharField(trim_whitespace=False)
     created_by_name = serializers.CharField(
         source='created_by.username', read_only=True, default=''
     )
@@ -38,3 +39,21 @@ class ApiCustomFunctionSerializer(serializers.ModelSerializer):
                     f"Code must not contain dangerous function or module: {keyword}"
                 )
         return value
+
+    def validate(self, attrs):
+        view = self.context.get('view')
+        if view and getattr(view, 'action', None) == 'create':
+            project_pk = view.kwargs.get('project_pk')
+            name = attrs.get('name')
+            if (
+                project_pk
+                and name
+                and ApiCustomFunction.objects.filter(
+                    project_id=project_pk,
+                    name=name,
+                ).exists()
+            ):
+                raise serializers.ValidationError(
+                    {"name": f"A function named '{name}' already exists in this project."}
+                )
+        return attrs

@@ -38,6 +38,8 @@
             :field-names="{ key: 'id', title: 'name' }"
             show-line
             block-node
+            draggable
+            @drop="onDrop"
             @select="onModuleSelect"
             v-model:selected-keys="selectedModuleKeys"
             v-model:expanded-keys="expandedKeys"
@@ -72,6 +74,7 @@ import type { TreeNodeData } from '@arco-design/web-vue';
 import {
   getTestCaseModules,
   deleteTestCaseModule,
+  moveTestCaseModule,
   type TestCaseModule,
   type CreateTestCaseModuleRequest,
 } from '@/services/testcaseModuleService';
@@ -220,6 +223,59 @@ const onModuleSelect = (
 // 树节点展开/收起处理
 const onTreeExpand = (newExpandedKeys: (string | number)[]) => {
   expandedKeys.value = newExpandedKeys;
+};
+
+// 拖拽排序/移动模块
+const onDrop = async (info: {
+  e: DragEvent;
+  dragNode: TreeNodeData;
+  dropNode: TreeNodeData;
+  dropPosition: number;
+}) => {
+  const { dragNode, dropNode, dropPosition } = info;
+  if (!dragNode || !dropNode) return;
+
+  if (dragNode.id === dropNode.id) return;
+
+  // 检查移动后的深度是否超过5级限制
+  let newLevel = dropNode.level as number;
+  if (dropPosition === 0) {
+    newLevel = (dropNode.level as number) + 1;
+  }
+
+  const getSubtreeDepth = (node: TreeNodeData): number => {
+    if (!node.children || node.children.length === 0) return 1;
+    return 1 + Math.max(...(node.children as TreeNodeData[]).map(child => getSubtreeDepth(child)));
+  };
+
+  const subtreeDepth = getSubtreeDepth(dragNode);
+  if (newLevel + subtreeDepth - 1 > 5) {
+    Message.error('移动后模块层级将超过5级限制');
+    return;
+  }
+
+  moduleLoading.value = true;
+  try {
+    const response = await moveTestCaseModule(currentProjectId.value, dragNode.id as number, {
+      target_id: dropNode.id as number,
+      drop_position: dropPosition
+    });
+
+    if (response.success) {
+      Message.success('模块排序/移动成功');
+      await fetchTestCaseModules();
+      emit('moduleUpdated');
+    } else {
+      Message.error(response.error || '移动模块失败');
+      await fetchTestCaseModules(); // 失败时刷新以恢复原状
+    }
+  } catch (error) {
+    console.error('移动模块出错:', error);
+    Message.error('移动模块时发生错误');
+    await fetchTestCaseModules();
+  } finally {
+    moduleLoading.value = false;
+  }
 };
 
 // 模块操作处理

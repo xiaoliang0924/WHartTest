@@ -168,6 +168,7 @@ import { ref, onMounted, computed, watch, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
 import { getTestReports } from '../../services/testReportService'
+import { toArray } from '../../services/responseHelpers'
 import { formatDateTime, formatDuration } from '@/utils/formatters'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
@@ -192,6 +193,10 @@ const REPORTS_TAB_QUERY = { tab: 'reports', returnTo: 'reports' } as const
 const currentProjectId = computed(() => {
   return projectStore.currentProject?.id || null
 })
+
+const toReportList = (results: unknown) => {
+  return toArray(results)
+}
 
 const pagination = ref({
   total: 0,
@@ -243,8 +248,8 @@ const fetchReports = async () => {
       status: filterStatus.value || undefined,
       project: currentProjectId.value, // 添加项目ID过滤
     })
-    reports.value = response.data.results
-    pagination.value.total = response.data.count
+    reports.value = toReportList(response.data?.results ?? response.data)
+    pagination.value.total = response.data?.count || 0
   } catch (error) {
     Message.error('获取测试报告列表失败')
   } finally {

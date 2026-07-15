@@ -29,17 +29,18 @@
             <a-spin />
           </div>
           <a-tree
-            v-else-if="treeData.length > 0"
-            :data="filteredTreeData"
-            :field-names="{ key: 'id', title: 'name', children: 'children' }"
+            v-else-if="mappedTreeData.length > 0"
+            :data="mappedTreeData"
             show-line
             block-node
+            :draggable="true"
+            @drop="onDrop"
             @select="onSelect"
             v-model:selected-keys="selectedKeys"
             v-model:expanded-keys="expandedKeys"
           >
             <template #title="nodeData">
-              <span>{{ nodeData.name }}</span>
+              <span>{{ nodeData.title || nodeData.name }}</span>
             </template>
           </a-tree>
           <a-empty v-else description="暂无模块数据" />
@@ -70,6 +71,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
+import type { TreeNodeData } from '@arco-design/web-vue';
 import { moduleApi } from '../api';
 import { extractResponseData, type UiModule, type UiModuleForm } from '../types';
 import { useProjectStore } from '@/store/projectStore';
@@ -106,7 +108,7 @@ const formData = ref<UiModuleForm>({
 // 过滤后的树数据（搜索功能）
 const filteredTreeData = computed(() => {
   if (!searchKeyword.value.trim()) return treeData.value;
-  
+
   const keyword = searchKeyword.value.toLowerCase();
   const filterTree = (nodes: UiModule[]): UiModule[] => {
     return nodes.reduce((acc, node) => {
@@ -120,6 +122,19 @@ const filteredTreeData = computed(() => {
   };
   return filterTree(treeData.value);
 });
+
+const mapTreeData = (modules: UiModule[]): any[] => {
+  return modules.map(module => ({
+    ...module,
+    key: module.id,
+    title: module.name,
+    children: module.children ? mapTreeData(module.children) : []
+  }))
+}
+
+const mappedTreeData = computed(() => {
+  return mapTreeData(filteredTreeData.value)
+})
 
 // 加载模块树
 const fetchModules = async () => {
@@ -153,6 +168,52 @@ const onSelect = (keys: (string | number)[], data: { node?: UiModule }) => {
   selectedKeys.value = keys;
   emit('select', data.node || null);
 };
+
+const onDrop = async (info: {
+  e: DragEvent
+  dragNode: TreeNodeData
+  dropNode: TreeNodeData
+  dropPosition: number
+}) => {
+  const { dragNode, dropNode, dropPosition } = info
+  if (!dragNode || !dropNode) return
+
+  if (dragNode.id === dropNode.id) return
+
+  // 检查移动后的深度是否超过5级限制
+  let newLevel = dropNode.level as number
+  if (dropPosition === 0) {
+    newLevel = (dropNode.level as number) + 1
+  }
+
+  const getSubtreeDepth = (node: TreeNodeData): number => {
+    if (!node.children || node.children.length === 0) return 1
+    return 1 + Math.max(...(node.children as TreeNodeData[]).map(child => getSubtreeDepth(child)))
+  }
+
+  const subtreeDepth = getSubtreeDepth(dragNode)
+  if (newLevel + subtreeDepth - 1 > 5) {
+    Message.error('移动后模块层级将超过5级限制')
+    return
+  }
+
+  loading.value = true
+  try {
+    await moduleApi.move(dragNode.id as number, {
+      target_id: dropNode.id as number,
+      drop_position: dropPosition
+    })
+    Message.success('模块排序/移动成功')
+    emit('updated')
+    await fetchModules()
+  } catch (error) {
+    console.error('移动模块出错:', error)
+    Message.error('移动模块时发生错误')
+    await fetchModules()
+  } finally {
+    loading.value = false
+  }
+}
 
 // 重置表单
 const resetForm = () => {
@@ -258,7 +319,7 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
     done(false);
     return;
   }
-  
+
   submitLoading.value = true;
   try {
     if (isEditing.value && currentModule.value) {
@@ -268,7 +329,7 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
       await moduleApi.create(formData.value);
       Message.success('创建成功');
     }
-    
+
     done(true);
     emit('updated');
     fetchModules();

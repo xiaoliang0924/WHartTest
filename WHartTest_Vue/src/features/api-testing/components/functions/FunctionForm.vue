@@ -133,8 +133,9 @@ const handleTest = async () => {
     Message.success(text.value.testRunSuccess)
   } catch (error: any) {
     console.error('测试运行失败:', error)
-    testResult.value = error.response?.data?.message || text.value.testRunFailed
-    Message.error(error.response?.data?.message || text.value.testRunFailed)
+    const errorMsg = error.error || error.message || error.response?.data?.message || text.value.testRunFailed
+    testResult.value = errorMsg
+    Message.error(errorMsg)
   } finally {
     testLoading.value = false
   }
@@ -339,4 +340,4 @@ const handleTest = async () => {
     }
   }
 }
-</style> 
+</style>

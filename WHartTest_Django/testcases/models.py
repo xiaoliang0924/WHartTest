@@ -117,7 +117,7 @@ class TestCaseStep(models.Model):
     )
     step_number = models.PositiveIntegerField(_('步骤编号'))
     description = models.TextField(_('步骤描述'))
-    expected_result = models.TextField(_('预期结果'))
+    expected_result = models.TextField(_('预期结果'), blank=True, default='')
     creator = models.ForeignKey(
         User,
         on_delete=models.SET_NULL,
@@ -167,11 +167,12 @@ class TestCaseModule(models.Model):
     )
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
     updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
+    order = models.IntegerField(_('排序'), default=0)
 
     class Meta:
         verbose_name = _('用例模块')
         verbose_name_plural = _('用例模块')
-        ordering = ['project', 'level', 'name']
+        ordering = ['project', 'level', 'order', 'id']
         unique_together = ('project', 'parent', 'name')  # 确保同一父模块下的子模块名称唯一
 
     def __str__(self):
@@ -195,8 +196,16 @@ class TestCaseModule(models.Model):
             self.level = 1
 
     def save(self, *args, **kwargs):
+        old_level = None
+        if self.pk:
+            try:
+                old_level = TestCaseModule.objects.get(pk=self.pk).level
+            except TestCaseModule.DoesNotExist:
+                pass
         self.clean()
         super().save(*args, **kwargs)
+        if old_level is not None and old_level != self.level:
+            self.update_descendants_level()
 
     def get_all_descendant_ids(self):
         """
@@ -206,6 +215,22 @@ class TestCaseModule(models.Model):
         for child in self.children.all():
             ids.extend(child.get_all_descendant_ids())
         return ids
+
+    def get_max_depth(self):
+        """
+        获取当前模块子树的最大深度（包括当前模块自己，深度最小为1）
+        """
+        children = self.children.all()
+        if not children:
+            return 1
+        return 1 + max(child.get_max_depth() for child in children)
+
+    def update_descendants_level(self):
+        """
+        递归更新所有子模块的级别
+        """
+        for child in self.children.all():
+            child.save()
 
 
 class TestCaseScreenshot(models.Model):

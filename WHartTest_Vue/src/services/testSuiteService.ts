@@ -2,6 +2,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/store/authStore';
 import { API_BASE_URL } from '@/config/api';
+import { normalizeListPayload } from '@/features/api-testing/services/responseHelpers';
 import type { TestCase } from './testcaseService';
 
 // 测试套件接口
@@ -96,21 +97,13 @@ export const getTestSuiteList = async (
     });
 
     if (response.data && response.data.status === 'success') {
-      if (Array.isArray(response.data.data)) {
-        return {
-          success: true,
-          data: response.data.data,
-          total: response.data.data.length,
-          statusCode: response.data.code,
-        };
-      } else if (response.data.data && response.data.data.results) {
-        return {
-          success: true,
-          data: response.data.data.results,
-          total: response.data.data.count,
-          statusCode: response.data.code,
-        };
-      }
+      const { results, count } = normalizeListPayload(response.data.data);
+      return {
+        success: true,
+        data: results,
+        total: count,
+        statusCode: response.data.code,
+      };
     }
 
     return {

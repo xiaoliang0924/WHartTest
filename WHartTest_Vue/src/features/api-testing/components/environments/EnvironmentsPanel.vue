@@ -16,6 +16,7 @@ import {
   batchCreateVariables
 } from '../../services/environmentService'
 import { getDatabaseConfigs, type DatabaseConfig } from '../../services/databaseConfigService'
+import { toArray } from '../../services/responseHelpers'
 import EnvironmentList from './EnvironmentList.vue'
 import EnvironmentForm from './EnvironmentForm.vue'
 import GlobalHeadersPanel from './GlobalHeadersPanel.vue'
@@ -81,7 +82,7 @@ const createForm = ref<FormData>({
   is_active: true,
   variables: [],
   database_config: "null" as any,
-  verify_ssl: true
+  verify_ssl: false
 })
 
 // 删除环境相关
@@ -117,7 +118,7 @@ const switchToCreate = () => {
     is_active: true,
     variables: [],
     database_config: "null" as any,
-    verify_ssl: true
+    verify_ssl: false
   }
   activeTab.value = 'create'
   selectedEnvironment.value = null
@@ -182,8 +183,8 @@ const fetchEnvironments = async () => {
     const response = await getEnvironments({
       project_id: Number(projectStore.currentProjectId)
     })
-    environments.value = response.data.results
-    console.log('获取到的环境列表:', response.data.results)
+    environments.value = toArray<Environment>(response.data?.results ?? response.data)
+    console.log('获取到的环境列表:', environments.value)
     
     // 获取数据库配置信息，用于显示数据库配置名称
     await enrichEnvironmentsWithDatabaseConfigNames()
@@ -206,18 +207,7 @@ const enrichEnvironmentsWithDatabaseConfigNames = async () => {
     const response = await getDatabaseConfigs(Number(projectStore.currentProjectId))
     console.log('数据库配置响应:', response)
     
-    // 获取实际的数据库配置数组
-    let dbConfigs: DatabaseConfig[] = []
-    const responseData = response.data
-    
-    // 判断是否是分页格式的响应
-    if (responseData && typeof responseData === 'object' && 'results' in responseData && Array.isArray(responseData.results)) {
-      dbConfigs = responseData.results
-      console.log('从分页结果中获取数据库配置:', dbConfigs)
-    } else if (Array.isArray(responseData)) {
-      dbConfigs = responseData
-      console.log('直接使用数据库配置数组:', dbConfigs)
-    }
+    const dbConfigs = toArray<DatabaseConfig>(response.data?.results ?? response.data)
     
     if (dbConfigs.length > 0) {
       // 创建一个数据库配置ID到名称的映射
@@ -257,7 +247,7 @@ const editForm = ref<FormData>({
   is_active: true,
   variables: [],
   database_config: null,
-  verify_ssl: true
+  verify_ssl: false
 })
 
 // 查看环境详情
@@ -308,7 +298,7 @@ const handleEdit = async (record: Environment) => {
       is_active: record.is_active,
       variables: record.variables || [],
       database_config: Number(record.database_config) || "null" as any,
-      verify_ssl: record.verify_ssl !== false
+      verify_ssl: record.verify_ssl === true
     }
 
     // 然后异步获取完整数据
@@ -337,7 +327,7 @@ const handleEdit = async (record: Environment) => {
         is_active: updatedRecord.is_active,
         variables: updatedRecord.variables || [],
         database_config: Number(updatedDatabaseConfig) || null,
-        verify_ssl: updatedRecord.verify_ssl !== false,
+        verify_ssl: updatedRecord.verify_ssl === true,
         database_config_info: (updatedRecord as any).database_config_info
       } as any
       
@@ -402,7 +392,7 @@ const handleEditSubmit = async () => {
           is_active: updatedEnv.is_active,
           variables: updatedEnv.variables || [],
           database_config: Number(updatedDatabaseConfig) || null,
-          verify_ssl: updatedEnv.verify_ssl !== false,
+          verify_ssl: updatedEnv.verify_ssl === true,
           database_config_info: (updatedEnv as any).database_config_info
         } as any
       }
@@ -427,7 +417,7 @@ const resetCreateForm = () => {
     is_active: true,
     variables: [],
     database_config: "null" as any,
-    verify_ssl: true
+    verify_ssl: false
   }
 }
 
@@ -719,7 +709,7 @@ onMounted(() => {
                   <span class="detail-section-title font-medium">验证SSL</span>
                 </div>
                 <div class="detail-block p-3 rounded-lg break-all">
-                  {{ selectedEnvironment.verify_ssl !== false ? '是' : '否' }}
+                  {{ selectedEnvironment.verify_ssl === true ? '是' : '否' }}
                 </div>
               </div>
               

@@ -37,7 +37,7 @@ class ApiEnvironmentModelTest(TestCase):
             created_by=self.user,
         )
         self.assertEqual(env.name, 'Staging')
-        self.assertTrue(env.verify_ssl)
+        self.assertFalse(env.verify_ssl)
         self.assertTrue(env.is_active)
 
     def test_str_representation(self):

@@ -3,6 +3,7 @@ import { ref, watch } from 'vue'
 import { IconFire, IconFolder, IconRight, IconDown } from '@arco-design/web-vue/es/icon'
 import { testcaseTagService } from '../../services/testcaseTagService'
 import { testcaseGroupService } from '../../services/testcaseGroupService'
+import { toArray } from '../../services/responseHelpers'
 import type { ApiTestCaseTag, ApiTestCaseGroup } from '../../types/testcase'
 import { Message } from '@arco-design/web-vue'
 import { collapseTreeBranchIds } from '../../utils/treeExpansion'
@@ -48,7 +49,7 @@ const loadTags = async () => {
     tagLoading.value = true
     const res = await testcaseTagService.list(props.projectId)
     if (res.success && res.data) {
-      tagList.value = Array.isArray(res.data) ? res.data : (res.data as any).results || []
+      tagList.value = toArray<ApiTestCaseTag>((res.data as any)?.results ?? res.data)
     }
   } catch (error) {
     console.error('Failed to load tags:', error)
@@ -69,7 +70,7 @@ const loadGroupTree = async () => {
     groupLoading.value = true
     const res = await testcaseGroupService.tree(props.projectId)
     if (res.success && res.data) {
-      const groups = Array.isArray(res.data) ? res.data : (res.data as any).results || []
+      const groups = toArray<ApiTestCaseGroup>((res.data as any)?.results ?? res.data)
       const sortGroups = (items: ApiTestCaseGroup[]): ApiTestCaseGroup[] => {
         items.sort((a, b) => {
           const timeA = new Date(a.created_at).getTime()

@@ -3,6 +3,7 @@ import { ref, reactive, watch, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { Message, Modal } from '@arco-design/web-vue'
 import { testcaseService } from '../../services/testcaseService'
+import { toArray } from '../../services/responseHelpers'
 import type { ApiTestCase } from '../../types/testcase'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
@@ -67,7 +68,7 @@ const fetchTestCases = async (page: number = 1) => {
 
     const res = await testcaseService.list(projectStore.currentProjectId, queryParams)
     if (res.success && res.data) {
-      testcases.value = Array.isArray(res.data) ? res.data : (res.data as any).results || []
+      testcases.value = toArray<ApiTestCase>((res.data as any)?.results ?? res.data)
       pagination.total = (res.data as any).count || testcases.value.length
       pagination.current = page
     } else {

@@ -79,7 +79,13 @@
       <a-form ref="formRef" :model="formData" :rules="rules" layout="vertical">
         <a-row :gutter="16">
           <a-col :span="12">
-            <a-form-item field="key" label="变量名" required>
+            <a-form-item field="key" required>
+              <template #label>
+                变量名
+                <a-tooltip content="使用 ${{ 变量名 }} 来调用该变量，例如：${{ username }}">
+                  <icon-question-circle style="margin-left: 4px; cursor: help; color: var(--color-text-3);" />
+                </a-tooltip>
+              </template>
               <a-input v-model="formData.key" placeholder="请输入变量名" :max-length="100" />
             </a-form-item>
           </a-col>
@@ -110,7 +116,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
-import { IconPlus, IconEdit, IconDelete } from '@arco-design/web-vue/es/icon'
+import { IconPlus, IconEdit, IconDelete, IconQuestionCircle } from '@arco-design/web-vue/es/icon'
 import { useProjectStore } from '@/store/projectStore'
 import { publicDataApi } from '../api'
 import type { UiPublicData, UiPublicDataForm, PublicDataType } from '../types'

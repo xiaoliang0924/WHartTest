@@ -5,6 +5,7 @@ import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
 import { getFunctions, createFunction, updateFunction, deleteFunction, type Function, getFunctionDetail } from '../../services/functionService'
+import { toArray } from '../../services/responseHelpers'
 import FunctionList from './FunctionList.vue'
 import FunctionDetail from './FunctionDetail.vue'
 import FunctionForm from './FunctionForm.vue'
@@ -31,6 +32,10 @@ const pageText = computed(() => isEnglish.value
     }
 )
 
+const toFunctionList = (results: unknown): Function[] => {
+  return toArray<Function>(results)
+}
+
 // 获取函数列表
 const fetchFunctions = async () => {
   if (!projectStore.currentProjectId) {
@@ -44,7 +49,7 @@ const fetchFunctions = async () => {
       project_id: Number(projectStore.currentProjectId),
       page_size: 100
     })
-    functions.value = response.data.results
+    functions.value = toFunctionList(response.data?.results ?? response.data)
   } catch (error) {
     console.error('获取函数列表失败:', error)
     Message.error('获取函数列表失败')

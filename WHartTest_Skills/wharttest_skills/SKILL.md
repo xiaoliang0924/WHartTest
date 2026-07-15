@@ -24,6 +24,7 @@ python whart_tools.py --action <action_name> [--参数名 参数值]
 |--------|------|------|
 | `get_projects` | 获取所有项目列表 | 无 |
 | `get_modules` | 获取项目下的模块列表 | `--project_id` |
+| `add_module` | 新增功能用例模块 | `--project_id`, `--name`, `--parent_id` (可选) |
 
 ### 用例管理
 
@@ -42,7 +43,7 @@ python whart_tools.py --action <action_name> [--参数名 参数值]
 | `upload_screenshot` | 上传单张截图 | `--project_id`, `--case_id`, `--file_path`, `--title`, `--description`, `--step_number`, `--page_url` |
 | `upload_screenshots` | 批量上传截图 | `--project_id`, `--case_id`, `--file_paths`(逗号分隔), `--title`, `--description`, `--step_number`, `--page_url` |
 
-**截图路径约定**：playwright-skill 保存的截图位于 `SCREENSHOT_DIR` 环境变量指定的目录。上传时只需传入文件名（无需路径），系统会自动从 `SCREENSHOT_DIR` 查找。
+**截图路径约定**：自动化技能（如 `playwright-skill`、`agent-browser-skill`）生成的截图应优先保存到 `SCREENSHOT_DIR` 环境变量指定的目录。上传时只需传入文件名（无需路径），系统会优先从 `SCREENSHOT_DIR` 查找；若未命中，会再回退到常见临时截图目录做兼容搜索。
 
 **单张上传**：`--file_path "case_11_step1.png"`
 **批量上传**：`--file_paths "step1.png,step2.png,step3.png"`（最多10张，逗号分隔）
@@ -79,6 +80,12 @@ python whart_tools.py --action get_projects
 
 # 获取项目1的模块
 python whart_tools.py --action get_modules --project_id 1
+
+# 新增用例模块
+python whart_tools.py --action add_module --project_id 1 --name "新功能模块"
+
+# 新增子用例模块
+python whart_tools.py --action add_module --project_id 1 --name "子功能模块" --parent_id 10
 
 # 获取用例列表
 python whart_tools.py --action get_testcases --project_id 1 --module_id 5

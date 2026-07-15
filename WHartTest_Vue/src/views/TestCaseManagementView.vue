@@ -3,6 +3,7 @@
     <!-- 始终显示模块管理面板 -->
     <div class="list-view-layout">
       <ModuleManagementPanel
+        v-show="activeView !== 'mindmap'"
         :current-project-id="currentProjectId"
         @module-selected="handleModuleSelected"
         @module-updated="handleModuleUpdated"
@@ -11,9 +12,11 @@
 
       <!-- 右侧内容区域 - 根据视图模式动态切换 -->
       <div class="right-content-area">
+
+
         <!-- 列表视图 - 使用 v-show 保持组件状态（筛选条件等） -->
         <TestCaseList
-          v-show="viewMode === 'list'"
+          v-show="viewMode === 'list' && activeView === 'list'"
           :current-project-id="currentProjectId"
           :selected-module-id="selectedModuleId"
           :module-tree="moduleTreeForForm"
@@ -26,6 +29,38 @@
           @module-filter-change="handleModuleSelected"
           @request-optimization="handleRequestOptimization"
           ref="testCaseListRef"
+        />
+
+        <!-- 思维导图视图 -->
+        <TestCaseMindmap
+          v-show="viewMode === 'list' && activeView === 'mindmap'"
+          :visible="viewMode === 'list' && activeView === 'mindmap'"
+          :current-project-id="currentProjectId"
+          :selected-module-id="selectedModuleId"
+          :modules="allModules"
+          :test-cases="mindmapTestCases"
+          :loading="mindmapLoading"
+          :project-name="currentProjectName"
+          @view-case="showViewTestCaseDetail"
+          @update-case-module="handleMindmapUpdateCaseModule"
+          @update-module-parent="handleMindmapUpdateModuleParent"
+          @rename-case="handleMindmapRenameCase"
+          @rename-module="handleMindmapRenameModule"
+          @create-module="handleMindmapCreateModule"
+          @create-case="handleMindmapCreateCase"
+          @create-step="handleMindmapCreateStep"
+          @update-step-desc="handleMindmapUpdateStepDesc"
+          @update-step-expected="handleMindmapUpdateStepExpected"
+          @delete-step="handleMindmapDeleteStep"
+          @delete-node="handleMindmapDeleteNode"
+          @delete-nodes="handleMindmapDeleteNodes"
+          @update-precondition="handleMindmapUpdatePrecondition"
+          @update-notes="handleMindmapUpdateNotes"
+          @update-case-level="handleMindmapUpdateCaseLevel"
+          @copy-case="handleMindmapCopyCase"
+          @copy-module="handleMindmapCopyModule"
+          @copy-step="handleMindmapCopyStep"
+          ref="testCaseMindmapRef"
         />
 
         <!-- 添加/编辑测试用例表单 -->
@@ -64,7 +99,7 @@
       :test-case-module-tree="moduleTreeForForm"
       @submit="handleGenerateCasesSubmit"
     />
-    
+
     <ExecuteTestCaseModal
       v-model:visible="isExecuteModalVisible"
       :test-case="pendingExecuteTestCase"
@@ -80,20 +115,26 @@
 </template>
 
 <script setup lang="ts">
-import { h, ref, computed, watch, onMounted } from 'vue';
+import { h, ref, computed, watch, onMounted, inject } from 'vue';
 import { useRouter } from 'vue-router';
 import { useProjectStore } from '@/store/projectStore';
 import { useAppI18n } from '@/composables/useAppI18n';
 import type { TestCase } from '@/services/testcaseService';
 import type { TestCaseModule } from '@/services/testcaseModuleService';
 import type { TreeNodeData } from '@arco-design/web-vue';
-import { getTestCaseModules } from '@/services/testcaseModuleService';
+import {
+  getTestCaseModules,
+  updateTestCaseModule,
+  createTestCaseModule,
+  deleteTestCaseModule
+} from '@/services/testcaseModuleService';
 import { Message, Notification } from '@arco-design/web-vue';
 
 import ModuleManagementPanel from '@/components/testcase/ModuleManagementPanel.vue';
 import TestCaseList from '@/components/testcase/TestCaseList.vue';
 import TestCaseForm from '@/components/testcase/TestCaseForm.vue';
 import TestCaseDetail from '@/components/testcase/TestCaseDetail.vue';
+import TestCaseMindmap from '@/components/testcase/TestCaseMindmap.vue';
 import GenerateCasesModal from '@/components/testcase/GenerateCasesModal.vue';
 import ExecuteTestCaseModal from '@/components/testcase/ExecuteTestCaseModal.vue';
 import OptimizationSuggestionModal from '@/components/testcase/OptimizationSuggestionModal.vue';
@@ -101,7 +142,13 @@ import {
   sendChatMessageStream
 } from '@/features/langgraph/services/chatService';
 import type { ChatRequest } from '@/features/langgraph/types/chat';
-import { updateTestCaseReviewStatus } from '@/services/testcaseService';
+import {
+  updateTestCaseReviewStatus,
+  getTestCaseList,
+  updateTestCase,
+  createTestCase,
+  deleteTestCase
+} from '@/services/testcaseService';
 
 // 测试类型提示词映射
 const TEST_TYPE_PROMPTS: Record<string, string> = {
@@ -200,6 +247,11 @@ const taskText = computed(() => (
 ));
 
 const viewMode = ref<'list' | 'add' | 'edit' | 'view'>('list');
+const activeView = inject('testCaseActiveView', ref<'list' | 'mindmap'>('list'));
+const mindmapTestCases = ref<TestCase[]>([]);
+const mindmapLoading = ref(false);
+const testCaseMindmapRef = ref<any>(null);
+const currentProjectName = computed(() => projectStore.currentProject?.name || '测试用例脑图');
 const selectedModuleId = ref<number | null>(null);
 const currentEditingTestCaseId = ref<number | null>(null);
 const currentViewingTestCaseId = ref<number | null>(null);
@@ -346,12 +398,12 @@ const handleNavigateTestCase = (testCaseId: number) => {
   currentEditingTestCaseId.value = testCaseId;
 };
 
-const showViewTestCaseDetail = (testCase: TestCase) => {
+const showViewTestCaseDetail = (testCaseOrId: TestCase | number) => {
   // 获取当前筛选后的用例ID列表用于导航
   const ids = testCaseListRef.value?.getTestCaseIds();
   testCaseIdsForNavigation.value = ids || [];
 
-  currentViewingTestCaseId.value = testCase.id;
+  currentViewingTestCaseId.value = typeof testCaseOrId === 'number' ? testCaseOrId : testCaseOrId.id;
   viewMode.value = 'view';
 };
 
@@ -583,7 +635,7 @@ const handleExecuteTestCase = (testCase: TestCase) => {
     Message.error(taskText.value.missingProjectId);
     return;
   }
-  
+
   // 保存待执行的用例并显示确认弹窗
   pendingExecuteTestCase.value = testCase;
   isExecuteModalVisible.value = true;
@@ -636,7 +688,7 @@ const handleExecuteConfirm = (options: { generatePlaywrightScript: boolean }) =>
     'exec-case',
     taskText.value.viewExecutionProgress
   );
-  
+
   pendingExecuteTestCase.value = null;
 };
 
@@ -712,6 +764,644 @@ ${data.suggestion || '请根据测试最佳实践进行全面优化'}
   pendingOptimizationTestCase.value = null;
 };
 
+// 思维导图用例数据获取
+const fetchTestCasesForMindmap = async (silent = false) => {
+  if (!currentProjectId.value) {
+    mindmapTestCases.value = [];
+    return;
+  }
+  if (!silent) {
+    mindmapLoading.value = true;
+  }
+  try {
+    const pageSize = 200;
+    let page = 1;
+    let total = 0;
+    const allCases: TestCase[] = [];
+
+    do {
+      const response = await getTestCaseList(currentProjectId.value, {
+        page,
+        pageSize,
+        module_id: selectedModuleId.value || undefined,
+        include_steps: true,
+      });
+
+      if (!response.success || !response.data) {
+        mindmapTestCases.value = [];
+        Message.error(response.error || '拉取脑图用例数据失败');
+        return;
+      }
+
+      allCases.push(...response.data);
+      total = response.total ?? allCases.length;
+      page += 1;
+    } while (allCases.length < total);
+
+    mindmapTestCases.value = allCases;
+  } catch (error) {
+    console.error('拉取脑图用例出错:', error);
+    mindmapTestCases.value = [];
+  } finally {
+    if (!silent) {
+      mindmapLoading.value = false;
+    }
+  }
+};
+
+// 拖拽用例到新模块
+const handleMindmapUpdateCaseModule = async (caseId: number, moduleId: number | null) => {
+  if (!currentProjectId.value) return;
+  try {
+    const response = await updateTestCase(currentProjectId.value, caseId, { module_id: moduleId });
+    if (response.success) {
+      Message.success('用例所属模块更新成功');
+      // 局部更新本地数据
+      const targetCase = mindmapTestCases.value.find(c => c.id === caseId);
+      if (targetCase) {
+        targetCase.module_id = moduleId || undefined;
+      }
+      // 同时刷新列表视图
+      testCaseListRef.value?.refreshTestCases();
+    } else {
+      Message.error(response.error || '更新用例模块失败');
+    }
+  } catch (error) {
+    Message.error('更新用例模块时发生错误');
+  }
+};
+
+// 双击脑图用例重命名
+const handleMindmapRenameCase = async (caseId: number, newName: string) => {
+  if (!currentProjectId.value) return;
+  try {
+    const response = await updateTestCase(currentProjectId.value, caseId, { name: newName });
+    if (response.success) {
+      Message.success('用例重命名成功');
+      const targetCase = mindmapTestCases.value.find(c => c.id === caseId);
+      if (targetCase) {
+        targetCase.name = newName;
+      }
+      testCaseListRef.value?.refreshTestCases();
+    } else {
+      Message.error(response.error || '用例重命名失败');
+    }
+  } catch (error) {
+    Message.error('用例重命名时发生错误');
+  }
+};
+
+// 双击脑图模块重命名
+const handleMindmapRenameModule = async (moduleId: number, newName: string) => {
+  if (!currentProjectId.value) return;
+  try {
+    const response = await updateTestCaseModule(currentProjectId.value, moduleId, { name: newName });
+    if (response.success) {
+      Message.success('模块重命名成功');
+      fetchAllModulesForForm();
+      fetchTestCasesForMindmap(true);
+    } else {
+      Message.error(response.error || '模块重命名失败');
+    }
+  } catch (error) {
+    Message.error('模块重命名时发生错误');
+  }
+};
+
+// 拖拽脑图模块更新其父级层级结构
+const handleMindmapUpdateModuleParent = async (moduleId: number, parentId: number | null) => {
+  if (!currentProjectId.value) return;
+  try {
+    const response = await updateTestCaseModule(currentProjectId.value, moduleId, { parent: parentId });
+    if (response.success) {
+      Message.success('模块层级结构更新成功');
+
+      const targetModule = allModules.value.find(module => module.id === moduleId);
+      const parentModule = parentId
+        ? allModules.value.find(module => module.id === parentId) || null
+        : null;
+
+      if (targetModule) {
+        targetModule.parent = parentId;
+        targetModule.parent_id = parentId;
+        targetModule.level = parentModule ? parentModule.level + 1 : 1;
+      }
+
+      moduleTreeForForm.value = buildModuleTree(allModules.value);
+    } else {
+      Message.error(response.error || '更新模块层级失败');
+    }
+  } catch (error) {
+    Message.error('更新模块层级时发生错误');
+  }
+};
+
+// 脑图新建子模块双向同步
+const handleMindmapCreateModule = async (parentModuleId: number | null, name: string) => {
+  if (!currentProjectId.value) return;
+  try {
+    const response = await createTestCaseModule(currentProjectId.value, {
+      name,
+      parent: parentModuleId
+    });
+    if (response.success && response.data) {
+      Message.success('子模块创建成功');
+      allModules.value = [...allModules.value, response.data];
+      moduleTreeForForm.value = buildModuleTree(allModules.value);
+    } else {
+      Message.error(response.error || '创建子模块失败');
+    }
+  } catch (error) {
+    Message.error('创建子模块时发生错误');
+  }
+};
+
+// 脑图新建用例双向同步
+const handleMindmapCreateCase = async (moduleId: number | null, name: string) => {
+  if (!currentProjectId.value) return;
+  try {
+    const response = await createTestCase(currentProjectId.value, {
+      name,
+      precondition: '',
+      level: 'P2',
+      test_type: 'functional',
+      module_id: moduleId || undefined,
+      steps: []
+    });
+    if (response.success && response.data) {
+      Message.success('测试用例创建成功');
+      mindmapTestCases.value = [...mindmapTestCases.value, response.data];
+    } else {
+      Message.error(response.error || '创建测试用例失败');
+    }
+  } catch (error) {
+    Message.error('创建测试用例时发生错误');
+  }
+};
+
+const handleMindmapCreateStep = async (
+  caseId: number,
+  step: { description: string; expectedResult: string }
+) => {
+  if (!currentProjectId.value) return;
+
+  const targetCase = mindmapTestCases.value.find(testCase => testCase.id === caseId);
+  if (!targetCase) {
+    Message.error('未找到目标测试用例，请刷新后重试');
+    return;
+  }
+
+  const currentSteps = [...(targetCase.steps || [])]
+    .sort((a, b) => (a.step_number || 0) - (b.step_number || 0))
+    .map((item, index) => ({
+      id: item.id,
+      step_number: index + 1,
+      description: item.description,
+      expected_result: item.expected_result,
+    }));
+
+  const nextSteps = [
+    ...currentSteps,
+    {
+      step_number: currentSteps.length + 1,
+      description: step.description,
+      expected_result: step.expectedResult,
+    },
+  ];
+
+  try {
+    const response = await updateTestCase(currentProjectId.value, caseId, {
+      steps: nextSteps,
+    });
+
+    if (response.success) {
+      Message.success('测试步骤创建成功');
+      await fetchTestCasesForMindmap(true);
+    } else {
+      Message.error(response.error || '创建测试步骤失败');
+    }
+  } catch (error) {
+    Message.error('创建测试步骤时发生错误');
+  }
+};
+
+const handleMindmapUpdateStepDesc = async (caseId: number, stepNumber: number, description: string) => {
+  if (!currentProjectId.value) return;
+
+  const targetCase = mindmapTestCases.value.find(testCase => testCase.id === caseId);
+  if (!targetCase) return;
+
+  const nextSteps = (targetCase.steps || []).map(step => {
+    if (step.step_number === stepNumber) {
+      return {
+        ...step,
+        description
+      };
+    }
+    return step;
+  });
+
+  try {
+    const response = await updateTestCase(currentProjectId.value, caseId, {
+      steps: nextSteps
+    });
+
+    if (response.success) {
+      Message.success('测试步骤描述已更新');
+      await fetchTestCasesForMindmap(true);
+    } else {
+      Message.error(response.error || '更新测试步骤失败');
+    }
+  } catch (error) {
+    Message.error('更新测试步骤时发生错误');
+  }
+};
+
+const handleMindmapUpdateStepExpected = async (caseId: number, stepNumber: number, expectedResult: string) => {
+  if (!currentProjectId.value) return;
+
+  const targetCase = mindmapTestCases.value.find(testCase => testCase.id === caseId);
+  if (!targetCase) return;
+
+  const nextSteps = (targetCase.steps || []).map(step => {
+    if (step.step_number === stepNumber) {
+      return {
+        ...step,
+        expected_result: expectedResult
+      };
+    }
+    return step;
+  });
+
+  try {
+    const response = await updateTestCase(currentProjectId.value, caseId, {
+      steps: nextSteps
+    });
+
+    if (response.success) {
+      Message.success(expectedResult ? '测试预期结果已更新' : '测试预期结果已清除');
+      await fetchTestCasesForMindmap(true);
+    } else {
+      Message.error(response.error || '更新预期结果失败');
+    }
+  } catch (error) {
+    Message.error('更新预期结果时发生错误');
+  }
+};
+
+const handleMindmapDeleteStep = async (caseId: number, stepNumber: number) => {
+  if (!currentProjectId.value) return;
+
+  const targetCase = mindmapTestCases.value.find(testCase => testCase.id === caseId);
+  if (!targetCase) return;
+
+  const filteredSteps = (targetCase.steps || []).filter(step => step.step_number !== stepNumber);
+  // 重新对步骤进行编号，保证顺序
+  const nextSteps = filteredSteps.map((step, index) => ({
+    ...step,
+    step_number: index + 1
+  }));
+
+  try {
+    const response = await updateTestCase(currentProjectId.value, caseId, {
+      steps: nextSteps
+    });
+
+    if (response.success) {
+      Message.success('测试步骤删除成功');
+      await fetchTestCasesForMindmap(true);
+    } else {
+      Message.error(response.error || '删除测试步骤失败');
+    }
+  } catch (error) {
+    Message.error('删除测试步骤时发生错误');
+  }
+};
+
+// 脑图删除节点（用例或模块）双向同步
+const handleMindmapDeleteNode = async (type: 'module' | 'case', rawId: number) => {
+  if (!currentProjectId.value) return;
+  try {
+    if (type === 'module') {
+      const response = await deleteTestCaseModule(currentProjectId.value, rawId);
+      if (response.success) {
+        Message.success('模块删除成功');
+        await Promise.all([
+          fetchAllModulesForForm(),
+          fetchTestCasesForMindmap(true)
+        ]);
+      } else {
+        Message.error(response.error || '删除模块失败');
+      }
+    } else if (type === 'case') {
+      const response = await deleteTestCase(currentProjectId.value, rawId);
+      if (response.success) {
+        Message.success('测试用例删除成功');
+        await fetchTestCasesForMindmap(true);
+        // 同时刷新列表视图以同步状态
+        testCaseListRef.value?.refreshTestCases();
+      } else {
+        Message.error(response.error || '删除测试用例失败');
+      }
+    }
+  } catch (error) {
+    Message.error('删除节点时发生错误');
+  }
+};
+
+// 脑图删除节点（多个）批量同步
+const handleMindmapDeleteNodes = async (items: { type: string; rawId: number; extraId?: number }[]) => {
+  if (!currentProjectId.value || items.length === 0) return;
+  try {
+    let hasModuleDeleted = false;
+    let hasCaseDeleted = false;
+    let hasCaseUpdated = false;
+
+    // 采用同步循环执行，以保证数据操作的顺序并避免并发事务冲突
+    for (const item of items) {
+      const { type, rawId, extraId } = item;
+      if (type === 'module') {
+        const response = await deleteTestCaseModule(currentProjectId.value, rawId);
+        if (response.success) hasModuleDeleted = true;
+      } else if (type === 'case') {
+        const response = await deleteTestCase(currentProjectId.value, rawId);
+        if (response.success) hasCaseDeleted = true;
+      } else if (type === 'precondition') {
+        const response = await updateTestCase(currentProjectId.value, rawId, { precondition: '' });
+        if (response.success) hasCaseUpdated = true;
+      } else if (type === 'notes') {
+        const response = await updateTestCase(currentProjectId.value, rawId, { notes: '' });
+        if (response.success) hasCaseUpdated = true;
+      } else if (type === 'step') {
+        const stepNum = extraId || 1;
+        const targetCase = mindmapTestCases.value.find(c => c.id === rawId);
+        if (targetCase) {
+          const nextSteps = (targetCase.steps || [])
+            .filter(s => s.step_number !== stepNum)
+            .map((item, index) => ({
+              ...item,
+              step_number: index + 1
+            }));
+          const response = await updateTestCase(currentProjectId.value, rawId, { steps: nextSteps });
+          if (response.success) hasCaseUpdated = true;
+        }
+      } else if (type === 'expected') {
+        const stepNum = extraId || 1;
+        const targetCase = mindmapTestCases.value.find(c => c.id === rawId);
+        if (targetCase) {
+          const nextSteps = (targetCase.steps || []).map(s => {
+            if (s.step_number === stepNum) {
+              return { ...s, expected_result: '' };
+            }
+            return s;
+          });
+          const response = await updateTestCase(currentProjectId.value, rawId, { steps: nextSteps });
+          if (response.success) hasCaseUpdated = true;
+        }
+      }
+    }
+
+    Message.success('批量删除节点成功');
+
+    // 批量重载脑图与列表，仅刷新一次
+    const promises: Promise<any>[] = [];
+    if (hasModuleDeleted) {
+      promises.push(fetchAllModulesForForm());
+    }
+    promises.push(fetchTestCasesForMindmap(true));
+    if (hasCaseDeleted || hasCaseUpdated) {
+      testCaseListRef.value?.refreshTestCases();
+    }
+    await Promise.all(promises);
+  } catch (error) {
+    Message.error('批量删除时发生错误');
+  }
+};
+
+const handleMindmapUpdatePrecondition = async (caseId: number, precondition: string) => {
+  if (!currentProjectId.value) return;
+  try {
+    const response = await updateTestCase(currentProjectId.value, caseId, { precondition });
+    if (response.success) {
+      Message.success(precondition ? '前置条件已更新' : '前置条件已清除');
+      await fetchTestCasesForMindmap(true);
+    } else {
+      Message.error(response.error || '更新前置条件失败');
+    }
+  } catch (error) {
+    Message.error('更新前置条件时发生错误');
+  }
+};
+
+const handleMindmapUpdateNotes = async (caseId: number, notes: string) => {
+  if (!currentProjectId.value) return;
+  try {
+    const response = await updateTestCase(currentProjectId.value, caseId, { notes });
+    if (response.success) {
+      Message.success(notes ? '备注已更新' : '备注已清除');
+      await fetchTestCasesForMindmap(true);
+    } else {
+      Message.error(response.error || '更新备注失败');
+    }
+  } catch (error) {
+    Message.error('更新备注时发生错误');
+  }
+};
+
+const handleMindmapUpdateCaseLevel = async (caseId: number, level: string) => {
+  if (!currentProjectId.value) return;
+  try {
+    const response = await updateTestCase(currentProjectId.value, caseId, { level });
+    if (response.success) {
+      Message.success('用例优先级更新成功');
+      await fetchTestCasesForMindmap(true);
+    } else {
+      Message.error(response.error || '更新用例优先级失败');
+    }
+  } catch (error) {
+    Message.error('更新用例优先级时发生错误');
+  }
+};
+
+const handleMindmapCopyCase = async (caseId: number, targetModuleId: number | null) => {
+  if (!currentProjectId.value) return;
+  const sourceCase = mindmapTestCases.value.find(c => c.id === caseId);
+  if (!sourceCase) {
+    Message.error('找不到要复制的源测试用例');
+    return;
+  }
+  try {
+    const response = await createTestCase(currentProjectId.value, {
+      name: `${sourceCase.name} - 副本`,
+      precondition: sourceCase.precondition || '',
+      level: sourceCase.level || 'P2',
+      test_type: sourceCase.test_type || 'functional',
+      module_id: targetModuleId || undefined,
+      notes: sourceCase.notes || '',
+      steps: (sourceCase.steps || []).map(s => ({
+        step_number: s.step_number,
+        description: s.description,
+        expected_result: s.expected_result
+      }))
+    });
+    if (response.success && response.data) {
+      Message.success('测试用例复制成功');
+      await fetchTestCasesForMindmap(true);
+      // 同时刷新列表视图以同步状态
+      testCaseListRef.value?.refreshTestCases();
+    } else {
+      Message.error(response.error || '复制测试用例失败');
+    }
+  } catch (error) {
+    Message.error('复制测试用例时发生错误');
+  }
+};
+
+const handleMindmapCopyStep = async (sourceCaseId: number, stepNumber: number, targetCaseId: number) => {
+  if (!currentProjectId.value) return;
+  const sourceCase = mindmapTestCases.value.find(c => c.id === sourceCaseId);
+  const targetCase = mindmapTestCases.value.find(c => c.id === targetCaseId);
+  if (!sourceCase || !targetCase) {
+    Message.error('找不到源用例或目标用例，复制步骤失败');
+    return;
+  }
+  const sourceStep = (sourceCase.steps || []).find(s => s.step_number === stepNumber);
+  if (!sourceStep) {
+    Message.error('找不到要复制的测试步骤');
+    return;
+  }
+
+  // 复制步骤到目标用例，并追加到最后
+  const currentSteps = [...(targetCase.steps || [])]
+    .sort((a, b) => (a.step_number || 0) - (b.step_number || 0))
+    .map((item, index) => ({
+      id: item.id,
+      step_number: index + 1,
+      description: item.description,
+      expected_result: item.expected_result,
+    }));
+
+  const nextSteps = [
+    ...currentSteps,
+    {
+      step_number: currentSteps.length + 1,
+      description: sourceStep.description,
+      expected_result: sourceStep.expected_result
+    }
+  ];
+
+  try {
+    const response = await updateTestCase(currentProjectId.value, targetCaseId, {
+      steps: nextSteps
+    });
+    if (response.success) {
+      Message.success('测试步骤复制成功');
+      await fetchTestCasesForMindmap(true);
+    } else {
+      Message.error(response.error || '复制测试步骤失败');
+    }
+  } catch (error) {
+    Message.error('复制测试步骤时发生错误');
+  }
+};
+
+const handleMindmapCopyModule = async (moduleId: number, targetParentId: number | null) => {
+  if (!currentProjectId.value) return;
+
+  // 递归复制模块
+  const copyModuleRecursive = async (sourceModuleId: number, parentId: number | null): Promise<number | null> => {
+    if (!currentProjectId.value) return null;
+    const sourceMod = allModules.value.find(m => m.id === sourceModuleId);
+    if (!sourceMod) return null;
+
+    // 1. 创建模块副本 (如果是顶层节点，增加 "- 副本" 后缀，如果是其下的子模块，则保持原名)
+    const isTopNode = sourceModuleId === moduleId;
+    const newName = isTopNode ? `${sourceMod.name} - 副本` : sourceMod.name;
+
+    const modResponse = await createTestCaseModule(currentProjectId.value, {
+      name: newName,
+      parent: parentId
+    });
+
+    if (!modResponse.success || !modResponse.data) {
+      throw new Error(modResponse.error || `创建模块副本失败: ${sourceMod.name}`);
+    }
+
+    const newModuleId = modResponse.data.id;
+
+    // 2. 复制当前模块下的所有测试用例
+    const casesToCopy = mindmapTestCases.value.filter(c => c.module_id === sourceModuleId);
+    for (const tc of casesToCopy) {
+      const caseResponse = await createTestCase(currentProjectId.value, {
+        name: tc.name,
+        precondition: tc.precondition || '',
+        level: tc.level || 'P2',
+        test_type: tc.test_type || 'functional',
+        module_id: newModuleId,
+        notes: tc.notes || '',
+        steps: (tc.steps || []).map(s => ({
+          step_number: s.step_number,
+          description: s.description,
+          expected_result: s.expected_result
+        }))
+      });
+      if (!caseResponse.success) {
+        console.error(`复制用例失败: ${tc.name}, 错误: ${caseResponse.error}`);
+      }
+    }
+
+    // 3. 递归复制所有子模块
+    const subModules = allModules.value.filter(m => m.parent === sourceModuleId);
+    for (const sub of subModules) {
+      await copyModuleRecursive(sub.id, newModuleId);
+    }
+
+    return newModuleId;
+  };
+
+  try {
+    mindmapLoading.value = true;
+    await copyModuleRecursive(moduleId, targetParentId);
+    Message.success('模块及子项复制成功');
+  } catch (error: any) {
+    Message.error(error?.message || '复制模块时发生错误');
+  } finally {
+    mindmapLoading.value = false;
+    await Promise.all([
+      fetchAllModulesForForm(),
+      fetchTestCasesForMindmap(true)
+    ]);
+    // 同时刷新列表视图以同步状态
+    testCaseListRef.value?.refreshTestCases();
+  }
+};
+
+// 监听项目、模块或脑图视图激活状态，自动拉取用例数据
+watch(
+  () => [currentProjectId.value, selectedModuleId.value, activeView.value],
+  ([projId, moduleId, view]) => {
+    if (view === 'mindmap' && projId) {
+      fetchTestCasesForMindmap();
+    }
+  }
+);
+
+watch(
+  () => activeView.value,
+  (newView, oldView) => {
+    if (
+      oldView === 'mindmap' &&
+      newView === 'list' &&
+      viewMode.value === 'list' &&
+      currentProjectId.value
+    ) {
+      testCaseListRef.value?.refreshTestCases();
+      modulePanelRef.value?.refreshModules();
+      fetchAllModulesForForm();
+    }
+  }
+);
+
 watch(currentProjectId, (newVal) => {
   selectedModuleId.value = null; // 项目切换时清空已选模块
   // 列表和模块面板会各自 watch projectId 并刷新
@@ -777,4 +1467,6 @@ onMounted(() => {
   border-radius: 0 !important;
   /* 不要用 !important 覆盖 overflow 和 padding，让子组件自行控制滚动 */
 }
+
+
 </style>

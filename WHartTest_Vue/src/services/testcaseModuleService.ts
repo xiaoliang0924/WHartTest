@@ -38,6 +38,7 @@ export interface TestCaseModule {
   children?: TestCaseModule[];
   key?: number | string; // for a-tree
   title?: string; // for a-tree
+  order?: number;
 }
 
 export interface CreateTestCaseModuleRequest {
@@ -271,7 +272,7 @@ export const updateTestCaseModule = async (
 
   try {
     const basePath = getApiBasePath(projectId);
-    const response = await axios.put<ApiResponse<TestCaseModule>>(`${basePath}${moduleId}/`, data, {
+    const response = await axios.patch<ApiResponse<TestCaseModule>>(`${basePath}${moduleId}/`, data, {
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
@@ -349,5 +350,56 @@ export const deleteTestCaseModule = async (
     }
   } catch (error: any) {
     return handleError(error, '删除模块失败');
+  }
+};
+
+// 移动模块 (拖拽排序)
+export const moveTestCaseModule = async (
+  projectId: string | number | undefined | null,
+  moduleId: number,
+  data: { target_id: number | null; drop_position: number }
+): Promise<APIResponse<TestCaseModule>> => {
+  if (!projectId) return { success: false, error: '项目ID不能为空' };
+
+  const authStore = useAuthStore();
+  const accessToken = authStore.getAccessToken;
+
+  if (!accessToken) {
+    return {
+      success: false,
+      error: '未登录或会话已过期',
+    };
+  }
+
+  try {
+    const basePath = getApiBasePath(projectId);
+    const response = await axios.post<ApiResponse<TestCaseModule>>(
+      `${basePath}${moduleId}/move/`,
+      data,
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-CSRFTOKEN': CSRF_TOKEN,
+        },
+      }
+    );
+
+    if (response.data.status === 'success' && response.data.data) {
+      return {
+        success: true,
+        data: response.data.data,
+        statusCode: response.data.code,
+      };
+    } else {
+      return {
+        success: false,
+        error: response.data.message || '移动模块失败',
+        statusCode: response.data.code,
+      };
+    }
+  } catch (error: any) {
+    return handleError(error, '移动模块失败');
   }
 };

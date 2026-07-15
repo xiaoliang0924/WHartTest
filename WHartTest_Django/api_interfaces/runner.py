@@ -1,4 +1,5 @@
 from typing import Dict, Optional
+import copy
 import logging
 import json
 import types
@@ -8,6 +9,7 @@ from httprunner.models import TestCaseSummary
 from httprunner.parser import Parser
 
 from api_functions.models import ApiCustomFunction
+from .logging_utils import new_trace_id, summarize_for_log
 from .payloads import (
     flatten_key_value_pairs,
     normalize_request_body,
@@ -82,6 +84,10 @@ class InterfaceRunner(HttpRunner):
         self.interface_data = interface_data
         self.db_engine = None
         self.functions = {}
+        self.trace_id = self.interface_data.get('trace_id') or new_trace_id('ifc')
+        self.interface_data['trace_id'] = self.trace_id
+        self.request_body_diagnostic = {}
+        self.prepared_request_snapshot = {}
 
         try:
             self.config = Config(self.interface_data.get('name', 'Interface Request'))
@@ -111,8 +117,13 @@ class InterfaceRunner(HttpRunner):
                     logger.error(f"Failed to load custom functions: {str(e)}")
 
             logger.info(
-                f"Interface config: base_url={self.base_url}, "
-                f"verify={self.verify}, variables={self.variables}"
+                "Interface config initialized: trace_id=%s base_url=%s verify=%s "
+                "variables_summary=%s body_source=%s",
+                self.trace_id,
+                self.base_url,
+                self.verify,
+                summarize_for_log(self.variables),
+                self.interface_data.get('body_source', 'unknown'),
             )
         except Exception as e:
             logger.error(f"Interface config initialization failed: {str(e)}")
@@ -144,6 +155,12 @@ class InterfaceRunner(HttpRunner):
 
         if not url.startswith(('http://', 'https://')):
             url = f"{self.base_url.rstrip('/')}/{url.lstrip('/')}"
+        self.prepared_request_snapshot = {
+            'method': method.upper(),
+            'url': url,
+            'headers': {},
+            'body': None,
+        }
 
         # Setup hooks
         if self.interface_data.get('setup_hooks'):
@@ -182,20 +199,105 @@ class InterfaceRunner(HttpRunner):
 
         if headers_dict:
             step_obj = step_obj.with_headers(**headers_dict)
+        self.prepared_request_snapshot['headers'] = copy.deepcopy(headers_dict)
 
         # Request body
+        raw_body = self.interface_data.get('body')
+        self.request_body_diagnostic = {
+            'body_source': self.interface_data.get('body_source', 'unknown'),
+            'body_present': 'body' in self.interface_data,
+            'raw_summary': summarize_for_log(raw_body),
+            'prepared': False,
+            'skipped_reason': None,
+        }
+        logger.info(
+            "Interface request body source: trace_id=%s name=%s project_id=%s "
+            "method=%s url=%s body_source=%s body_present=%s body_summary=%s",
+            self.trace_id,
+            self.interface_data.get('name', 'Interface Request'),
+            self.interface_data.get('project_id'),
+            method.upper(),
+            url,
+            self.request_body_diagnostic['body_source'],
+            'body' in self.interface_data,
+            summarize_for_log(raw_body),
+        )
         if self.interface_data.get('body'):
-            normalized_body = normalize_request_body(self.interface_data['body'])
-            body = prepare_request_body_for_runner(normalized_body)
+            try:
+                normalized_body = normalize_request_body(self.interface_data['body'])
+                body = prepare_request_body_for_runner(normalized_body)
+            except Exception:
+                logger.exception(
+                    "Interface request body normalization failed: trace_id=%s name=%s "
+                    "project_id=%s body_source=%s body_summary=%s",
+                    self.trace_id,
+                    self.interface_data.get('name', 'Interface Request'),
+                    self.interface_data.get('project_id'),
+                    self.request_body_diagnostic['body_source'],
+                    summarize_for_log(raw_body),
+                )
+                raise
+
             if isinstance(body, str) and body.startswith('$'):
                 var_name = body[1:]
                 if var_name in self.variables:
                     body = self.variables[var_name]
             if body is not None:
+                target = (
+                    'data'
+                    if normalized_body['type'] in {'form-data', 'x-www-form-urlencoded', 'binary'}
+                    else 'json'
+                )
+                logger.info(
+                    "Interface request body prepared: trace_id=%s name=%s project_id=%s "
+                    "body_source=%s body_type=%s target=%s prepared_summary=%s",
+                    self.trace_id,
+                    self.interface_data.get('name', 'Interface Request'),
+                    self.interface_data.get('project_id'),
+                    self.request_body_diagnostic['body_source'],
+                    normalized_body['type'],
+                    target,
+                    summarize_for_log(body),
+                )
+                self.request_body_diagnostic.update({
+                    'prepared': True,
+                    'body_type': normalized_body['type'],
+                    'target': target,
+                    'prepared_summary': summarize_for_log(body),
+                })
+                self.prepared_request_snapshot['body'] = copy.deepcopy(body)
                 if normalized_body['type'] in {'form-data', 'x-www-form-urlencoded', 'binary'}:
                     step_obj = step_obj.with_data(body)
                 else:
                     step_obj = step_obj.with_json(body)
+            else:
+                logger.info(
+                    "Interface request body normalized to empty payload: trace_id=%s name=%s "
+                    "project_id=%s body_source=%s body_type=%s",
+                    self.trace_id,
+                    self.interface_data.get('name', 'Interface Request'),
+                    self.interface_data.get('project_id'),
+                    self.request_body_diagnostic['body_source'],
+                    normalized_body['type'],
+                )
+                self.request_body_diagnostic.update({
+                    'body_type': normalized_body['type'],
+                    'skipped_reason': 'normalized_body_is_none',
+                })
+        else:
+            self.request_body_diagnostic['skipped_reason'] = (
+                'missing_or_falsey_body_by_current_runner_condition'
+            )
+            logger.info(
+                "Interface request body skipped by current runner condition: trace_id=%s "
+                "name=%s project_id=%s body_source=%s skipped_reason=%s body_summary=%s",
+                self.trace_id,
+                self.interface_data.get('name', 'Interface Request'),
+                self.interface_data.get('project_id'),
+                self.request_body_diagnostic['body_source'],
+                self.request_body_diagnostic['skipped_reason'],
+                summarize_for_log(raw_body),
+            )
 
         # Extract
         if self.interface_data.get('extract'):
@@ -336,7 +438,12 @@ class InterfaceRunner(HttpRunner):
 
     def run_interface(self, environment: Optional[Dict] = None) -> "InterfaceRunner":
         """Run the interface request."""
-        logger.info(f"Executing interface [{self.interface_data.get('name', 'Interface Request')}]")
+        logger.info(
+            "Executing interface: trace_id=%s name=%s type=%s",
+            self.trace_id,
+            self.interface_data.get('name', 'Interface Request'),
+            self.interface_data.get('type', 'http'),
+        )
 
         interface_type = self.interface_data.get('type', 'http')
 
@@ -344,7 +451,8 @@ class InterfaceRunner(HttpRunner):
         try:
             if environment and isinstance(environment, dict) and environment.get('variables'):
                 self.variables.update(environment['variables'])
-                self.config.variables = self.variables
+            if self.variables and isinstance(self.variables, dict):
+                self.config.variables(**self.variables)
         except Exception as e:
             logger.error(f"Failed to update environment variables: {str(e)}")
 
@@ -369,10 +477,40 @@ class InterfaceRunner(HttpRunner):
         try:
             self.test_start()
         except Exception as e:
-            logger.error(f"Interface execution failed: {str(e)}")
+            logger.error(
+                "Interface execution failed: trace_id=%s error=%s",
+                self.trace_id,
+                str(e),
+            )
             raise
 
         return self
+
+    def _apply_prepared_request_fallback(self, request_data: Dict, status_code) -> bool:
+        """Recover display request data when httprunner safe mode drops it."""
+        if status_code != 0:
+            return False
+
+        snapshot = self.prepared_request_snapshot or {}
+        fallback_used = False
+
+        if not request_data.get('method') and snapshot.get('method'):
+            request_data['method'] = snapshot['method']
+            fallback_used = True
+
+        if not request_data.get('url') and snapshot.get('url'):
+            request_data['url'] = snapshot['url']
+            fallback_used = True
+
+        if not request_data.get('headers') and snapshot.get('headers'):
+            request_data['headers'] = copy.deepcopy(snapshot['headers'])
+            fallback_used = True
+
+        if request_data.get('body') is None and snapshot.get('body') is not None:
+            request_data['body'] = copy.deepcopy(snapshot['body'])
+            fallback_used = True
+
+        return fallback_used
 
     def get_summary(self) -> TestCaseSummary:
         """Get execution summary."""
@@ -424,27 +562,44 @@ class InterfaceRunner(HttpRunner):
                 if hasattr(req_resp, 'response') else None
             )  # type: ignore
             elapsed = stat.response_time_ms if stat else 0  # type: ignore
+            response_error = (
+                getattr(req_resp.response, 'error', None)
+                if hasattr(req_resp, 'response') else None
+            )
+            response_error_type = (
+                getattr(req_resp.response, 'error_type', None)
+                if hasattr(req_resp, 'response') else None
+            )
+            is_transport_error = bool(
+                getattr(req_resp.response, 'is_transport_error', False)
+                if hasattr(req_resp, 'response') else False
+            )
+            if is_transport_error:
+                result['success'] = False
+            request_data = {
+                "method": (
+                    req_resp.request.method
+                    if hasattr(req_resp, 'request') else None
+                ),  # type: ignore
+                "url": (
+                    req_resp.request.url
+                    if hasattr(req_resp, 'request') else None
+                ),  # type: ignore
+                "headers": (
+                    req_resp.request.headers
+                    if hasattr(req_resp, 'request') else {}
+                ),  # type: ignore
+                "body": (
+                    req_resp.request.body
+                    if hasattr(req_resp, 'request') else None
+                ),  # type: ignore
+            }
+            recorded_request_body = request_data['body']
+            fallback_used = self._apply_prepared_request_fallback(request_data, status_code)
             result.update({
                 "status_code": status_code,
                 "elapsed": elapsed,
-                "request": {
-                    "method": (
-                        req_resp.request.method
-                        if hasattr(req_resp, 'request') else None
-                    ),  # type: ignore
-                    "url": (
-                        req_resp.request.url
-                        if hasattr(req_resp, 'request') else None
-                    ),  # type: ignore
-                    "headers": (
-                        req_resp.request.headers
-                        if hasattr(req_resp, 'request') else {}
-                    ),  # type: ignore
-                    "body": (
-                        req_resp.request.body
-                        if hasattr(req_resp, 'request') else None
-                    ),  # type: ignore
-                },
+                "request": request_data,
                 "response": {
                     "status_code": status_code,
                     "headers": (
@@ -456,15 +611,76 @@ class InterfaceRunner(HttpRunner):
                         if hasattr(req_resp, 'response') else None
                     ),  # type: ignore
                     "content_size": stat.content_size if stat else 0,  # type: ignore
+                    "error": response_error,
+                    "error_type": response_error_type,
+                    "is_transport_error": is_transport_error,
                 },
             })
+            logger.info(
+                "Interface response assembled: trace_id=%s status_code=%s success=%s "
+                "recorded_request_body_summary=%s display_request_body_summary=%s "
+                "request_display_fallback_used=%s is_transport_error=%s "
+                "response_error_type=%s response_error_summary=%s body_diagnostic=%s",
+                self.trace_id,
+                status_code,
+                result['success'],
+                summarize_for_log(recorded_request_body),
+                summarize_for_log(result['request']['body']),
+                fallback_used,
+                is_transport_error,
+                response_error_type,
+                summarize_for_log(response_error),
+                self.request_body_diagnostic,
+            )
+            if status_code == 0 and recorded_request_body is None:
+                if fallback_used:
+                    logger.warning(
+                        "Interface recorded request body recovered from prepared request: "
+                        "trace_id=%s status_code=%s reason=request_failed_before_response "
+                        "note=httprunner_safe_mode_rebuilds_request_record_without_json_or_data "
+                        "display_request_body_summary=%s body_diagnostic=%s",
+                        self.trace_id,
+                        status_code,
+                        summarize_for_log(result['request']['body']),
+                        self.request_body_diagnostic,
+                    )
+                else:
+                    logger.warning(
+                        "Interface recorded request body is empty after transport failure: "
+                        "trace_id=%s status_code=%s reason=request_failed_before_response "
+                        "note=httprunner_safe_mode_rebuilds_request_record_without_json_or_data "
+                        "body_diagnostic=%s",
+                        self.trace_id,
+                        status_code,
+                        self.request_body_diagnostic,
+                    )
         else:
+            request_data = {
+                "method": self.prepared_request_snapshot.get('method'),
+                "url": self.prepared_request_snapshot.get('url'),
+                "headers": copy.deepcopy(self.prepared_request_snapshot.get('headers', {})),
+                "body": copy.deepcopy(self.prepared_request_snapshot.get('body')),
+            }
             result.update({
                 "status_code": None,
                 "elapsed": 0,
-                "request": {"method": None, "url": None, "headers": {}, "body": None},
-                "response": {"status_code": None, "headers": {}, "content": None, "content_size": 0},
+                "request": request_data,
+                "response": {
+                    "status_code": None,
+                    "headers": {},
+                    "content": None,
+                    "content_size": 0,
+                    "error": "No request/response record was produced.",
+                    "error_type": "MissingReqRespRecord",
+                    "is_transport_error": True,
+                },
             })
+            logger.warning(
+                "Interface response missing request/response record: trace_id=%s "
+                "body_diagnostic=%s",
+                self.trace_id,
+                self.request_body_diagnostic,
+            )
 
         return result
 

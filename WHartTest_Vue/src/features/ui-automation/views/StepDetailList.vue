@@ -52,6 +52,12 @@
             </div>
             <div class="step-content">
               <span v-if="element.element_name" class="info-item">
+                <a-tag v-if="element.module_name" size="small" color="arcoblue" style="margin-right: 4px;">
+                  {{ element.module_name }}
+                </a-tag>
+                <a-tag v-if="element.page_name" size="small" color="cyan" style="margin-right: 4px;">
+                  {{ element.page_name }}
+                </a-tag>
                 <span class="info-label">{{ stepText.elementLabel }}</span>
                 <span class="element-name">{{ element.element_name }}</span>
               </span>
@@ -103,8 +109,47 @@
 
         <!-- 元素操作 -->
         <template v-if="formData.step_type === 0">
+          <a-form-item :label="stepText.selectModule">
+            <a-select
+              v-model="selectedElementModule"
+              :placeholder="stepText.pleaseSelectModule"
+              allow-search
+              allow-clear
+              @popup-visible-change="onModuleDropdownVisibleChange"
+              @change="onElementModuleChange"
+            >
+              <a-option
+                v-for="module in flatModuleOptions"
+                :key="module.id"
+                :value="module.id"
+                :label="getModuleOptionLabel(module)"
+              >
+                {{ getModuleOptionLabel(module) }}
+              </a-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item :label="stepText.selectPage">
+            <a-select
+              v-model="selectedElementPage"
+              :placeholder="stepText.pleaseSelectPage"
+              allow-search
+              allow-clear
+              :disabled="!selectedElementModule"
+              @change="onElementPageChange"
+            >
+              <a-option v-for="page in pageOptions" :key="page.id" :value="page.id">
+                {{ page.name }}
+              </a-option>
+            </a-select>
+          </a-form-item>
           <a-form-item field="element" :label="stepText.selectElement">
-            <a-select v-model="formData.element" :placeholder="stepText.pleaseSelectElement" allow-search allow-clear>
+            <a-select
+              v-model="formData.element"
+              :placeholder="stepText.pleaseSelectElement"
+              allow-search
+              allow-clear
+              :disabled="!selectedElementPage"
+            >
               <a-option v-for="el in elementOptions" :key="el.id" :value="el.id">
                 {{ el.name }}
               </a-option>
@@ -112,20 +157,36 @@
           </a-form-item>
           <a-form-item field="ope_key" :label="stepText.actionMethod">
             <a-select v-model="formData.ope_key" allow-search @change="onOpeKeyChange">
-              <a-optgroup :label="stepText.mouseActions">
+              <a-optgroup :label="stepText.groupMouse">
                 <a-option value="click">{{ stepText.clickOption }}</a-option>
                 <a-option value="dblclick">{{ stepText.dblclickOption }}</a-option>
                 <a-option value="hover">{{ stepText.hoverOption }}</a-option>
+                <a-option value="focus">{{ stepText.focusOption }}</a-option>
               </a-optgroup>
-              <a-optgroup :label="stepText.inputActions">
+              <a-optgroup :label="stepText.groupKeyboard">
                 <a-option value="fill">{{ stepText.fillOption }}</a-option>
                 <a-option value="type">{{ stepText.typeOption }}</a-option>
                 <a-option value="clear">{{ stepText.clearOption }}</a-option>
+                <a-option value="press">{{ stepText.pressOption }}</a-option>
               </a-optgroup>
-              <a-optgroup :label="stepText.otherActions">
-                <a-option value="wait">{{ stepText.waitOption }}</a-option>
-                <a-option value="screenshot">{{ stepText.screenshotOption }}</a-option>
+              <a-optgroup :label="stepText.groupSelect">
                 <a-option value="select_option">{{ stepText.selectOption }}</a-option>
+                <a-option value="check">{{ stepText.checkOption }}</a-option>
+                <a-option value="uncheck">{{ stepText.uncheckOption }}</a-option>
+              </a-optgroup>
+              <a-optgroup :label="stepText.groupFile">
+                <a-option value="upload">{{ stepText.uploadOption }}</a-option>
+              </a-optgroup>
+              <a-optgroup :label="stepText.groupPage">
+                <a-option value="goto">{{ stepText.gotoOption }}</a-option>
+                <a-option value="reload">{{ stepText.reloadOption }}</a-option>
+                <a-option value="go_back">{{ stepText.goBackOption }}</a-option>
+                <a-option value="go_forward">{{ stepText.goForwardOption }}</a-option>
+                <a-option value="switch_tab">{{ stepText.switchTabOption }}</a-option>
+                <a-option value="wait">{{ stepText.waitOption }}</a-option>
+                <a-option value="wait_load">{{ stepText.waitLoadOption }}</a-option>
+                <a-option value="wait_network">{{ stepText.waitNetworkOption }}</a-option>
+                <a-option value="screenshot">{{ stepText.screenshotOption }}</a-option>
               </a-optgroup>
             </a-select>
           </a-form-item>
@@ -162,20 +223,71 @@
 
         <!-- 断言操作 -->
         <template v-else-if="formData.step_type === 1">
+          <a-form-item :label="stepText.selectModule">
+            <a-select
+              v-model="selectedElementModule"
+              :placeholder="stepText.pleaseSelectModule"
+              allow-search
+              allow-clear
+              @popup-visible-change="onModuleDropdownVisibleChange"
+              @change="onElementModuleChange"
+            >
+              <a-option
+                v-for="module in flatModuleOptions"
+                :key="module.id"
+                :value="module.id"
+                :label="getModuleOptionLabel(module)"
+              >
+                {{ getModuleOptionLabel(module) }}
+              </a-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item :label="stepText.selectPage">
+            <a-select
+              v-model="selectedElementPage"
+              :placeholder="stepText.pleaseSelectPage"
+              allow-search
+              allow-clear
+              :disabled="!selectedElementModule"
+              @change="onElementPageChange"
+            >
+              <a-option v-for="page in pageOptions" :key="page.id" :value="page.id">
+                {{ page.name }}
+              </a-option>
+            </a-select>
+          </a-form-item>
           <a-form-item field="element" :label="stepText.assertElement">
-            <a-select v-model="formData.element" :placeholder="stepText.pleaseSelectElement" allow-search allow-clear>
+            <a-select
+              v-model="formData.element"
+              :placeholder="stepText.pleaseSelectElement"
+              allow-search
+              allow-clear
+              :disabled="!selectedElementPage"
+            >
               <a-option v-for="el in elementOptions" :key="el.id" :value="el.id">
                 {{ el.name }}
               </a-option>
             </a-select>
           </a-form-item>
           <a-form-item field="ope_key" :label="stepText.assertMethod">
-            <a-select v-model="formData.ope_key" @change="onOpeKeyChange">
-              <a-option value="assert_visible">{{ stepText.assertVisible }}</a-option>
-              <a-option value="assert_hidden">{{ stepText.assertHidden }}</a-option>
-              <a-option value="assert_text">{{ stepText.assertText }}</a-option>
-              <a-option value="assert_value">{{ stepText.assertValue }}</a-option>
-              <a-option value="assert_count">{{ stepText.assertCount }}</a-option>
+            <a-select v-model="formData.ope_key" allow-search @change="onOpeKeyChange">
+              <a-optgroup :label="stepText.groupAssertElement">
+                <a-option value="assert_visible">{{ stepText.assertVisible }}</a-option>
+                <a-option value="assert_hidden">{{ stepText.assertHidden }}</a-option>
+                <a-option value="assert_enabled">{{ stepText.assertEnabled }}</a-option>
+                <a-option value="assert_disabled">{{ stepText.assertDisabled }}</a-option>
+                <a-option value="assert_checked">{{ stepText.assertChecked }}</a-option>
+              </a-optgroup>
+              <a-optgroup :label="stepText.groupAssertContent">
+                <a-option value="assert_text">{{ stepText.assertText }}</a-option>
+                <a-option value="assert_contain_text">{{ stepText.assertContainText }}</a-option>
+                <a-option value="assert_value">{{ stepText.assertValue }}</a-option>
+                <a-option value="assert_count">{{ stepText.assertCount }}</a-option>
+              </a-optgroup>
+              <a-optgroup :label="stepText.groupAssertPage">
+                <a-option value="assert_url">{{ stepText.assertUrl }}</a-option>
+                <a-option value="assert_title">{{ stepText.assertTitle }}</a-option>
+              </a-optgroup>
             </a-select>
           </a-form-item>
           <!-- 根据断言类型动态渲染参数 -->
@@ -237,8 +349,8 @@ import { Message } from '@arco-design/web-vue'
 import { IconPlus, IconEdit, IconDelete, IconDragDotVertical, IconPlayArrow } from '@arco-design/web-vue/es/icon'
 import draggable from 'vuedraggable'
 import { useAppI18n } from '@/composables/useAppI18n'
-import { pageStepsDetailedApi, elementApi, actuatorApi, envConfigApi, type ActuatorInfo } from '../api'
-import type { UiPageStepsDetailed, UiPageSteps, UiElement, StepType, UiEnvironmentConfig } from '../types'
+import { pageStepsDetailedApi, elementApi, actuatorApi, envConfigApi, moduleApi, pageApi, type ActuatorInfo } from '../api'
+import type { UiPageStepsDetailed, UiPageSteps, UiElement, UiModule, UiPage, StepType, UiEnvironmentConfig } from '../types'
 import { STEP_TYPE_LABELS, extractListData, extractResponseData } from '../types'
 import { uiWebSocket, UiSocketEnum } from '../services/websocket'
 
@@ -261,10 +373,17 @@ const OPE_PARAMS_MAP: Record<string, OpeParamDef[]> = {
   wait: [{ field: 'timeout', label: '等待时间(毫秒)', type: 'number', placeholder: '默认1000', min: 0, max: 60000 }],
   screenshot: [{ field: 'name', label: '截图文件名', type: 'input', placeholder: '可选，留空自动生成' }],
   select_option: [{ field: 'value', label: '选项值', type: 'input', placeholder: '请输入要选择的选项值', required: true }],
+  press: [{ field: 'key', label: '按键值', type: 'input', placeholder: '例如 Enter, Tab, Escape 等', required: true }],
+  upload: [{ field: 'value', label: '文件路径', type: 'input', placeholder: '请输入要上传的文件绝对路径', required: true }],
+  goto: [{ field: 'url', label: '目标 URL', type: 'input', placeholder: '请输入完整的网页地址，例如 https://www.google.com', required: true }],
+  switch_tab: [{ field: 'value', label: '页签索引或关键字', type: 'input', placeholder: '请输入页签索引(从0开始)或URL/标题关键字', required: true }],
   // 断言操作
   assert_text: [{ field: 'expected', label: '期望文本', type: 'input', placeholder: '请输入期望的文本内容', required: true }],
+  assert_contain_text: [{ field: 'expected', label: '期望包含的文本', type: 'input', placeholder: '请输入期望被包含的文本', required: true }],
   assert_value: [{ field: 'expected', label: '期望值', type: 'input', placeholder: '请输入期望的值', required: true }],
   assert_count: [{ field: 'expected', label: '期望数量', type: 'number', placeholder: '请输入期望的元素数量', required: true, min: 0 }],
+  assert_url: [{ field: 'expected', label: '期望 URL', type: 'input', placeholder: '例如 https://example.com/dashboard', required: true }],
+  assert_title: [{ field: 'expected', label: '期望页面标题', type: 'input', placeholder: '例如 首页', required: true }],
 }
 
 /** 操作方法标签映射 */
@@ -272,17 +391,35 @@ const OPE_KEY_LABELS: Record<string, string> = {
   click: '点击',
   dblclick: '双击',
   hover: '悬停',
+  focus: '聚焦',
   fill: '填充',
   type: '输入',
   clear: '清空',
-  wait: '等待',
-  screenshot: '截图',
+  press: '按键模拟',
   select_option: '选择下拉',
+  check: '勾选',
+  uncheck: '取消勾选',
+  upload: '上传文件',
+  goto: '访问网页',
+  reload: '刷新页面',
+  go_back: '页面后退',
+  go_forward: '页面前进',
+  switch_tab: '切换页签',
+  wait: '等待',
+  wait_load: '等待页面加载',
+  wait_network: '等待网络空闲',
+  screenshot: '截图',
   assert_visible: '元素可见',
   assert_hidden: '元素隐藏',
-  assert_text: '文本断言',
-  assert_value: '值断言',
-  assert_count: '数量断言',
+  assert_enabled: '元素已启用',
+  assert_disabled: '元素被禁用',
+  assert_checked: '单/复选框被选中',
+  assert_text: '文本等于',
+  assert_contain_text: '文本包含',
+  assert_value: '值等于',
+  assert_count: '数量等于',
+  assert_url: '页面URL等于',
+  assert_title: '页面标题等于',
 }
 
 /** 格式化操作值显示 */
@@ -314,28 +451,60 @@ const stepText = computed(() => isEnglish.value
       deleteActionConfirm: 'Delete this action?',
       editAction: 'Edit action',
       actionType: 'Action Type',
+      selectModule: 'Select module',
+      pleaseSelectModule: 'Please select a module',
+      selectPage: 'Select page',
+      pleaseSelectPage: 'Please select a page',
+      fetchModulesFailed: 'Failed to fetch module list',
+      fetchPagesFailed: 'Failed to fetch page list',
       selectElement: 'Select element',
       pleaseSelectElement: 'Please select an element',
       actionMethod: 'Action Method',
       mouseActions: 'Mouse Actions',
       inputActions: 'Input Actions',
       otherActions: 'Other',
+      groupMouse: 'Mouse Actions',
+      groupKeyboard: 'Keyboard Actions',
+      groupSelect: 'Select/Check',
+      groupFile: 'File Actions',
+      groupPage: 'Page Actions',
       clickOption: 'Click (click)',
       dblclickOption: 'Double click (dblclick)',
       hoverOption: 'Hover (hover)',
+      focusOption: 'Focus (focus)',
       fillOption: 'Fill (fill)',
       typeOption: 'Type (type)',
       clearOption: 'Clear (clear)',
-      waitOption: 'Wait (wait)',
-      screenshotOption: 'Screenshot (screenshot)',
+      pressOption: 'Press key (press)',
       selectOption: 'Select option (select_option)',
+      checkOption: 'Check (check)',
+      uncheckOption: 'Uncheck (uncheck)',
+      uploadOption: 'Upload file (upload)',
+      gotoOption: 'Navigate to URL (goto)',
+      reloadOption: 'Reload page (reload)',
+      goBackOption: 'Go back (go_back)',
+      goForwardOption: 'Go forward (go_forward)',
+      switchTabOption: 'Switch tab (switch_tab)',
+      waitOption: 'Wait (wait)',
+      waitLoadOption: 'Wait for load (wait_load)',
+      waitNetworkOption: 'Wait for network idle (wait_network)',
+      screenshotOption: 'Screenshot (screenshot)',
       assertElement: 'Assertion Element',
       assertMethod: 'Assertion Method',
-      assertVisible: 'Element visible',
-      assertHidden: 'Element hidden',
-      assertText: 'Text assertion',
-      assertValue: 'Value assertion',
-      assertCount: 'Count assertion',
+      assertVisible: 'Element visible (assert_visible)',
+      assertHidden: 'Element hidden (assert_hidden)',
+      assertEnabled: 'Element enabled (assert_enabled)',
+      assertDisabled: 'Element disabled (assert_disabled)',
+      assertChecked: 'Checkbox checked (assert_checked)',
+      assertText: 'Text equals (assert_text)',
+      assertContainText: 'Text contains (assert_contain_text)',
+      assertValue: 'Value equals (assert_value)',
+      assertCount: 'Count equals (assert_count)',
+      assertUrl: 'URL equals (assert_url)',
+      assertTitle: 'Title equals (assert_title)',
+      groupAssertElement: 'Element State',
+      groupAssertContent: 'Content Verification',
+      groupAssertPage: 'Page Verification',
       sqlConfig: 'SQL Config',
       sqlConfigPlaceholder: 'SQL config in JSON format',
       customVariablePlaceholder: 'Variable definition in JSON format',
@@ -382,28 +551,60 @@ const stepText = computed(() => isEnglish.value
       deleteActionConfirm: '确定删除该操作？',
       editAction: '编辑操作',
       actionType: '操作类型',
+      selectModule: '选择模块',
+      pleaseSelectModule: '请选择模块',
+      selectPage: '选择页面',
+      pleaseSelectPage: '请选择页面',
+      fetchModulesFailed: '获取模块列表失败',
+      fetchPagesFailed: '获取页面列表失败',
       selectElement: '选择元素',
       pleaseSelectElement: '请选择元素',
       actionMethod: '操作方法',
       mouseActions: '鼠标操作',
       inputActions: '输入操作',
       otherActions: '其他',
+      groupMouse: '鼠标/点击',
+      groupKeyboard: '键盘/输入',
+      groupSelect: '选择/勾选',
+      groupFile: '文件操作',
+      groupPage: '页面操作',
       clickOption: '点击 (click)',
       dblclickOption: '双击 (dblclick)',
       hoverOption: '悬停 (hover)',
+      focusOption: '聚焦 (focus)',
       fillOption: '填充 (fill)',
       typeOption: '输入 (type)',
       clearOption: '清空 (clear)',
-      waitOption: '等待 (wait)',
-      screenshotOption: '截图 (screenshot)',
+      pressOption: '按键模拟 (press)',
       selectOption: '选择下拉 (select_option)',
+      checkOption: '勾选 (check)',
+      uncheckOption: '取消勾选 (uncheck)',
+      uploadOption: '上传文件 (upload)',
+      gotoOption: '访问网页 (goto)',
+      reloadOption: '刷新页面 (reload)',
+      goBackOption: '页面后退 (go_back)',
+      goForwardOption: '页面前进 (go_forward)',
+      switchTabOption: '切换页签 (switch_tab)',
+      waitOption: '等待 (wait)',
+      waitLoadOption: '等待加载 (wait_load)',
+      waitNetworkOption: '等待网络空闲 (wait_network)',
+      screenshotOption: '截图 (screenshot)',
       assertElement: '断言元素',
       assertMethod: '断言方法',
-      assertVisible: '元素可见',
-      assertHidden: '元素隐藏',
-      assertText: '文本断言',
-      assertValue: '值断言',
-      assertCount: '数量断言',
+      assertVisible: '元素可见 (assert_visible)',
+      assertHidden: '元素隐藏 (assert_hidden)',
+      assertEnabled: '元素已启用 (assert_enabled)',
+      assertDisabled: '元素被禁用 (assert_disabled)',
+      assertChecked: '单/复选框被选中 (assert_checked)',
+      assertText: '文本等于 (assert_text)',
+      assertContainText: '文本包含 (assert_contain_text)',
+      assertValue: '值等于 (assert_value)',
+      assertCount: '数量等于 (assert_count)',
+      assertUrl: '页面URL等于 (assert_url)',
+      assertTitle: '页面标题等于 (assert_title)',
+      groupAssertElement: '元素状态',
+      groupAssertContent: '内容校验',
+      groupAssertPage: '页面校验',
       sqlConfig: 'SQL 配置',
       sqlConfigPlaceholder: 'JSON 格式 SQL 配置',
       customVariablePlaceholder: 'JSON 格式变量定义',
@@ -449,17 +650,35 @@ const opeKeyLabelsEn: Record<string, string> = {
   click: 'Click',
   dblclick: 'Double click',
   hover: 'Hover',
+  focus: 'Focus',
   fill: 'Fill',
   type: 'Type',
   clear: 'Clear',
-  wait: 'Wait',
-  screenshot: 'Screenshot',
+  press: 'Press key',
   select_option: 'Select option',
+  check: 'Check',
+  uncheck: 'Uncheck',
+  upload: 'Upload file',
+  goto: 'Navigate to URL',
+  reload: 'Reload page',
+  go_back: 'Go back',
+  go_forward: 'Go forward',
+  switch_tab: 'Switch tab',
+  wait: 'Wait',
+  wait_load: 'Wait for load',
+  wait_network: 'Wait for network idle',
+  screenshot: 'Screenshot',
   assert_visible: 'Element visible',
   assert_hidden: 'Element hidden',
-  assert_text: 'Text assertion',
-  assert_value: 'Value assertion',
-  assert_count: 'Count assertion',
+  assert_enabled: 'Element enabled',
+  assert_disabled: 'Element disabled',
+  assert_checked: 'Checkbox checked',
+  assert_text: 'Text equals',
+  assert_contain_text: 'Text contains',
+  assert_value: 'Value equals',
+  assert_count: 'Count equals',
+  assert_url: 'URL equals',
+  assert_title: 'Title equals',
 }
 
 const paramLabelMap: Record<string, string> = {
@@ -467,9 +686,16 @@ const paramLabelMap: Record<string, string> = {
   '等待时间(毫秒)': 'Wait time (ms)',
   '截图文件名': 'Screenshot filename',
   '选项值': 'Option value',
+  '按键值': 'Key value',
+  '文件路径': 'File path',
+  '目标 URL': 'Target URL',
+  '页签索引或关键字': 'Tab index or keyword',
   '期望文本': 'Expected text',
+  '期望包含的文本': 'Expected contained text',
   '期望值': 'Expected value',
   '期望数量': 'Expected count',
+  '期望 URL': 'Expected URL',
+  '期望页面标题': 'Expected title',
 }
 
 const paramPlaceholderMap: Record<string, string> = {
@@ -478,9 +704,16 @@ const paramPlaceholderMap: Record<string, string> = {
   '默认1000': 'Default 1000',
   '可选，留空自动生成': 'Optional. Leave blank to auto-generate',
   '请输入要选择的选项值': 'Enter the option value to select',
+  '例如 Enter, Tab, Escape 等': 'e.g. Enter, Tab, Escape etc.',
+  '请输入要上传的文件绝对路径': 'Enter the absolute path to upload',
+  '请输入完整的网页地址，例如 https://www.google.com': 'Enter full URL, e.g. https://www.google.com',
+  '请输入页签索引(从0开始)或URL/标题关键字': 'Enter tab index (0-based) or URL/title keyword',
   '请输入期望的文本内容': 'Enter the expected text',
+  '请输入期望被包含的文本': 'Enter the expected contained text',
   '请输入期望的值': 'Enter the expected value',
   '请输入期望的元素数量': 'Enter the expected element count',
+  '例如 https://example.com/dashboard': 'e.g. https://example.com/dashboard',
+  '例如 首页': 'e.g. Home',
 }
 
 const getStepTypeLabel = (stepType: StepType) => stepTypeLabels.value[stepType] || String(stepType)
@@ -493,7 +726,13 @@ const props = defineProps<{ pageStep: UiPageSteps }>()
 const loading = ref(false)
 const submitting = ref(false)
 const stepData = ref<UiPageStepsDetailed[]>([])
+const moduleOptions = ref<UiModule[]>([])
+const modulesLoading = ref(false)
+const flatModuleOptions = computed(() => flattenModules(moduleOptions.value))
+const pageOptions = ref<UiPage[]>([])
 const elementOptions = ref<UiElement[]>([])
+const selectedElementModule = ref<number | undefined>(undefined)
+const selectedElementPage = ref<number | undefined>(undefined)
 const modalVisible = ref(false)
 const isEdit = ref(false)
 const currentStep = ref<UiPageStepsDetailed | null>(null)
@@ -546,6 +785,107 @@ const stepTypeColors: Record<StepType, string> = {
   2: 'purple',
   3: 'green',
   4: 'magenta',
+}
+
+const flattenModules = (modules: UiModule[], level = 0): (UiModule & { __level?: number })[] => {
+  const result: (UiModule & { __level?: number })[] = []
+  modules.forEach(module => {
+    result.push({ ...module, __level: level })
+    if (module.children?.length) {
+      result.push(...flattenModules(module.children, level + 1))
+    }
+  })
+  return result
+}
+
+const getModuleOptionLabel = (module: UiModule & { __level?: number }) => `${'　'.repeat(module.__level || 0)}${module.name}`
+
+const fetchModules = async (force = false) => {
+  if (!props.pageStep.project || modulesLoading.value) return
+  if (!force && moduleOptions.value.length > 0) return
+  modulesLoading.value = true
+  try {
+    const res = await moduleApi.tree(props.pageStep.project)
+    const data = extractResponseData<UiModule[]>(res)
+    moduleOptions.value = Array.isArray(data) ? data : []
+  } catch {
+    Message.error(stepText.value.fetchModulesFailed)
+  } finally {
+    modulesLoading.value = false
+  }
+}
+
+const onModuleDropdownVisibleChange = async (visible: boolean) => {
+  if (visible) {
+    await fetchModules()
+  }
+}
+
+const fetchPages = async (moduleId?: number | null) => {
+  if (!moduleId) {
+    pageOptions.value = []
+    return
+  }
+  try {
+    const res = await pageApi.list({ project: props.pageStep.project, module: moduleId })
+    pageOptions.value = extractListData<UiPage>(res)
+  } catch {
+    Message.error(stepText.value.fetchPagesFailed)
+  }
+}
+
+const fetchElementsByPage = async (pageId?: number | null) => {
+  if (!pageId) {
+    elementOptions.value = []
+    return
+  }
+  try {
+    const res = await elementApi.list({ page: pageId })
+    elementOptions.value = extractListData<UiElement>(res)
+  } catch {
+    Message.error(stepText.value.fetchElementsFailed)
+  }
+}
+
+const initElementSelector = async (moduleId?: number | null, pageId?: number | null, elementId?: number | null) => {
+  selectedElementModule.value = moduleId || undefined
+  selectedElementPage.value = pageId || undefined
+  formData.element = elementId || null
+  await fetchModules()
+  await fetchPages(selectedElementModule.value)
+  await fetchElementsByPage(selectedElementPage.value)
+}
+
+const initElementSelectorFromElement = async (elementId?: number | null) => {
+  if (!elementId) {
+    await initElementSelector(props.pageStep.module, props.pageStep.page, null)
+    return
+  }
+  try {
+    const elementRes = await elementApi.get(elementId)
+    const element = extractResponseData<UiElement>(elementRes)
+    if (!element?.page) {
+      await initElementSelector(props.pageStep.module, props.pageStep.page, elementId)
+      return
+    }
+    const pageRes = await pageApi.get(element.page)
+    const page = extractResponseData<UiPage>(pageRes)
+    await initElementSelector(page?.module || props.pageStep.module, element.page, elementId)
+  } catch {
+    await initElementSelector(props.pageStep.module, props.pageStep.page, elementId)
+  }
+}
+
+const onElementModuleChange = async () => {
+  selectedElementPage.value = undefined
+  formData.element = null
+  elementOptions.value = []
+  await fetchPages(selectedElementModule.value)
+}
+
+const onElementPageChange = async () => {
+  formData.element = null
+  await fetchElementsByPage(selectedElementPage.value)
 }
 
 const fetchSteps = async () => {
@@ -650,12 +990,7 @@ const handleStepResult = (data: any) => {
 }
 
 const fetchElements = async () => {
-  try {
-    const res = await elementApi.list({ page: props.pageStep.page })
-    elementOptions.value = extractListData<UiElement>(res)
-  } catch {
-    Message.error(stepText.value.fetchElementsFailed)
-  }
+  await initElementSelector(props.pageStep.module, props.pageStep.page, formData.element || null)
 }
 
 const resetForm = () => {
@@ -670,6 +1005,8 @@ const resetForm = () => {
     func: '',
     description: '',
   })
+  selectedElementModule.value = props.pageStep.module
+  selectedElementPage.value = props.pageStep.page
   Object.keys(opeParams).forEach(k => delete opeParams[k])
   sqlExecuteStr.value = '{}'
   customStr.value = '{}'
@@ -677,18 +1014,22 @@ const resetForm = () => {
   formRef.value?.clearValidate()
 }
 
-const onStepTypeChange = () => {
+const onStepTypeChange = async () => {
   formData.ope_key = ''
   formData.element = null
+  if (formData.step_type === 0 || formData.step_type === 1) {
+    await initElementSelector(props.pageStep.module, props.pageStep.page, null)
+  }
 }
 
-const showAddModal = () => {
+const showAddModal = async () => {
   isEdit.value = false
   resetForm()
   modalVisible.value = true
+  await initElementSelector(props.pageStep.module, props.pageStep.page, null)
 }
 
-const editStep = (step: UiPageStepsDetailed) => {
+const editStep = async (step: UiPageStepsDetailed) => {
   isEdit.value = true
   currentStep.value = step
   Object.assign(formData, {
@@ -702,6 +1043,9 @@ const editStep = (step: UiPageStepsDetailed) => {
     func: step.func || '',
     description: step.description || '',
   })
+  if (step.step_type === 0 || step.step_type === 1) {
+    await initElementSelectorFromElement(step.element)
+  }
   // 从 ope_value 还原参数到 opeParams
   Object.keys(opeParams).forEach(k => delete opeParams[k])
   if (step.ope_value && typeof step.ope_value === 'object') {
@@ -847,9 +1191,11 @@ let offStepResult: (() => void) | null = null
 
 watch(() => props.pageStep, async () => {
   fetchSteps()
-  fetchElements()
-  // 同时获取环境配置和执行器列表，并自动选择默认值
+  moduleOptions.value = []
+  // 页面和元素按当前页面步骤默认值初始化；同时加载模块树确保初次渲染不会回显ID，支持跨模块/页面
   await Promise.all([
+    fetchModules(true),
+    fetchElements(),
     fetchActuators(),
     fetchEnvConfigs()
   ])

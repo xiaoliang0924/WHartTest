@@ -98,6 +98,12 @@ class ApiInterface(models.Model):
         verbose_name='Extract Variables',
         help_text='{"token": "body.data.token"}',
     )
+    extract_meta = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name='Extract Metadata',
+        help_text='Metadata for extract variable rules',
+    )
 
     # Relationships
     project = models.ForeignKey(
@@ -163,6 +169,7 @@ class ApiInterface(models.Model):
             'variables': self.variables,
             'validators': self.validators,
             'extract': self.extract,
+            'extract_meta': self.extract_meta,
         }
 
         if self.type == self.TYPE_HTTP:

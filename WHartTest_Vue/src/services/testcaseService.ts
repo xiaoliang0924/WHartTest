@@ -2,6 +2,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/store/authStore';
 import { API_BASE_URL } from '@/config/api';
+import { normalizeListPayload } from '@/features/api-testing/services/responseHelpers';
 
 // 测试用例步骤接口
 export interface TestCaseStep {
@@ -58,7 +59,7 @@ export interface TestCase {
   precondition: string;
   level: string; // P0, P1, P2, P3
   test_type?: string; // smoke, functional, boundary, exception, permission, security, compatibility
-  steps: TestCaseStep[];
+  steps?: TestCaseStep[];
   notes?: string; // 备注字段
   screenshot?: string; // 兼容旧的单个截图字段
   screenshots?: TestCaseScreenshot[]; // 新的多截图字段
@@ -112,6 +113,7 @@ export interface PaginationParams {
   review_status_in?: ReviewStatus[]; // 多个审核状态筛选
   test_type?: string; // 单个测试类型筛选
   test_type_in?: string[]; // 多个测试类型筛选
+  include_steps?: boolean; // 是否返回步骤详情，默认列表不返回；思维导图需要传 true
 }
 
 // 测试用例列表响应接口
@@ -191,6 +193,7 @@ export const getTestCaseList = async (projectId: number, params?: PaginationPara
         test_type: params.test_type, // 传递 test_type（单个）
         // 多个测试类型筛选，用逗号连接
         test_type_in: params.test_type_in?.join(','),
+        include_steps: params.include_steps ? 'true' : undefined,
       } : undefined,
       headers: {
         'Authorization': `Bearer ${accessToken}`,
@@ -199,34 +202,14 @@ export const getTestCaseList = async (projectId: number, params?: PaginationPara
       },
     });
 
-    // 检查响应格式
     if (response.data && response.data.status === 'success') {
-      // 处理直接返回数组的情况
-      if (Array.isArray(response.data.data)) {
-        return {
-          success: true,
-          data: response.data.data,
-          total: response.data.data.length,
-          statusCode: response.data.code,
-        };
-      }
-      // 处理返回分页对象的情况
-      else if (response.data.data && response.data.data.results) {
-        return {
-          success: true,
-          data: response.data.data.results,
-          total: response.data.data.count,
-          statusCode: response.data.code,
-        };
-      }
-      // 其他情况
-      else {
-        return {
-          success: false,
-          error: '获取测试用例列表失败：响应数据格式不正确',
-          statusCode: response.data.code,
-        };
-      }
+      const { results, count } = normalizeListPayload(response.data.data);
+      return {
+        success: true,
+        data: results,
+        total: count,
+        statusCode: response.data.code,
+      };
     } else {
       return {
         success: false,

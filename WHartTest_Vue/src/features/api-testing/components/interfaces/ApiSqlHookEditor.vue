@@ -2,6 +2,7 @@
 import { ref, watch, onMounted, computed } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { getDatabaseConfigs, type DatabaseConfig } from '../../services/databaseConfigService';
+import { toArray } from '../../services/responseHelpers';
 import { useProjectStore } from '@/store/projectStore';
 
 interface Props {
@@ -36,16 +37,7 @@ const loadDbConfigs = async () => {
     loading.value = true;
     const response = await getDatabaseConfigs(Number(projectStore.currentProjectId));
     
-    if (response.data && Array.isArray(response.data.results)) {
-      dbConfigs.value = response.data.results;
-    } else if (response.data && Array.isArray(response.data.data)) {
-      dbConfigs.value = response.data.data;
-    } else if (Array.isArray(response.data)) {
-      dbConfigs.value = response.data;
-    } else {
-      console.warn('获取数据库配置返回格式异常:', response);
-      dbConfigs.value = [];
-    }
+    dbConfigs.value = toArray<DatabaseConfig>(response.data?.results ?? response.data);
     
     if (dbConfigs.value.length > 0) {
       selectedDbConfigRef.value = String(dbConfigs.value[0].id);

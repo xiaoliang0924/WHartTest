@@ -1420,6 +1420,22 @@ class AgentLoopStreamAPIView(View):
                         f"AgentLoopStreamAPI: Failed to calculate token count: {e}"
                     )
 
+                # AI 自动总结会话标题
+                if chat_session.title.startswith("新对话") and "llm" in locals() and llm:
+                    try:
+                        from langgraph_integration.views import auto_summarize_session_title
+                        logger.info(f"AgentLoopStreamAPI: Triggering title auto-summarization for session {session_id}")
+                        import asyncio
+                        asyncio.create_task(
+                            auto_summarize_session_title(
+                                llm,
+                                chat_session,
+                                user_message,
+                            )
+                        )
+                    except Exception as summarize_err:
+                        logger.error(f"AgentLoopStreamAPI: Failed to auto-summarize title: {summarize_err}", exc_info=True)
+
                 if user_stopped:
                     yield create_sse_data(
                         {"type": "complete", "status": "stopped", "steps": step_count}

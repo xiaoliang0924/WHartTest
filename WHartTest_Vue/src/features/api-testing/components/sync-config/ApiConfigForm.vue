@@ -3,6 +3,7 @@ import { ref, reactive, watch, computed } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import type { ApiInterface, TestCase, TestStep } from '../../services/syncService'
 import { syncApi } from '../../services/syncService'
+import { toArray } from '../../services/responseHelpers'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
@@ -182,7 +183,7 @@ const fetchInterfaces = async () => {
   try {
     loadingInterfaces.value = true
     const { data } = await syncApi.getInterfaces(projectStore.currentProject.id)
-    interfaces.value = Array.isArray(data.results) ? data.results : []
+    interfaces.value = toArray<ApiInterface>(data?.results ?? data)
   } catch (error) {
     Message.error(text.value.fetchInterfacesFailed)
     console.error(error)
@@ -201,7 +202,7 @@ const fetchTestCases = async () => {
   try {
     loadingTestcases.value = true
     const { data } = await syncApi.getTestCases(projectStore.currentProject.id)
-    testcases.value = Array.isArray(data.results) ? data.results : []
+    testcases.value = toArray<TestCase>(data?.results ?? data)
   } catch (error) {
     Message.error(text.value.fetchTestCasesFailed)
     console.error(error)

@@ -1130,6 +1130,89 @@ class ApiInterfaceRunnerTest(TestCase):
 
     @patch('api_interfaces.runner.load_custom_functions', return_value={})
     @patch('httprunner.HttpRunner.test_start')
+    def test_get_response_recovers_request_body_on_transport_failure(
+        self,
+        mock_test_start,
+        mock_load_funcs,
+    ):
+        """请求失败时展示执行前准备好的请求信息，避免误判 body 没带。"""
+        from .runner import InterfaceRunner
+
+        interface_data = {
+            'name': 'Transport Failure Body Test',
+            'type': 'http',
+            'method': 'POST',
+            'url': 'http://example.com/api/test',
+            'headers': {'Authorization': 'Bearer token'},
+            'params': {},
+            'body': {
+                'type': 'x-www-form-urlencoded',
+                'content': [
+                    {'key': 'username', 'value': 'tester', 'description': '', 'enabled': True},
+                ],
+            },
+            'variables': {},
+            'validators': [],
+            'extract': {},
+            'setup_hooks': [],
+            'teardown_hooks': [],
+            'project_id': self.project.pk,
+        }
+
+        runner = InterfaceRunner(interface_data)
+        req_resp = SimpleNamespace(
+            request=SimpleNamespace(
+                method='POST',
+                url='http://example.com/api/test',
+                headers={},
+                body=None,
+            ),
+            response=SimpleNamespace(
+                status_code=0,
+                headers={},
+                body={
+                    'transport_error': {
+                        'type': 'ConnectionError',
+                        'message': 'connection refused',
+                    },
+                },
+                error='connection refused',
+                error_type='ConnectionError',
+                is_transport_error=True,
+            ),
+        )
+        summary = SimpleNamespace(
+            step_results=[
+                SimpleNamespace(
+                    success=True,
+                    name='POST /api/test',
+                    export_vars={},
+                    data=SimpleNamespace(
+                        req_resps=[req_resp],
+                        stat=SimpleNamespace(response_time_ms=12.3, content_size=0),
+                        validators={},
+                    ),
+                ),
+            ],
+        )
+
+        with patch.object(runner, 'get_summary', return_value=summary):
+            response = runner.get_response()
+
+        self.assertFalse(response['success'])
+        self.assertEqual(response['status_code'], 0)
+        self.assertEqual(response['request']['headers'], {'Authorization': 'Bearer token'})
+        self.assertEqual(response['request']['body'], {'username': 'tester'})
+        self.assertTrue(response['response']['is_transport_error'])
+        self.assertEqual(response['response']['error_type'], 'ConnectionError')
+        self.assertEqual(response['response']['error'], 'connection refused')
+        self.assertEqual(
+            response['response']['content']['transport_error']['message'],
+            'connection refused',
+        )
+
+    @patch('api_interfaces.runner.load_custom_functions', return_value={})
+    @patch('httprunner.HttpRunner.test_start')
     def test_runner_with_hooks(self, mock_test_start, mock_load_funcs):
         """测试 Runner 带 hooks"""
         from .runner import InterfaceRunner

@@ -49,6 +49,13 @@ def get_uniform_comparator(comparator: Text):
         return comparator
 
 
+def get_value_type_name(value: Any) -> Text:
+    """Return a user-facing type name for validation result values."""
+    if value is None:
+        return "null"
+    return type(value).__name__
+
+
 def uniform_validator(validator):
     """unify validator
 
@@ -237,8 +244,10 @@ class ResponseObjectBase(object):
                 "comparator": assert_method,
                 "check": check_item,
                 "check_value": check_value,
+                "check_value_type": get_value_type_name(check_value),
                 "expect": expect_item,
                 "expect_value": expect_value,
+                "expect_value_type": get_value_type_name(expect_value),
                 "message": message,
             }
 

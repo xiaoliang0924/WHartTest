@@ -4,7 +4,7 @@ import { IconSettings, IconInfoCircle } from '@arco-design/web-vue/es/icon'
 
 interface TestCaseConfigData {
   export?: string[]
-  verify?: boolean
+  verify?: boolean | null
   base_url?: string
   variables?: string
   parameters?: string
@@ -31,11 +31,28 @@ const activeTab = ref('basic')
 
 const config = ref<TestCaseConfigData>({
   export: [],
-  verify: false,
   base_url: '',
   variables: '{}',
   parameters: '{}'
 })
+
+const sslVerifyMode = computed(() => {
+  if (config.value.verify === true) return 'on'
+  if (config.value.verify === false) return 'off'
+  return 'inherit'
+})
+
+const handleSslVerifyModeChange = (value: string | number | boolean) => {
+  if (value === 'on') {
+    config.value.verify = true
+    return
+  }
+  if (value === 'off') {
+    config.value.verify = false
+    return
+  }
+  delete config.value.verify
+}
 
 const extractVariables = computed(() => {
   const variables: Array<{
@@ -63,11 +80,24 @@ const extractVariables = computed(() => {
 
 const handleOpen = () => {
   visible.value = true
-  Object.assign(config.value, props.modelValue)
+  config.value = {
+    export: [],
+    base_url: '',
+    variables: '{}',
+    parameters: '{}',
+    ...props.modelValue
+  }
+  if (typeof config.value.verify !== 'boolean') {
+    delete config.value.verify
+  }
 }
 
 const handleSubmit = () => {
-  emit('update:modelValue', { ...config.value })
+  const nextConfig = { ...config.value }
+  if (typeof nextConfig.verify !== 'boolean') {
+    delete nextConfig.verify
+  }
+  emit('update:modelValue', nextConfig)
   visible.value = false
 }
 </script>
@@ -109,10 +139,15 @@ const handleSubmit = () => {
 
             <div class="flex items-center gap-4">
               <span class="config-label w-24">SSL验证</span>
-              <a-switch v-model="config.verify">
-                <template #checked>开启</template>
-                <template #unchecked>关闭</template>
-              </a-switch>
+              <a-radio-group
+                type="button"
+                :model-value="sslVerifyMode"
+                @update:model-value="handleSslVerifyModeChange"
+              >
+                <a-radio value="inherit">继承环境</a-radio>
+                <a-radio value="on">开启</a-radio>
+                <a-radio value="off">关闭</a-radio>
+              </a-radio-group>
             </div>
 
             <div class="flex items-start gap-4">

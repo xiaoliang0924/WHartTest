@@ -197,6 +197,7 @@ import {
   deleteTask, getTaskExecutions, deleteExecution,
   type ScheduledTask, type TaskExecution,
 } from '../services/taskService';
+import { normalizeListPayload } from '@/features/api-testing/services/responseHelpers';
 import TaskFormModal from '../components/TaskFormModal.vue';
 import LogViewModal from '../components/LogViewModal.vue';
 
@@ -499,8 +500,9 @@ const fetchTasks = async () => {
     if (moduleFilter.value) params.module = moduleFilter.value;
 
     const res = await getTaskList(currentProjectId.value, params);
-    taskList.value = res.results;
-    total.value = res.count;
+    const { results, count } = normalizeListPayload<ScheduledTask>(res);
+    taskList.value = results;
+    total.value = count;
   } catch (error: any) {
     Message.error(error.response?.data?.detail || pageText.value.loadTasksFailed);
   } finally {
@@ -517,8 +519,9 @@ const fetchExecutions = async () => {
       currentTask.value.id,
       { page: executionPage.value }
     );
-    executionList.value = res.results;
-    executionTotal.value = res.count;
+    const { results, count } = normalizeListPayload<TaskExecution>(res);
+    executionList.value = results;
+    executionTotal.value = count;
   } catch {
     Message.error(pageText.value.loadExecutionsFailed);
   } finally {

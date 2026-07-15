@@ -242,6 +242,7 @@ import {
 } from '@/features/prompts/types/prompt';
 import { formatDateTime } from '@/utils/formatters';
 import { useAppI18n } from '@/composables/useAppI18n';
+import { toArray } from '@/features/api-testing/services/responseHelpers';
 
 // 定义组件属性
 interface Props {
@@ -461,15 +462,7 @@ const loadUserPrompts = async () => {
     ]);
 
     if (promptsResponse.status === 'success' && promptsResponse.data) {
-      // 检查返回的数据格式
-      let allPrompts: UserPrompt[] = [];
-      if (Array.isArray(promptsResponse.data)) {
-        // 直接是数组格式
-        allPrompts = promptsResponse.data;
-      } else if (promptsResponse.data.results) {
-        // 分页格式
-        allPrompts = promptsResponse.data.results;
-      }
+      const allPrompts = toArray<UserPrompt>((promptsResponse.data as any)?.results ?? promptsResponse.data);
       
       // 🆕 在前端手动排序：默认提示词在前，然后按类型和名称排序
       userPrompts.value = allPrompts.sort((a, b) => {

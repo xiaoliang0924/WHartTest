@@ -100,6 +100,7 @@ import KnowledgeBaseSelector from './KnowledgeBaseSelector.vue';
 import { getUserPrompts, getDefaultPrompt } from '@/features/prompts/services/promptService';
 import type { UserPrompt } from '@/features/prompts/types/prompt';
 import { useAppI18n } from '@/composables/useAppI18n';
+import { toArray } from '@/features/api-testing/services/responseHelpers';
 
 const router = useRouter();
 const { isEnglish } = useAppI18n();
@@ -181,12 +182,7 @@ const loadUserPrompts = async () => {
     ]);
 
     if (promptsResponse.status === 'success' && promptsResponse.data) {
-      let allPrompts: UserPrompt[] = [];
-      if (Array.isArray(promptsResponse.data)) {
-        allPrompts = promptsResponse.data;
-      } else if (promptsResponse.data.results) {
-        allPrompts = promptsResponse.data.results;
-      }
+      let allPrompts = toArray<UserPrompt>((promptsResponse.data as any)?.results ?? promptsResponse.data);
 
       // 过滤：只显示 general 类型的提示词
       allPrompts = allPrompts.filter(prompt =>

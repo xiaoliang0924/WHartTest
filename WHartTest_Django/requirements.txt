@@ -92,7 +92,7 @@ langsmith>=0.3.45,<1.0.0
 
 # LangGraph SQLite检查点 - MIT许可证 (v1.x 重大升级)
 # https://github.com/langchain-ai/langgraph/blob/main/libs/checkpoint-sqlite/LICENSE
-langgraph-checkpoint-sqlite==3.0.2
+langgraph-checkpoint-sqlite>=3.0.3
 
 # LangGraph PostgreSQL检查点 - MIT许可证 (v1.x 重大升级)
 # https://github.com/langchain-ai/langgraph/blob/main/libs/checkpoint-postgres/LICENSE

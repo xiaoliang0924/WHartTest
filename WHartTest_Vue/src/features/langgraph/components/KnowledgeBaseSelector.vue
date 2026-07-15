@@ -83,6 +83,7 @@ import {
 import { KnowledgeService } from '@/features/knowledge/services/knowledgeService';
 import type { KnowledgeBase } from '@/features/knowledge/types/knowledge';
 import { useAppI18n } from '@/composables/useAppI18n';
+import { toArray } from '@/features/api-testing/services/responseHelpers';
 
 interface Props {
   projectId: number | null;
@@ -138,15 +139,7 @@ const fetchKnowledgeBases = async () => {
       is_active: true,
     });
 
-    // 处理不同的响应格式
-    let kbList: KnowledgeBase[] = [];
-    if (response && typeof response === 'object' && 'results' in response) {
-      // 分页响应格式
-      kbList = response.results;
-    } else if (Array.isArray(response)) {
-      // 数组格式（向后兼容）
-      kbList = response;
-    }
+    const kbList = toArray<KnowledgeBase>((response as any)?.results ?? response);
 
     knowledgeBases.value = kbList;
 

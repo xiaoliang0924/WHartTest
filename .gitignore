@@ -60,8 +60,6 @@ __pycache__/
 *.db
 
 # Documentation build
-docs/_build/
-docs/.vitepress/cache/
 # Playwright截图目录
 playwright-screenshots/
 WHartTest_Django/chat_history.sqlite-shm

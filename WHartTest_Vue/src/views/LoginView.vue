@@ -1,14 +1,33 @@
 <template>
   <div class="login-page">
     <canvas ref="canvasRef" class="starry-canvas" />
-    <div class="locale-switcher-shell">
+    <div class="header-controls">
       <AppLocaleToggle />
+      <button
+        type="button"
+        class="theme-toggle-btn"
+        :aria-label="isBlack ? 'Switch to light theme' : 'Switch to dark theme'"
+        :title="isBlack ? '切换至亮色模式' : '切换至暗色模式'"
+        @click="toggleTheme"
+      >
+        <span class="theme-icon-wrap" :class="{ 'is-dark': isBlack }">
+          <svg v-if="isBlack" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="theme-icon">
+            <path d="M12 2.25a.75.75 0 01.75.75v2.25a.75.75 0 01-1.5 0V3a.75.75 0 01.75-.75zM6.162 5.736a.75.75 0 011.06 0l1.591 1.591a.75.75 0 11-1.06 1.06L6.162 6.796a.75.75 0 010-1.06zm10.614 0a.75.75 0 010 1.06l-1.591 1.591a.75.75 0 11-1.06-1.06l1.591-1.591a.75.75 0 011.06 0zM12 7.5a4.5 4.5 0 100 9 4.5 4.5 0 000-9zM2.25 12a.75.75 0 01.75-.75h2.25a.75.75 0 010 1.5H3a.75.75 0 01-.75-.75zm13.5 0a.75.75 0 01.75-.75h2.25a.75.75 0 010 1.5h-2.25a.75.75 0 01-.75-.75zM6.162 17.204a.75.75 0 011.06-1.06l1.591 1.59a.75.75 0 11-1.06 1.061l-1.59-1.591a.75.75 0 010-1.06zm10.614 0a.75.75 0 010 1.06l-1.59 1.591a.75.75 0 11-1.061-1.06l1.59-1.59a.75.75 0 011.06 0zM12 17.25a.75.75 0 01.75.75v2.25a.75.75 0 01-1.5 0V18a.75.75 0 01.75-.75z" />
+          </svg>
+          <svg v-else xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="theme-icon">
+            <path fill-rule="evenodd" d="M9.528 1.718a.75.75 0 01.162.819A8.97 8.97 0 009 6a9 9 0 009 9 8.97 8.97 0 003.463-.69.75.75 0 01.981.98 10.503 10.503 0 01-9.694 6.46c-5.799 0-10.5-4.701-10.5-10.5 0-4.368 2.667-8.112 6.46-9.694a.75.75 0 01.818.162z" clip-rule="evenodd" />
+          </svg>
+        </span>
+      </button>
     </div>
 
     <div class="content-layer">
       <div class="brand-area">
         <img :src="brandLogoUrl" alt="Logo" class="brand-logo" />
-        <h1 class="brand-title">WHartTest</h1>
+        <div class="brand-title-row">
+          <h1 class="brand-title">{{ brandTitle }}</h1>
+          <img v-if="brandBadgeEnabled" :src="brandBadgeUrl" alt="CE" class="brand-ce-icon" />
+        </div>
         <p class="brand-subtitle">{{ brandSubtitle }}</p>
         <div class="brand-tags">
           <span v-for="tag in featureTags" :key="tag" class="tag">{{ tag }}</span>
@@ -160,7 +179,8 @@ import { useRouter } from 'vue-router'
 import { useStarryBackground } from '@/composables/useStarryBackground'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { useAuthStore } from '@/store/authStore'
-import { brandLogoUrl } from '@/utils/assetUrl'
+import { useSystemConfigStore } from '@/store/systemConfigStore'
+import { useThemeStore } from '@/store/themeStore'
 import AppLocaleToggle from '@/components/AppLocaleToggle.vue'
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -180,20 +200,34 @@ const fingerprintImageLoadFailed = ref(false)
 
 useStarryBackground(canvasRef)
 
+const themeStore = useThemeStore()
+const isBlack = computed(() => themeStore.isBlack)
+const toggleTheme = () => themeStore.toggleTheme()
+
 const router = useRouter()
 const authStore = useAuthStore()
 const { isEnglish, t } = useAppI18n()
 const isLoading = computed(() => authStore.getIsLoading)
 const errorMessage = computed(() => authStore.getLoginError)
 const currentFingerprintAsset = computed(() => fingerprintAssetCandidates[currentFingerprintAssetIndex.value] ?? null)
-const featureTags = computed(() => (
-  isEnglish.value
+
+const systemConfigStore = useSystemConfigStore()
+const brandLogoUrl = computed(() => systemConfigStore.getLogo)
+const brandBadgeEnabled = computed(() => systemConfigStore.getBrandBadgeEnabled)
+const brandBadgeUrl = computed(() => systemConfigStore.getBrandBadgeUrl)
+const brandTitle = computed(() => systemConfigStore.getLoginTitle)
+const brandSubtitle = computed(() => {
+  return systemConfigStore.config.login_subtitle || (isEnglish.value ? 'Wheat intelligence test automation platform' : '小麦智测自动化平台')
+})
+const featureTags = computed(() => {
+  const configTags = systemConfigStore.getLoginTags
+  if (configTags && configTags.length > 0) {
+    return configTags
+  }
+  return isEnglish.value
     ? ['AI generation', 'RAG knowledge base', 'MCP tool calling', 'Skills library', 'Playwright automation', 'LangGraph']
     : ['AI 智能生成', 'RAG 知识库', 'MCP 工具调用', 'Skills 技能库', 'Playwright 自动化', 'LangGraph']
-))
-const brandSubtitle = computed(() => (
-  isEnglish.value ? 'Wheat intelligence test automation platform' : '小麦智测自动化平台'
-))
+})
 const launcherTitle = computed(() => (
   isEnglish.value ? 'Account Login' : '账号登录'
 ))
@@ -363,14 +397,69 @@ onBeforeUnmount(() => {
   position: relative;
   min-height: 100vh;
   overflow: hidden;
+  background: linear-gradient(135deg, #f0f9ff 0%, #f1f5f9 50%, #dbeafe 100%);
+  transition: background-color 0.5s ease;
+}
+
+:root[data-theme='black'] .login-page {
   background: radial-gradient(ellipse at 20% 50%, #0a1628 0%, #020810 100%);
 }
 
-.locale-switcher-shell {
+.header-controls {
   position: absolute;
   top: 24px;
   right: 24px;
   z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.theme-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.04);
+  color: var(--theme-text-secondary, #4e5969);
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.theme-toggle-btn:hover {
+  background: rgba(15, 23, 42, 0.08);
+  color: var(--theme-text, #1c1f23);
+  transform: scale(1.05);
+}
+
+:root[data-theme='black'] .theme-toggle-btn {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(224, 236, 255, 0.8);
+}
+
+:root[data-theme='black'] .theme-toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.theme-icon-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.theme-icon {
+  width: 18px;
+  height: 18px;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.theme-toggle-btn:hover .theme-icon {
+  transform: rotate(15deg);
 }
 
 .starry-canvas,
@@ -401,27 +490,66 @@ onBeforeUnmount(() => {
 }
 
 .brand-logo {
+  display: block;
   width: 72px;
   height: 72px;
   margin: 0 auto 16px;
+  filter: drop-shadow(0 4px 12px rgba(59, 130, 246, 0.2));
+  transform: translateX(-4px);
+  transition: filter 0.3s ease;
+}
+
+:root[data-theme='black'] .brand-logo {
   filter: drop-shadow(0 0 20px rgba(100, 180, 255, 0.4));
 }
 
-.brand-title {
+.brand-title-row {
+  display: inline-flex;
+  align-items: flex-start;
+  justify-content: center;
   margin: 0 0 8px;
-  color: #fff;
+}
+
+.brand-title {
+  margin: 0;
+  color: #0f172a;
   font-size: 42px;
   font-weight: 800;
   letter-spacing: -0.5px;
+  text-shadow: 0 4px 12px rgba(15, 23, 42, 0.05);
+  transition: color 0.3s ease;
+}
+
+:root[data-theme='black'] .brand-title {
+  color: #fff;
   text-shadow: 0 0 30px rgba(100, 180, 255, 0.3);
+}
+
+.brand-ce-icon {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  margin-left: 10px;
+  object-fit: contain;
+  transform: translateY(-25%);
+  filter: drop-shadow(0 4px 10px rgba(14, 165, 233, 0.22));
+}
+
+:root[data-theme='black'] .brand-ce-icon {
+  filter: drop-shadow(0 0 16px rgba(100, 180, 255, 0.45));
 }
 
 .brand-subtitle {
   margin: 0 0 20px;
-  color: rgba(180, 210, 255, 0.8);
+  color: #475569;
   font-size: 16px;
   font-weight: 400;
   letter-spacing: 2px;
+  transition: color 0.3s ease;
+}
+
+:root[data-theme='black'] .brand-subtitle {
+  color: rgba(180, 210, 255, 0.8);
 }
 
 .brand-tags {
@@ -433,12 +561,32 @@ onBeforeUnmount(() => {
 
 .tag {
   padding: 4px 14px;
-  border: 1px solid rgba(100, 180, 255, 0.15);
+  border: 1px solid rgba(14, 165, 233, 0.18);
   border-radius: 999px;
-  background: rgba(100, 180, 255, 0.08);
+  background: rgba(14, 165, 233, 0.04);
   backdrop-filter: blur(4px);
-  color: rgba(180, 210, 255, 0.85);
+  color: #0284c7;
   font-size: 12px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.tag:hover {
+  border-color: rgba(56, 189, 248, 0.4);
+  background: rgba(56, 189, 248, 0.08);
+  color: #38bdf8;
+  transform: translateY(-1px);
+}
+
+:root[data-theme='black'] .tag {
+  border: 1px solid rgba(100, 180, 255, 0.15);
+  background: rgba(100, 180, 255, 0.08);
+  color: rgba(180, 210, 255, 0.85);
+}
+
+:root[data-theme='black'] .tag:hover {
+  border-color: rgba(100, 180, 255, 0.35);
+  background: rgba(100, 180, 255, 0.14);
+  color: #fff;
 }
 
 .login-launcher {
@@ -447,10 +595,10 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 16px;
   padding: 14px 20px 14px 14px;
-  border: 1px solid rgba(129, 184, 255, 0.26);
+  border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 999px;
-  background: rgba(9, 20, 38, 0.54);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+  background: rgba(255, 255, 255, 0.65);
+  box-shadow: 0 16px 40px rgba(148, 163, 184, 0.15);
   backdrop-filter: blur(18px);
   cursor: pointer;
   transition: transform 0.28s ease, box-shadow 0.28s ease, border-color 0.28s ease, background-color 0.28s ease;
@@ -459,6 +607,18 @@ onBeforeUnmount(() => {
 
 .login-launcher:hover {
   transform: translateY(-3px) scale(1.02);
+  border-color: rgba(14, 165, 233, 0.4);
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 18px 50px rgba(14, 165, 233, 0.12);
+}
+
+:root[data-theme='black'] .login-launcher {
+  border: 1px solid rgba(129, 184, 255, 0.26);
+  background: rgba(9, 20, 38, 0.54);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+}
+
+:root[data-theme='black'] .login-launcher:hover {
   border-color: rgba(129, 184, 255, 0.44);
   background: rgba(12, 28, 52, 0.66);
   box-shadow: 0 18px 50px rgba(20, 74, 169, 0.28);
@@ -475,9 +635,14 @@ onBeforeUnmount(() => {
   position: absolute;
   inset: -10px;
   border-radius: inherit;
-  background: radial-gradient(circle, rgba(88, 158, 255, 0.24), transparent 72%);
-  opacity: 0.7;
+  background: radial-gradient(circle, rgba(6, 182, 212, 0.2) 0%, rgba(16, 185, 129, 0.12) 40%, rgba(14, 165, 233, 0.06) 70%, transparent 100%);
+  opacity: 0.85;
   filter: blur(12px);
+  transition: background 0.3s ease;
+}
+
+:root[data-theme='black'] .launcher-aura {
+  background: radial-gradient(circle, rgba(100, 180, 255, 0.24), transparent 72%);
 }
 
 .launcher-logo,
@@ -489,23 +654,33 @@ onBeforeUnmount(() => {
 .launcher-icon {
   position: relative;
   z-index: 1;
+  flex: 0 0 56px;
   width: 56px;
   height: 56px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: linear-gradient(135deg, rgba(37, 99, 235, 0.82), rgba(56, 189, 248, 0.82));
-  box-shadow: 0 12px 28px rgba(37, 99, 235, 0.35);
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.85), rgba(56, 189, 248, 0.85));
+  box-shadow: 0 12px 28px rgba(14, 165, 233, 0.35);
+  overflow: hidden;
 }
 
 .launcher-icon svg,
 .launcher-fingerprint-img {
+  position: absolute;
+  top: 50%;
+  left: 50%;
   width: 36px;
   height: 36px;
   display: block;
   object-fit: contain;
   color: #eaf3ff;
+  transform: translate(-50%, -50%);
+}
+
+.launcher-fingerprint-img {
+  transform: translate(calc(-50% + 1px), -50%);
 }
 
 .launcher-copy {
@@ -513,8 +688,13 @@ onBeforeUnmount(() => {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
-  color: #e8f0ff;
+  color: #1e293b;
   text-align: left;
+  transition: color 0.3s ease;
+}
+
+:root[data-theme='black'] .launcher-copy {
+  color: #e8f0ff;
 }
 
 .launcher-copy strong {
@@ -523,8 +703,13 @@ onBeforeUnmount(() => {
 }
 
 .launcher-copy span {
-  color: rgba(180, 210, 255, 0.72);
+  color: #64748b;
   font-size: 13px;
+  transition: color 0.3s ease;
+}
+
+:root[data-theme='black'] .launcher-copy span {
+  color: rgba(180, 210, 255, 0.72);
 }
 
 .login-overlay {
@@ -542,12 +727,22 @@ onBeforeUnmount(() => {
   position: relative;
   width: min(100%, 420px);
   padding: 36px 32px 32px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(14, 165, 233, 0.15);
   border-radius: 24px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 
+    inset 0 0 0 1px rgba(255, 255, 255, 0.8),
+    0 8px 32px -4px rgba(14, 165, 233, 0.06),
+    0 20px 48px -8px rgba(30, 41, 59, 0.08);
+  backdrop-filter: blur(24px);
+  transform-origin: center;
+  transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+:root[data-theme='black'] .login-card {
+  border: 1px solid rgba(255, 255, 255, 0.18);
   background: linear-gradient(180deg, rgba(8, 18, 34, 0.56), rgba(10, 22, 40, 0.62));
   box-shadow: 0 22px 60px rgba(0, 0, 0, 0.28);
-  backdrop-filter: blur(28px);
-  transform-origin: center;
 }
 
 .dialog-close {
@@ -561,15 +756,24 @@ onBeforeUnmount(() => {
   height: 36px;
   border: none;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.06);
-  color: rgba(224, 236, 255, 0.88);
+  background: rgba(0, 0, 0, 0.04);
+  color: #475569;
   cursor: pointer;
-  transition: background-color 0.24s ease, transform 0.24s ease;
+  transition: background-color 0.24s ease, transform 0.24s ease, color 0.3s ease;
 }
 
 .dialog-close:hover {
-  background: rgba(96, 165, 250, 0.16);
+  background: rgba(59, 130, 246, 0.1);
   transform: rotate(90deg);
+}
+
+:root[data-theme='black'] .dialog-close {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(224, 236, 255, 0.88);
+}
+
+:root[data-theme='black'] .dialog-close:hover {
+  background: rgba(96, 165, 250, 0.16);
 }
 
 .dialog-close svg,
@@ -587,14 +791,26 @@ onBeforeUnmount(() => {
 
 .card-header h2 {
   margin: 0 0 6px;
-  color: #fff;
+  color: #1e293b;
   font-size: 24px;
   font-weight: 700;
+  transition: color 0.3s ease;
+}
+
+:root[data-theme='black'] .card-header h2 {
+  color: #fff;
 }
 
 .card-header p,
 .remember-me,
 .register-link {
+  color: #64748b;
+  transition: color 0.3s ease;
+}
+
+:root[data-theme='black'] .card-header p,
+:root[data-theme='black'] .remember-me,
+:root[data-theme='black'] .register-link {
   color: rgba(180, 210, 255, 0.62);
 }
 
@@ -618,35 +834,61 @@ onBeforeUnmount(() => {
 .input-icon {
   position: absolute;
   left: 14px;
-  color: rgba(180, 210, 255, 0.4);
+  color: #94a3b8;
   pointer-events: none;
   transition: color 0.3s ease;
+}
+
+:root[data-theme='black'] .input-icon {
+  color: rgba(180, 210, 255, 0.4);
 }
 
 .form-input {
   box-sizing: border-box;
   width: 100%;
   padding: 12px 42px 12px 44px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(14, 165, 233, 0.16);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #e8f0ff;
+  background: rgba(255, 255, 255, 0.65);
+  color: #0f172a;
   font-size: 14px;
   outline: none;
   transition: all 0.3s ease;
 }
 
 .form-input::placeholder {
-  color: rgba(180, 210, 255, 0.35);
+  color: #94a3b8;
 }
 
 .form-input:focus {
+  border-color: rgba(14, 165, 233, 0.6);
+  background: #ffffff;
+  box-shadow: 
+    0 0 0 3px rgba(14, 165, 233, 0.08),
+    inset 0 1px 2px rgba(14, 165, 233, 0.05);
+}
+
+.input-wrapper:focus-within .input-icon {
+  color: #0ea5e9;
+}
+
+:root[data-theme='black'] .form-input {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: #e8f0ff;
+}
+
+:root[data-theme='black'] .form-input::placeholder {
+  color: rgba(180, 210, 255, 0.35);
+}
+
+:root[data-theme='black'] .form-input:focus {
   border-color: rgba(100, 180, 255, 0.5);
   background: rgba(255, 255, 255, 0.08);
   box-shadow: 0 0 0 3px rgba(100, 180, 255, 0.1);
 }
 
-.input-wrapper:focus-within .input-icon {
+:root[data-theme='black'] .input-wrapper:focus-within .input-icon {
   color: rgba(100, 180, 255, 0.8);
 }
 
@@ -664,12 +906,20 @@ onBeforeUnmount(() => {
   padding: 0;
   border: none;
   background: transparent;
-  color: rgba(180, 210, 255, 0.4);
+  color: #94a3b8;
   cursor: pointer;
   transition: color 0.3s ease;
 }
 
 .toggle-icon:hover {
+  color: #0ea5e9;
+}
+
+:root[data-theme='black'] .toggle-icon {
+  color: rgba(180, 210, 255, 0.4);
+}
+
+:root[data-theme='black'] .toggle-icon:hover {
   color: rgba(100, 180, 255, 0.8);
 }
 
@@ -683,6 +933,10 @@ onBeforeUnmount(() => {
 }
 
 .remember-me input {
+  accent-color: #0ea5e9;
+}
+
+:root[data-theme='black'] .remember-me input {
   accent-color: #4a9eff;
 }
 
@@ -695,19 +949,19 @@ onBeforeUnmount(() => {
   padding: 12px;
   border: none;
   border-radius: 12px;
-  background: linear-gradient(135deg, #2563eb, #1d4ed8);
-  box-shadow: 0 4px 16px rgba(37, 99, 235, 0.3);
+  background: linear-gradient(135deg, #0ea5e9, #0284c7);
+  box-shadow: 0 4px 18px rgba(14, 165, 233, 0.28);
   color: #fff;
   cursor: pointer;
   font-size: 15px;
   font-weight: 600;
-  transition: transform 0.3s ease, box-shadow 0.3s ease, background 0.3s ease;
+  transition: transform 0.25s ease, box-shadow 0.25s ease, background 0.25s ease;
 }
 
 .login-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  background: linear-gradient(135deg, #3b82f6, #2563eb);
-  box-shadow: 0 6px 24px rgba(37, 99, 235, 0.4);
+  transform: translateY(-1.5px);
+  background: linear-gradient(135deg, #38bdf8, #0ea5e9);
+  box-shadow: 0 6px 22px rgba(14, 165, 233, 0.38);
 }
 
 .login-btn:disabled {
@@ -728,9 +982,15 @@ onBeforeUnmount(() => {
   padding: 10px 14px;
   border: 1px solid rgba(239, 68, 68, 0.25);
   border-radius: 10px;
+  background: rgba(239, 68, 68, 0.06);
+  color: #dc2626;
+  font-size: 13px;
+  transition: all 0.3s ease;
+}
+
+:root[data-theme='black'] .error-msg {
   background: rgba(239, 68, 68, 0.12);
   color: #fca5a5;
-  font-size: 13px;
 }
 
 .error-icon {
@@ -744,15 +1004,25 @@ onBeforeUnmount(() => {
 }
 
 .register-link a {
-  color: #60a5fa;
+  color: #0284c7;
   font-weight: 600;
   text-decoration: none;
-  transition: color 0.2s ease;
+  transition: all 0.2s ease;
 }
 
 .register-link a:hover {
+  color: #0ea5e9;
+  text-decoration: none;
+  text-shadow: 0 0 8px rgba(14, 165, 233, 0.3);
+}
+
+:root[data-theme='black'] .register-link a {
+  color: #60a5fa;
+}
+
+:root[data-theme='black'] .register-link a:hover {
   color: #93c5fd;
-  text-decoration: underline;
+  text-shadow: 0 0 8px rgba(147, 197, 253, 0.4);
 }
 
 .login-dialog-enter-active,
@@ -814,6 +1084,12 @@ onBeforeUnmount(() => {
 
   .brand-title {
     font-size: 32px;
+  }
+
+  .brand-ce-icon {
+    width: 28px;
+    height: 28px;
+    margin-left: 8px;
   }
 
   .login-launcher {

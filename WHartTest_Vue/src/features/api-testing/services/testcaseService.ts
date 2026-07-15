@@ -4,6 +4,7 @@ import type { ApiTestCase, ApiTestCaseStep, ApiTestCaseTag } from '../types/test
 import type { TestCaseHistoryReport as _TestCaseHistoryReport, Tag as _Tag, TagStatistics as _TagStatistics } from '../types/testcase';
 import type { PaginatedResponse } from '../types/common';
 import { testcaseTagService } from './testcaseTagService';
+import { wrapListResponse, wrapOneResponse } from './responseHelpers';
 
 const base = (projectId: number) => `/projects/${projectId}/api-testcases`;
 
@@ -72,21 +73,11 @@ function _pid(params?: Record<string, any>): number {
 }
 
 function _wrapList(res: any): any {
-  if (!res.success) {
-    const err: any = new Error(res.error || res.message || '操作失败');
-    err.errors = res.errors;
-    throw err;
-  }
-  return { data: { results: res.data ?? [], count: res.total ?? 0 }, status: 'success', message: '' };
+  return wrapListResponse(res);
 }
 
 function _wrapOne(res: any): any {
-  if (!res.success) {
-    const err: any = new Error(res.error || res.message || '操作失败');
-    err.errors = res.errors;
-    throw err;
-  }
-  return { data: res.data ?? null, status: 'success', message: '' };
+  return wrapOneResponse(res);
 }
 
 // Type aliases re-exported for component imports

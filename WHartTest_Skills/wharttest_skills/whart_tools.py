@@ -27,6 +27,12 @@ HEADERS = {
     "accept": "application/json, text/plain,*/*",
     "X-API-Key": API_KEY
 }
+IMAGE_MIME_TYPES = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+}
 
 
 def _extract_tree(nodes_list, id_key, name_key):
@@ -63,6 +69,25 @@ def get_modules(project_id: int):
         resp.raise_for_status()
         data = resp.json().get("data", [])
         return _extract_tree(data, "module_id", "module_name")
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def add_module(project_id: int, name: str, parent_id: int = None):
+    """新增用例模块"""
+    url = f"{BASE_URL}/api/projects/{project_id}/testcase-modules/"
+    data = {
+        "name": name,
+    }
+    if parent_id is not None:
+        data["parent"] = parent_id
+    try:
+        resp = requests.post(url, headers=HEADERS, json=data)
+        resp.raise_for_status()
+        result = resp.json()
+        if result.get("code") == 201:
+            return {"message": "保存成功", "module": {"id": result.get("data", {}).get("id"), "name": result.get("data", {}).get("name", name)}}
+        return {"message": "保存失败", "response": result}
     except Exception as e:
         return {"error": str(e)}
 
@@ -160,22 +185,115 @@ def edit_testcase(project_id: int, case_id: int, name: str = None, level: str = 
         return {"success": False, "error": str(e)}
 
 
+def _collect_screenshot_candidate_dirs():
+    """收集截图搜索目录，优先约定目录，再兼容常见临时目录。"""
+    candidates = []
+    for env_key in ('SCREENSHOT_DIR', 'PLAYWRIGHT_SCREENSHOT_DIR', 'AGENT_BROWSER_SCREENSHOT_DIR'):
+        value = os.environ.get(env_key, '').strip()
+        if value:
+            candidates.append(value)
+
+    current_dir = os.getcwd().strip()
+    if current_dir:
+        candidates.append(current_dir)
+
+    temp_roots = [
+        os.environ.get('TMPDIR', '').strip(),
+        os.environ.get('TEMP', '').strip(),
+        os.environ.get('TMP', '').strip(),
+        '/tmp',
+    ]
+    for temp_root in temp_roots:
+        if not temp_root:
+            continue
+        candidates.extend([
+            temp_root,
+            os.path.join(temp_root, 'screenshots'),
+            os.path.join(temp_root, 'playwright-output'),
+        ])
+
+    normalized = []
+    seen = set()
+    for path in candidates:
+        if not path:
+            continue
+        abs_path = os.path.abspath(path)
+        if abs_path in seen:
+            continue
+        seen.add(abs_path)
+        normalized.append(abs_path)
+    return normalized
+
+
+def _search_file_in_dirs(target_name: str, search_dirs: list[str]):
+    if not target_name:
+        return None
+
+    basename = os.path.basename(target_name)
+    for search_dir in search_dirs:
+        if not os.path.isdir(search_dir):
+            continue
+
+        direct_path = os.path.join(search_dir, target_name)
+        if os.path.exists(direct_path):
+            return direct_path
+
+        if not basename:
+            continue
+
+        for current_root, _, files in os.walk(search_dir):
+            if basename in files:
+                return os.path.join(current_root, basename)
+
+    return None
+
+
+def _resolve_screenshot_file_path(file_path: str):
+    """解析截图路径，兼容固定 SCREENSHOT_DIR 与临时目录兜底。"""
+    normalized_path = (file_path or '').strip()
+    if not normalized_path:
+        return normalized_path, []
+
+    if os.path.exists(normalized_path):
+        return normalized_path, []
+
+    search_dirs = _collect_screenshot_candidate_dirs()
+    candidate_names = []
+    if os.sep not in normalized_path and '/' not in normalized_path:
+        candidate_names.append(normalized_path)
+
+    basename = os.path.basename(normalized_path)
+    if basename and basename not in candidate_names:
+        candidate_names.append(basename)
+
+    for candidate_name in candidate_names:
+        resolved_path = _search_file_in_dirs(candidate_name, search_dirs)
+        if resolved_path:
+            return resolved_path, search_dirs
+
+    return normalized_path, search_dirs
+
+
+def _build_missing_file_error(original_path: str, searched_dirs: list[str]):
+    if not searched_dirs:
+        return {"error": f"文件不存在: {original_path}"}
+    return {
+        "error": f"文件不存在: {original_path}；已搜索目录: {', '.join(searched_dirs)}"
+    }
+
+
 def upload_screenshot(project_id: int, case_id: int, file_path: str, title: str,
                       description: str = "", step_number: int = None, page_url: str = ""):
     """上传单张截图"""
-    # 如果是文件名（无目录分隔符），自动从 SCREENSHOT_DIR 查找
-    if os.sep not in file_path and '/' not in file_path:
-        screenshot_dir = os.environ.get('SCREENSHOT_DIR', '')
-        if screenshot_dir:
-            file_path = os.path.join(screenshot_dir, file_path)
+    original_file_path = file_path
+    file_path, searched_dirs = _resolve_screenshot_file_path(file_path)
 
     if not os.path.exists(file_path):
-        return {"error": f"文件不存在: {file_path}"}
+        return _build_missing_file_error(original_file_path, searched_dirs)
 
     url = f"{BASE_URL}/api/projects/{project_id}/testcases/{case_id}/upload-screenshots/"
-    mime_types = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif'}
     ext = os.path.splitext(file_path)[1].lower()
-    content_type = mime_types.get(ext, 'image/png')
+    content_type = IMAGE_MIME_TYPES.get(ext, 'image/png')
 
     try:
         with open(file_path, 'rb') as f:
@@ -201,24 +319,21 @@ def upload_screenshots(project_id: int, case_id: int, file_paths: str, title: st
     if len(paths) > 10:
         return {"error": "一次最多上传10张图片"}
 
-    screenshot_dir = os.environ.get('SCREENSHOT_DIR', '')
     resolved_paths = []
     for fp in paths:
-        if os.sep not in fp and '/' not in fp and screenshot_dir:
-            fp = os.path.join(screenshot_dir, fp)
-        if not os.path.exists(fp):
-            return {"error": f"文件不存在: {fp}"}
-        resolved_paths.append(fp)
+        resolved_path, searched_dirs = _resolve_screenshot_file_path(fp)
+        if not os.path.exists(resolved_path):
+            return _build_missing_file_error(fp, searched_dirs)
+        resolved_paths.append(resolved_path)
 
     url = f"{BASE_URL}/api/projects/{project_id}/testcases/{case_id}/upload-screenshots/"
-    mime_types = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif'}
 
     try:
         files = []
         file_handles = []
         for fp in resolved_paths:
             ext = os.path.splitext(fp)[1].lower()
-            content_type = mime_types.get(ext, 'image/png')
+            content_type = IMAGE_MIME_TYPES.get(ext, 'image/png')
             f = open(fp, 'rb')
             file_handles.append(f)
             files.append(('screenshots', (os.path.basename(fp), f, content_type)))
@@ -283,6 +398,7 @@ def _parse_steps(steps_str):
 ACTIONS = {
     "get_projects": lambda args: get_projects(),
     "get_modules": lambda args: get_modules(args.project_id),
+    "add_module": lambda args: add_module(args.project_id, args.name, args.parent_id),
     "get_levels": lambda args: get_levels(),
     "get_testcases": lambda args: get_testcases(args.project_id, args.module_id),
     "get_testcase_detail": lambda args: get_testcase_detail(args.project_id, args.case_id),
@@ -318,6 +434,7 @@ def main():
     parser.add_argument("--action", required=True, choices=ACTIONS.keys(), help="要执行的操作")
     parser.add_argument("--project_id", type=int, help="项目ID")
     parser.add_argument("--module_id", type=int, help="模块ID")
+    parser.add_argument("--parent_id", type=int, help="父模块ID")
     parser.add_argument("--case_id", type=int, help="用例ID")
     parser.add_argument("--name", help="用例名称")
     parser.add_argument("--level", help="用例等级 (P0/P1/P2/P3)")

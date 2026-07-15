@@ -141,6 +141,7 @@ import { useAppI18n } from '@/composables/useAppI18n';
 import { useProjectStore } from '@/store/projectStore';
 import { KnowledgeService } from '../services/knowledgeService';
 import type { KnowledgeBase } from '../types/knowledge';
+import { normalizeListPayload } from '@/features/api-testing/services/responseHelpers';
 import KnowledgeBaseDetail from '../components/KnowledgeBaseDetail.vue';
 import KnowledgeBaseFormModal from '../components/KnowledgeBaseFormModal.vue';
 import KnowledgeBaseStatsModal from '../components/KnowledgeBaseStatsModal.vue';
@@ -330,19 +331,9 @@ const fetchKnowledgeBases = async () => {
 
     const data = await KnowledgeService.getKnowledgeBases(params);
 
-    // 检查返回的数据格式
-    if (data && typeof data === 'object' && 'results' in data) {
-      // 分页响应格式
-      knowledgeBases.value = data.results;
-      pagination.value.total = data.count;
-    } else if (Array.isArray(data)) {
-      // 数组格式（向后兼容）
-      knowledgeBases.value = data;
-      pagination.value.total = data.length;
-    } else {
-      knowledgeBases.value = [];
-      pagination.value.total = 0;
-    }
+    const { results, count } = normalizeListPayload<KnowledgeBase>(data);
+    knowledgeBases.value = results;
+    pagination.value.total = count;
   } catch (error: any) {
     console.error('获取知识库列表失败:', error);
     // 显示具体的错误消息

@@ -16,6 +16,7 @@ import {
   type UpdateDatabaseConfigData,
   type TestConnectionData
 } from '../../services/databaseConfigService'
+import { toArray } from '../../services/responseHelpers'
 import {
   IconPlus,
   IconEdit,
@@ -258,22 +259,7 @@ const fetchDatabaseConfigs = async () => {
     loading.value = true
     const response = await getDatabaseConfigs(Number(projectStore.currentProjectId))
     console.log('数据库配置返回数据:', response)
-    
-    // 修复：正确处理分页格式的返回数据
-    if (response.data && Array.isArray(response.data.results)) {
-      // 常见的分页格式 { count, next, previous, results: [] }
-      databaseConfigs.value = response.data.results
-    } else if (response.data && Array.isArray(response.data.data)) {
-      // 如果返回的是 { data: [] } 格式
-      databaseConfigs.value = response.data.data
-    } else if (Array.isArray(response.data)) {
-      // 如果直接返回数组
-      databaseConfigs.value = response.data
-    } else {
-      // 其他情况，确保是空数组
-      console.warn('获取数据库配置返回格式异常:', response)
-      databaseConfigs.value = []
-    }
+    databaseConfigs.value = toArray<DatabaseConfig>(response.data?.results ?? response.data)
     
     console.log('处理后的数据库配置列表:', databaseConfigs.value)
   } catch (error) {

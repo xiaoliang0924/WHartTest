@@ -95,6 +95,58 @@ from django.conf import settings
 import logging  # Import logging
 from asgiref.sync import sync_to_async  # For async operations in sync context
 
+async def auto_summarize_session_title(llm, chat_session, user_message):
+    """
+    使用 LLM 自动根据用户的第一条消息总结会话标题，并在后台同步更新数据库中的会话标题。
+    """
+    try:
+        # 对超长文本进行截断，避免超出 LLM 上下文限制、请求超时或消耗过多 Token
+        truncated_message = user_message or ""
+        if len(truncated_message) > 2000:
+            truncated_message = truncated_message[:2000] + "... [内容已截断]"
+
+        summary_prompt = (
+            "请根据以下用户的输入内容，总结出一个非常简短、生动、精准的会话标题。\n"
+            "要求：\n"
+            "1. 标题字数在15个字以内。\n"
+            "2. 不要包含任何标点符号、特殊字符或Markdown标记。\n"
+            "3. 只返回标题文本，不要包含任何解释、说明或引言。\n\n"
+            f"用户输入内容：\n{truncated_message}"
+        )
+        
+        logger.info(f"auto_summarize_session_title: Summarizing title for session {chat_session.session_id}")
+        response = await llm.ainvoke([HumanMessage(content=summary_prompt)])
+        new_title = response.content.strip()
+        
+        # 清理标题中的引号或多余字符
+        new_title = new_title.replace('"', '').replace("'", "").replace("“", "").replace("”", "").strip()
+        if new_title and len(new_title) > 0:
+            if len(new_title) > 100:
+                new_title = new_title[:97] + "..."
+            
+            # 更新 Django 数据库
+            @sync_to_async
+            def update_title():
+                try:
+                    sess = ChatSession.objects.get(id=chat_session.id)
+                    sess.title = new_title
+                    sess.save()
+                    logger.info(f"auto_summarize_session_title: Successfully updated title for session {chat_session.session_id} to '{new_title}'")
+                    return new_title
+                except Exception as db_err:
+                    logger.error(f"auto_summarize_session_title: Database update error: {db_err}")
+                    return None
+            
+            updated = await update_title()
+            if updated:
+                chat_session.title = updated
+                return updated
+    except Exception as e:
+        logger.error(f"auto_summarize_session_title: Failed to auto summarize session title: {e}", exc_info=True)
+    return None
+
+
+
 # 统一的 Checkpointer 工厂
 from wharttest_django.checkpointer import (
     get_async_checkpointer,
@@ -1519,6 +1571,26 @@ class ChatAPIView(APIView):
                     f"ChatAPIView: Conversation flow contains {len(conversation_flow)} messages"
                 )
 
+                # 主动双写：成功后触发增量同步将最新消息写入 ChatMessage 表中
+                try:
+                    sync_chat_messages_from_checkpointer(chat_session, request.user, thread_id)
+                except Exception as ex:
+                    logger.warning(f"ChatAPIView: Failed to proactively sync chat messages: {ex}")
+
+                # AI 自动总结会话标题
+                if chat_session.title.startswith("新对话"):
+                    try:
+                        import asyncio
+                        asyncio.create_task(
+                            auto_summarize_session_title(
+                                llm,
+                                chat_session,
+                                user_message_content,
+                            )
+                        )
+                    except Exception as summarize_err:
+                        logger.error(f"ChatAPIView: Failed to auto-summarize title: {summarize_err}")
+
                 return Response(
                     {
                         "status": "success",
@@ -1531,6 +1603,7 @@ class ChatAPIView(APIView):
                             "active_llm": active_config.name,
                             "thread_id": thread_id,
                             "session_id": session_id,
+                            "session_title": chat_session.title,
                             "project_id": project_id,
                             "project_name": project.name,
                             # 知识库相关信息
@@ -2542,6 +2615,109 @@ class UserChatSessionsAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+    def put(self, request, *args, **kwargs):
+        """
+        修改指定聊天会话的标题。
+        """
+        user = request.user
+        session_id = request.data.get("session_id")
+        project_id = request.data.get("project_id")
+        title = request.data.get("title")
+
+        if not session_id:
+            return Response(
+                {
+                    "status": "error",
+                    "code": status.HTTP_400_BAD_REQUEST,
+                    "message": "session_id is required.",
+                    "data": {},
+                    "errors": {"session_id": ["This field is required."]},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not title or not title.strip():
+            return Response(
+                {
+                    "status": "error",
+                    "code": status.HTTP_400_BAD_REQUEST,
+                    "message": "title is required and cannot be empty.",
+                    "data": {},
+                    "errors": {"title": ["This field may not be blank."]},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            # 校验会话是否存在并且属于当前用户
+            chat_session = ChatSession.objects.get(session_id=session_id, user=user)
+            
+            # 如果提供了 project_id，进行权限和匹配校验
+            if project_id:
+                project = check_project_permission(user, project_id)
+                if not project:
+                    return Response(
+                        {
+                            "status": "error",
+                            "code": status.HTTP_403_FORBIDDEN,
+                            "message": "You don't have permission to access this project.",
+                            "data": {},
+                            "errors": {"project_id": ["Permission denied."]},
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+                if str(chat_session.project_id) != str(project_id):
+                    return Response(
+                        {
+                            "status": "error",
+                            "code": status.HTTP_400_BAD_REQUEST,
+                            "message": "Session does not belong to the specified project.",
+                            "data": {},
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            # 更新标题并保存
+            chat_session.title = title.strip()
+            chat_session.save()
+
+            return Response(
+                {
+                    "status": "success",
+                    "code": status.HTTP_200_OK,
+                    "message": "Chat session title updated successfully.",
+                    "data": {
+                        "id": chat_session.session_id,
+                        "title": chat_session.title,
+                        "updated_at": chat_session.updated_at.isoformat() if chat_session.updated_at else None,
+                        "created_at": chat_session.created_at.isoformat() if chat_session.created_at else None,
+                    },
+                },
+                status=status.HTTP_200_OK,
+            )
+        except ChatSession.DoesNotExist:
+            return Response(
+                {
+                    "status": "error",
+                    "code": status.HTTP_404_NOT_FOUND,
+                    "message": "Chat session not found.",
+                    "data": {},
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except Exception as e:
+            logger.error(f"UserChatSessionsAPIView.put: Failed to update session title: {e}", exc_info=True)
+            return Response(
+                {
+                    "status": "error",
+                    "code": status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "message": f"Failed to update session title: {str(e)}",
+                    "data": {},
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
 
 
 @method_decorator(csrf_exempt, name="dispatch")

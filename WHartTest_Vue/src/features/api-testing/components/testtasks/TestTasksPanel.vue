@@ -12,6 +12,7 @@ import {
   createTestTaskExecution,
   type TestTaskSuite 
 } from '../../services/testTaskService'
+import { toArray } from '../../services/responseHelpers'
 
 const router = useRouter()
 const projectStore = useProjectStore()
@@ -20,6 +21,10 @@ const environmentStore = useEnvironmentStore()
 const loading = ref(false)
 const testTaskSuites = ref<TestTaskSuite[]>([])
 const isDarkTheme = computed(() => themeStore.isBlack)
+
+const toTaskSuiteList = (results: unknown): TestTaskSuite[] => {
+  return toArray<TestTaskSuite>(results)
+}
 
 // 添加 state 定义
 const state = reactive({
@@ -56,7 +61,7 @@ const fetchTestTaskSuites = async () => {
       search: searchParams.value.search || undefined,
       priority: searchParams.value.priority
     })
-    testTaskSuites.value = response.data.results || []
+    testTaskSuites.value = toTaskSuiteList(response.data?.results ?? response.data)
     pagination.value.total = response.data.count || 0
   } catch (error) {
     console.error('获取测试任务集失败', error)

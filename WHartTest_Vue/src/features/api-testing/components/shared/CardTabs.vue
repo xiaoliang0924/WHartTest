@@ -11,8 +11,13 @@
       </button>
     </div>
     <div class="card-tabs-content">
-      <template v-for="tab in tabs" :key="tab.key">
-        <div v-if="destroyOnHide ? modelValue === tab.key : true" v-show="modelValue === tab.key" class="card-tab-pane">
+      <template v-if="destroyOnHide">
+        <div v-if="activeTabItem" :key="activeTabItem.key" class="card-tab-pane">
+          <slot :name="activeTabItem.key" />
+        </div>
+      </template>
+      <template v-else>
+        <div v-for="tab in tabs" :key="tab.key" v-show="modelValue === tab.key" class="card-tab-pane">
           <slot :name="tab.key" />
         </div>
       </template>
@@ -21,6 +26,8 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+
 export interface TabItem {
   key: string
   title: string
@@ -39,6 +46,10 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: string]
 }>()
+
+const activeTabItem = computed(() => {
+  return props.tabs.find(tab => tab.key === props.modelValue) ?? props.tabs[0]
+})
 </script>
 
 <style scoped>

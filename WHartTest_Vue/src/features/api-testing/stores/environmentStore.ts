@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import type { ApiEnvironment } from '../types/environment';
 import { environmentService } from '../services/environmentService';
+import { toArray } from '../services/responseHelpers';
 
 const ENVIRONMENT_STORAGE_KEY = 'api_testing_selected_environments';
 
@@ -72,7 +73,7 @@ export const useEnvironmentStore = defineStore('apiEnvironment', () => {
     try {
       const res = await environmentService.list(projectId);
       if (res.success && res.data) {
-        environments.value = Array.isArray(res.data) ? res.data : [];
+        environments.value = toArray<ApiEnvironment>((res.data as any)?.results ?? res.data);
         const validEnvironmentIds = new Set(environments.value.map((environment) => environment.id));
         const canKeepCurrentSelection = !projectChanged
           && currentEnvironmentId.value !== null

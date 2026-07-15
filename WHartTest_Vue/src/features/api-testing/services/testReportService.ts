@@ -1,6 +1,7 @@
 import { request } from '@/utils/request';
 import { useProjectStore } from '@/store/projectStore';
 import type { ApiTestReport, ApiTestReportDetail } from '../types/testcase';
+import { wrapListResponse, wrapOneResponse } from './responseHelpers';
 
 const base = (projectId: number) => `/projects/${projectId}/api-test-reports`;
 
@@ -28,21 +29,11 @@ function _pid(params?: Record<string, any>): number {
 }
 
 function _wrapList(res: any): any {
-  if (!res.success) {
-    const err: any = new Error(res.error || res.message || '操作失败');
-    err.errors = res.errors;
-    throw err;
-  }
-  return { data: { results: res.data ?? [], count: res.total ?? 0 }, status: 'success', message: '' };
+  return wrapListResponse(res);
 }
 
 function _wrapOne(res: any): any {
-  if (!res.success) {
-    const err: any = new Error(res.error || res.message || '操作失败');
-    err.errors = res.errors;
-    throw err;
-  }
-  return { data: res.data ?? null, status: 'success', message: '' };
+  return wrapOneResponse(res);
 }
 
 // Type alias

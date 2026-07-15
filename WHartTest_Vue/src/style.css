@@ -586,6 +586,7 @@ button:focus-visible {
 :root[data-theme='black'] .test-suite-management-view,
 :root[data-theme='black'] .test-execution-history-view,
 :root[data-theme='black'] .apikey-management,
+:root[data-theme='black'] .operation-log-page,
 :root[data-theme='black'] .testcase-management-container .right-content-area,
 :root[data-theme='black'] .ui-automation-layout .layout-content,
 :root[data-theme='black'] .module-panel {

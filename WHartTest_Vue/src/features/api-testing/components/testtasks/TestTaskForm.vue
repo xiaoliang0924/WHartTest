@@ -15,6 +15,7 @@ import {
   type TestTaskSuiteForm,
   type TestCase
 } from '../../services/testTaskService'
+import { toArray } from '../../services/responseHelpers'
 
 const props = defineProps({
   mode: {
@@ -236,7 +237,7 @@ const fetchTestCases = async () => {
       priority: searchForm.value.priority,
       ordering: '-created_at'
     })
-    testCases.value = response.data.results || []
+    testCases.value = toArray<TestCase>(response.data?.results ?? response.data)
   } catch (error) {
     console.error('获取测试用例列表失败', error)
     Message.error('获取测试用例列表失败')

@@ -225,6 +225,9 @@ class ResponseData(BaseModel):
     encoding: Union[Text, None] = None
     content_type: Text
     body: Union[Text, bytes, List, Dict, None]
+    error: Union[Text, None] = None
+    error_type: Union[Text, None] = None
+    is_transport_error: bool = False
 
 
 class ReqRespData(BaseModel):

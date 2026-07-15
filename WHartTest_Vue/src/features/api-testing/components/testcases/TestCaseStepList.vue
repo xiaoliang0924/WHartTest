@@ -29,7 +29,7 @@ interface Props {
       variables: Record<string, any>
       parameters: Record<string, any>
       export: string[]
-      verify: boolean
+      verify?: boolean
     }
   }
 }
@@ -157,8 +157,7 @@ const handleApiSelect = async (selectedInterfaces: ApiInterface[]) => {
         base_url: '',
         variables: {},
         parameters: {},
-        export: [],
-        verify: true
+        export: []
       },
       steps_info: selectedInterfaces.map((api, index) => ({
         name: api.name,
