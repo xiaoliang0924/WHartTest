@@ -12,6 +12,7 @@ import json
 import os
 import queue
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -27,6 +28,40 @@ import logging
 from .output_sanitizer import strip_terminal_control_sequences
 
 logger = logging.getLogger("orchestrator_integration")
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return
+        except Exception:
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=3)
+            return
+        except Exception:
+            pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except Exception:
+            pass
+
+    try:
+        proc.kill()
+    except Exception:
+        pass
 
 
 class PlaywrightPersistentSessionError(RuntimeError):
@@ -195,6 +230,14 @@ class _PlaywrightNodeProcess:
             merged_env = os.environ.copy()
             merged_env.update(env)
 
+            popen_kwargs: dict[str, object] = {}
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = getattr(
+                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+                )
+            else:
+                popen_kwargs["start_new_session"] = True
+
             self._proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
@@ -206,6 +249,7 @@ class _PlaywrightNodeProcess:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                **popen_kwargs,
             )
 
             self._stdout_thread = threading.Thread(
@@ -390,22 +434,11 @@ class _PlaywrightNodeProcess:
             except Exception:
                 pass
 
-        try:
-            self._proc.terminate()
-        except Exception:
-            pass
-
+        _terminate_process_tree(self._proc)
         try:
             self._proc.wait(timeout=3)
         except Exception:
-            try:
-                self._proc.kill()
-            except Exception:
-                pass
-            try:
-                self._proc.wait(timeout=3)
-            except Exception:
-                pass
+            pass
 
         self._proc = None
         logger.info(f"[persistent_playwright] Node.js 进程已终止: {self.skill_dir}")

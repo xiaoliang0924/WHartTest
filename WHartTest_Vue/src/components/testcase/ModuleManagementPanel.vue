@@ -15,6 +15,28 @@
             @input="onModuleSearch"
           />
           <div class="module-actions">
+            <a-button-group size="small" class="module-move-buttons">
+              <a-tooltip content="上移">
+                <a-button
+                  type="outline"
+                  :disabled="!canMoveUp || movingModule"
+                  :loading="movingModule && movingDirection === 'up'"
+                  @click="handleMoveSelectedModule('up')"
+                >
+                  <template #icon><icon-up /></template>
+                </a-button>
+              </a-tooltip>
+              <a-tooltip content="下移">
+                <a-button
+                  type="outline"
+                  :disabled="!canMoveDown || movingModule"
+                  :loading="movingModule && movingDirection === 'down'"
+                  @click="handleMoveSelectedModule('down')"
+                >
+                  <template #icon><icon-down /></template>
+                </a-button>
+              </a-tooltip>
+            </a-button-group>
             <a-dropdown @select="handleModuleAction" trigger="hover" position="bottom" :popup-max-width="false" class="module-dropdown">
               <a-button type="primary" size="small" class="module-action-button">
                 操作
@@ -44,7 +66,9 @@
             @expand="onTreeExpand"
           >
             <template #title="nodeData">
-              <span>{{ nodeData.name }}</span>
+              <span class="module-title" @dblclick.stop="openEditModule(nodeData.id as number)">
+                {{ nodeData.name }}
+              </span>
               <span class="module-count"> ({{ nodeData.testcase_count || nodeData.test_case_count || 0 }})</span>
             </template>
           </a-tree>
@@ -72,9 +96,11 @@ import type { TreeNodeData } from '@arco-design/web-vue';
 import {
   getTestCaseModules,
   deleteTestCaseModule,
+  moveTestCaseModule,
   type TestCaseModule,
   type CreateTestCaseModuleRequest,
 } from '@/services/testcaseModuleService';
+import { IconUp, IconDown } from '@arco-design/web-vue/es/icon';
 import ModuleEditModal from './ModuleEditModal.vue'; // 引入模块编辑模态框
 
 const props = defineProps<{
@@ -99,6 +125,8 @@ const testCaseModules = ref<TestCaseModule[]>([]);
 const selectedModuleKey = ref<number | null>(null);
 const selectedModuleKeys = ref<(number|string)[]>([]); // For a-tree v-model:selected-keys
 const expandedKeys = ref<(string | number)[]>([]); // 树节点展开状态 - 默认收起
+const movingModule = ref(false);
+const movingDirection = ref<'up' | 'down' | null>(null);
 
 // 模块编辑模态框相关
 const moduleModalVisible = ref(false);
@@ -130,10 +158,21 @@ const fetchTestCaseModules = async () => {
   }
 };
 
+const getModuleParentId = (module: TestCaseModule): number | null => {
+  return module.parent_id ?? module.parent ?? null;
+};
+
+const sortModules = (modules: TestCaseModule[]): TestCaseModule[] => {
+  return [...modules].sort((a, b) => {
+    const orderDiff = (a.sort_order ?? 0) - (b.sort_order ?? 0);
+    return orderDiff !== 0 ? orderDiff : a.id - b.id;
+  });
+};
+
 // 构建模块树 (扁平列表转树形)
 const buildModuleTree = (modules: TestCaseModule[], parentId: number | null = null): TreeNodeData[] => {
-  return modules
-    .filter(module => module.parent === parentId || module.parent_id === parentId)
+  return sortModules(modules)
+    .filter(module => getModuleParentId(module) === parentId)
     .map(module => ({
       ...module,
       id: module.id, // 确保 id 作为 key
@@ -148,6 +187,28 @@ const buildModuleTree = (modules: TestCaseModule[], parentId: number | null = nu
 const moduleTreeData = computed(() => {
   return buildModuleTree(testCaseModules.value);
 });
+
+const selectedModule = computed(() => {
+  if (!selectedModuleKey.value) return null;
+  return testCaseModules.value.find(module => module.id === selectedModuleKey.value) || null;
+});
+
+const selectedSiblingModules = computed(() => {
+  if (!selectedModule.value) return [];
+  const parentId = getModuleParentId(selectedModule.value);
+  return sortModules(testCaseModules.value.filter(module => getModuleParentId(module) === parentId));
+});
+
+const selectedSiblingIndex = computed(() => {
+  if (!selectedModule.value) return -1;
+  return selectedSiblingModules.value.findIndex(module => module.id === selectedModule.value?.id);
+});
+
+const canMoveUp = computed(() => selectedSiblingIndex.value > 0);
+const canMoveDown = computed(() => (
+  selectedSiblingIndex.value >= 0 &&
+  selectedSiblingIndex.value < selectedSiblingModules.value.length - 1
+));
 
 // 用于 TreeSelect 的模块树数据 (排除当前编辑的模块及其子模块，防止循环引用)
 const moduleTreeForSelect = computed(() => {
@@ -222,7 +283,49 @@ const onTreeExpand = (newExpandedKeys: (string | number)[]) => {
   expandedKeys.value = newExpandedKeys;
 };
 
+const handleMoveSelectedModule = async (direction: 'up' | 'down') => {
+  if (!currentProjectId.value || !selectedModuleKey.value) {
+    Message.warning('请先选择要移动的模块');
+    return;
+  }
+  if ((direction === 'up' && !canMoveUp.value) || (direction === 'down' && !canMoveDown.value)) {
+    return;
+  }
+
+  movingModule.value = true;
+  movingDirection.value = direction;
+  try {
+    const response = await moveTestCaseModule(currentProjectId.value, selectedModuleKey.value, direction);
+    if (response.success) {
+      Message.success(direction === 'up' ? '模块上移成功' : '模块下移成功');
+      await fetchTestCaseModules();
+      selectedModuleKeys.value = [selectedModuleKey.value];
+      emit('moduleUpdated');
+    } else {
+      Message.error(response.error || '移动模块失败');
+    }
+  } catch (error) {
+    Message.error('移动模块时发生错误');
+  } finally {
+    movingModule.value = false;
+    movingDirection.value = null;
+  }
+};
+
 // 模块操作处理
+const openEditModule = (moduleId: number) => {
+  const moduleToEdit = testCaseModules.value.find(m => m.id === moduleId);
+  if (!moduleToEdit) return;
+
+  selectedModuleKey.value = moduleToEdit.id;
+  selectedModuleKeys.value = [moduleToEdit.id];
+  isEditingModule.value = true;
+  moduleForm.id = moduleToEdit.id;
+  moduleForm.name = moduleToEdit.name;
+  moduleForm.parent = getModuleParentId(moduleToEdit);
+  moduleModalVisible.value = true;
+};
+
 const handleModuleAction = async (action: string | number | Record<string, any> | undefined) => {
   const actionValue = action as string;
   switch (actionValue) {
@@ -251,7 +354,7 @@ const handleModuleAction = async (action: string | number | Record<string, any> 
           isEditingModule.value = true;
           moduleForm.id = moduleToEdit.id;
           moduleForm.name = moduleToEdit.name;
-          moduleForm.parent = moduleToEdit.parent || undefined;
+          moduleForm.parent = getModuleParentId(moduleToEdit);
           moduleModalVisible.value = true;
         }
       } else {
@@ -436,6 +539,10 @@ defineExpose({
   margin-left: 4px;
 }
 
+.module-title {
+  cursor: text;
+}
+
 .module-panel-header {
   flex-shrink: 0;
   padding: 16px;
@@ -445,14 +552,20 @@ defineExpose({
 .module-actions {
   display: flex;
   justify-content: center; /* 居中对齐 */
+  align-items: center;
+  gap: 8px;
   margin-top: 8px;
   margin-bottom: 16px;
   /* flex-shrink 已移动到父级 .module-panel-header */
 }
 
+.module-move-buttons {
+  flex-shrink: 0;
+}
+
 /* 下拉菜单相关样式 */
 .module-dropdown {
-  width: 100%;
+  width: auto;
 }
 
 .module-action-button {

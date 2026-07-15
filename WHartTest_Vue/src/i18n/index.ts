@@ -166,8 +166,8 @@ const APP_MESSAGES: MessageCatalog = {
     'en-US': 'Create an account',
   },
   'register.subtitle': {
-    'zh-CN': '欢迎加入WHartTest',
-    'en-US': 'Welcome to WHartTest',
+    'zh-CN': '欢迎加入BaiYunTest',
+    'en-US': 'Welcome to BaiYunTest',
   },
   'register.submit': {
     'zh-CN': '注册',
@@ -322,8 +322,8 @@ const APP_MESSAGES: MessageCatalog = {
     'en-US': 'Thinking',
   },
   'chat.empty': {
-    'zh-CN': '开始与 WHartTest 的对话吧',
-    'en-US': 'Start a conversation with WHartTest',
+    'zh-CN': '开始与 BaiYunTest 的对话吧',
+    'en-US': 'Start a conversation with BaiYunTest',
   },
   'chat.releaseToUpload': {
     'zh-CN': '释放以上传图片',
@@ -386,8 +386,8 @@ const APP_MESSAGES: MessageCatalog = {
     'en-US': 'Select a project first',
   },
   'chat.startConversation': {
-    'zh-CN': '开始与 WHartTest 的对话吧',
-    'en-US': 'Start a conversation with WHartTest',
+    'zh-CN': '开始与 BaiYunTest 的对话吧',
+    'en-US': 'Start a conversation with BaiYunTest',
   },
   'chat.toolScreenshot': {
     'zh-CN': '📷 工具截图',
@@ -470,7 +470,7 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '还没有账号?': 'No account yet?',
   '立即注册': 'Register now',
   '注册新账户': 'Create an account',
-  '欢迎加入WHartTest': 'Welcome to WHartTest',
+  '欢迎加入BaiYunTest': 'Welcome to BaiYunTest',
   '请输入邮箱地址': 'Enter email address',
   '请再次输入密码': 'Confirm password',
   '注册': 'Register',
@@ -488,7 +488,7 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '工具审批': 'Tool approval',
   '微信接入': 'WeChat access',
   '清除对话': 'Clear chat',
-  '开始与 WHartTest 的对话吧': 'Start a conversation with WHartTest',
+  '开始与 BaiYunTest 的对话吧': 'Start a conversation with BaiYunTest',
   '图表预览': 'Diagram preview',
   'HTML 预览': 'HTML preview',
   '工具执行审批': 'Tool execution approval',
@@ -1211,6 +1211,7 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
 
   // ── 审核状态 ──
   '待审核': 'Pending',
+  '待产品确认': 'Pending product confirmation',
   '优化': 'Optimize',
   '优化待审核': 'Re-review',
   '不可用': 'N/A',

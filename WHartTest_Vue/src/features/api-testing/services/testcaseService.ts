@@ -9,7 +9,7 @@ const base = (projectId: number) => `/projects/${projectId}/api-testcases`;
 
 export const testcaseService = {
   list: (projectId: number, params?: Record<string, any>) =>
-    request<ApiTestCase[]>({ url: `${base(projectId)}/`, method: 'GET', params }),
+    request<ApiTestCase[] | PaginatedResponse<ApiTestCase>>({ url: `${base(projectId)}/`, method: 'GET', params }),
 
   get: (projectId: number, id: number) =>
     request<ApiTestCase>({ url: `${base(projectId)}/${id}/`, method: 'GET' }),

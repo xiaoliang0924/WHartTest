@@ -63,6 +63,22 @@
         </a-button>
         <a-button
           v-if="selectedTestCaseIds.length > 0"
+          type="outline"
+          @click="openMoveModal(selectedTestCaseIds)"
+        >
+          <template #icon><icon-folder /></template>
+          {{ pageText.batchMoveButton(selectedTestCaseIds.length) }}
+        </a-button>
+        <a-button
+          v-if="selectedTestCaseIds.length > 0"
+          type="primary"
+          @click="assignSelectedCases"
+        >
+          <template #icon><icon-user-add /></template>
+          分派执行 ({{ selectedTestCaseIds.length }})
+        </a-button>
+        <a-button
+          v-if="selectedTestCaseIds.length > 0"
           type="primary"
           status="danger"
           @click="handleBatchDelete"
@@ -92,9 +108,14 @@
       :loading="loading"
       :scroll="tableScroll"
       :bordered="{ cell: true }"
+      row-key="id"
+      :draggable="{ type: 'handle', width: 32 }"
+      column-resizable
       class="test-case-table"
       @page-change="onPageChange"
       @page-size-change="onPageSizeChange"
+      @change="handleTableChange"
+      @column-resize="handleColumnResize"
 
 
     >
@@ -119,7 +140,11 @@
       </template>
       <template #name="{ record }">
         <a-tooltip :content="record.name">
-          <span class="testcase-name-link" @click.stop="handleViewTestCase(record)">
+          <span
+            class="testcase-name-link testcase-text-cell"
+            :style="getTextCellStyle('name')"
+            @click.stop="handleViewTestCase(record)"
+          >
             {{ record.name }}
           </span>
         </a-tooltip>
@@ -147,13 +172,27 @@
         </a-dropdown>
       </template>
       <template #module="{ record }">
-        <span v-if="record.module_detail">{{ record.module_detail }}</span>
-        <span v-else class="text-gray">{{ pageText.unassigned }}</span>
+        <a-tooltip v-if="record.module_detail" :content="record.module_detail">
+          <span class="testcase-text-cell" :style="getTextCellStyle('module_detail')">
+            {{ record.module_detail }}
+          </span>
+        </a-tooltip>
+        <span v-else class="text-gray testcase-text-cell" :style="getTextCellStyle('module_detail')">
+          {{ pageText.unassigned }}
+        </span>
+      </template>
+      <template #creator="{ record }">
+        <a-tooltip :content="record.creator_detail?.username || '-'">
+          <span class="testcase-text-cell" :style="getTextCellStyle('creator_detail')">
+            {{ record.creator_detail?.username || '-' }}
+          </span>
+        </a-tooltip>
       </template>
       <template #operations="{ record }">
         <a-space :size="4">
           <a-button type="primary" size="mini" @click.stop="handleViewTestCase(record)">{{ pageText.view }}</a-button>
           <a-button type="primary" size="mini" @click.stop="handleEditTestCase(record)">{{ pageText.edit }}</a-button>
+          <a-button type="outline" size="mini" @click.stop="openMoveModal([record.id])">{{ pageText.move }}</a-button>
           <a-button type="outline" size="mini" @click.stop="handleExecuteTestCase(record)">{{ pageText.execute }}</a-button>
           <a-button type="primary" status="danger" size="mini" @click.stop="handleDeleteTestCase(record)">{{ pageText.delete }}</a-button>
         </a-space>
@@ -174,11 +213,30 @@
       :selected-ids="selectedTestCaseIds"
       :module-tree="moduleTree"
     />
+
+    <a-modal
+      v-model:visible="moveModalVisible"
+      :title="pageText.moveCasesTitle"
+      :ok-text="pageText.move"
+      :ok-loading="isMoving"
+      @before-ok="handleConfirmMove"
+    >
+      <p class="move-modal-hint">{{ pageText.moveCasesHint(movingTestCaseIds.length) }}</p>
+      <a-tree-select
+        v-model="targetModuleId"
+        :data="moduleTree || []"
+        :placeholder="pageText.selectTargetModule"
+        allow-search
+        allow-clear
+        :field-names="{ key: 'key', title: 'title', children: 'children' }"
+      />
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, computed, watch, toRefs } from 'vue';
+import { useRouter } from 'vue-router';
 import { Message, Modal } from '@arco-design/web-vue';
 import { IconFolder, IconDownload, IconUpload, IconDown } from '@arco-design/web-vue/es/icon';
 import { useAppI18n } from '@/composables/useAppI18n';
@@ -188,12 +246,16 @@ import {
   getTestCaseList,
   deleteTestCase as deleteTestCaseService,
   batchDeleteTestCases,
+  batchMoveTestCases,
+  reorderTestCases,
   updateTestCaseReviewStatus,
   type TestCase,
   type ReviewStatus,
 } from '@/services/testcaseService';
 import { formatDate, getLevelColor, getReviewStatusColor } from '@/utils/formatters';
-import type { TreeNodeData } from '@arco-design/web-vue';
+import type { TableColumnData, TreeNodeData } from '@arco-design/web-vue';
+
+const router = useRouter();
 
 const props = defineProps<{
   currentProjectId: number | null;
@@ -207,10 +269,18 @@ const emit = defineEmits<{
   (e: 'editTestCase', testCase: TestCase): void;
   (e: 'viewTestCase', testCase: TestCase): void;
   (e: 'testCaseDeleted'): void;
+  (e: 'testCasesMoved'): void;
   (e: 'executeTestCase', testCase: TestCase): void;
   (e: 'module-filter-change', moduleId: number | null): void;
   (e: 'requestOptimization', testCase: TestCase): void;
 }>();
+
+const assignSelectedCases = () => {
+  router.push({
+    name: 'ManualTestExecution',
+    query: { testcase_ids: selectedTestCaseIds.value.join(',') },
+  });
+};
 
 const { currentProjectId, selectedModuleId } = toRefs(props);
 const { isEnglish } = useAppI18n();
@@ -227,6 +297,15 @@ const pageText = computed(() => (
         export: 'Export',
         import: 'Import',
         batchDeleteButton: (count: number) => `Batch delete (${count})`,
+        batchMoveButton: (count: number) => `Move (${count})`,
+        move: 'Move',
+        moveCasesTitle: 'Move test cases',
+        moveCasesHint: (count: number) => `Select a target module for ${count} test case(s).`,
+        selectTargetModule: 'Select target module',
+        selectTargetModuleFirst: 'Select a target module first',
+        moveCasesSuccess: (count: number, moduleName: string) => `Moved ${count} test case(s) to ${moduleName}`,
+        moveCasesFailed: 'Failed to move test cases',
+        moveCasesError: 'An error occurred while moving test cases',
         generateCases: 'Generate cases',
         addCase: 'Add case',
         noProjectSelected: 'Select a project from the top bar',
@@ -275,6 +354,15 @@ const pageText = computed(() => (
         export: '导出',
         import: '导入',
         batchDeleteButton: (count: number) => `批量删除 (${count})`,
+        batchMoveButton: (count: number) => `移动 (${count})`,
+        move: '移动',
+        moveCasesTitle: '移动测试用例',
+        moveCasesHint: (count: number) => `请选择 ${count} 条测试用例的目标模块`,
+        selectTargetModule: '请选择目标模块',
+        selectTargetModuleFirst: '请先选择目标模块',
+        moveCasesSuccess: (count: number, moduleName: string) => `已将 ${count} 条测试用例移动到 ${moduleName}`,
+        moveCasesFailed: '移动测试用例失败',
+        moveCasesError: '移动测试用例时发生错误',
         generateCases: '生成用例',
         addCase: '添加用例',
         noProjectSelected: '请在顶部选择一个项目',
@@ -338,6 +426,7 @@ const reviewStatusOptions = computed(() => (
         { value: 'approved', label: 'Approved', color: 'green' },
         { value: 'needs_optimization', label: 'Optimize', color: 'blue' },
         { value: 'optimization_pending_review', label: 'Re-review', color: 'purple' },
+        { value: 'pending_product_confirmation', label: 'Product confirmation', color: 'cyan' },
         { value: 'unavailable', label: 'N/A', color: 'red' },
       ]
     : [
@@ -345,6 +434,7 @@ const reviewStatusOptions = computed(() => (
         { value: 'approved', label: '通过', color: 'green' },
         { value: 'needs_optimization', label: '优化', color: 'blue' },
         { value: 'optimization_pending_review', label: '优化待审核', color: 'purple' },
+        { value: 'pending_product_confirmation', label: '待产品确认', color: 'cyan' },
         { value: 'unavailable', label: '不可用', color: 'red' },
       ]
 ));
@@ -393,12 +483,57 @@ const localSearchKeyword = ref('');
 const selectedLevel = ref<string>('');
 const selectedTestType = ref<string>('');
 // 默认选中除"不可用"之外的所有状态
-const DEFAULT_REVIEW_STATUSES: ReviewStatus[] = ['pending_review', 'approved', 'needs_optimization', 'optimization_pending_review'];
+const DEFAULT_REVIEW_STATUSES: ReviewStatus[] = ['pending_review', 'approved', 'needs_optimization', 'optimization_pending_review', 'pending_product_confirmation'];
 const selectedReviewStatuses = ref<ReviewStatus[]>([...DEFAULT_REVIEW_STATUSES]);
 const testCaseData = ref<TestCase[]>([]);
 const selectedTestCaseIds = ref<number[]>([]);
+const movingTestCaseIds = ref<number[]>([]);
+const targetModuleId = ref<number | undefined>();
+const moveModalVisible = ref(false);
+const isMoving = ref(false);
 const importModalRef = ref<InstanceType<typeof ImportModal> | null>(null);
 const exportModalRef = ref<InstanceType<typeof ExportModal> | null>(null);
+const COLUMN_WIDTH_STORAGE_KEY = 'wharttest:testcase-list-column-widths';
+
+const defaultColumnWidths: Record<string, number> = {
+  id: 50,
+  name: 180,
+  precondition: 120,
+  level: 80,
+  test_type: 90,
+  review_status: 120,
+  module_detail: 100,
+  creator_detail: 80,
+  created_at: 130,
+};
+
+const getStoredColumnWidths = (): Record<string, number> => {
+  try {
+    const stored = localStorage.getItem(COLUMN_WIDTH_STORAGE_KEY);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored) as Record<string, number>;
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, width]) => Number.isFinite(width) && width >= 40)
+    );
+  } catch {
+    return {};
+  }
+};
+
+const columnWidths = reactive<Record<string, number>>({
+  ...defaultColumnWidths,
+  ...getStoredColumnWidths(),
+});
+
+const getColumnWidth = (key: string): number => columnWidths[key] ?? defaultColumnWidths[key] ?? 100;
+
+const getTextCellStyle = (key: string) => ({
+  maxWidth: `${Math.max(24, getColumnWidth(key) - 24)}px`,
+});
+
+const saveColumnWidths = () => {
+  localStorage.setItem(COLUMN_WIDTH_STORAGE_KEY, JSON.stringify(columnWidths));
+};
 
 // 响应式屏幕宽度检测
 const isSmallScreen = ref(window.innerWidth < 1222);
@@ -411,7 +546,10 @@ const handleResize = () => {
 
 // 表格滚动配置
 const tableScroll = computed(() => ({
-  x: 900,
+  x: Math.max(
+    900,
+    32 + 36 + Object.keys(defaultColumnWidths).reduce((total, key) => total + getColumnWidth(key), 0) + 200
+  ),
   y: tableContainerHeight.value,
 }));
 
@@ -488,38 +626,68 @@ const handleSelectCurrentPage = (checked: boolean) => {
   }
 };
 
-const columns = computed(() => [
+const columns = computed(() => ([
   {
     title: pageText.value.select,
     slotName: 'selection',
     width: 36,
-    dataIndex: 'selection',
     titleSlotName: 'selectAll',
     align: 'center'
   },
-  { title: 'ID', dataIndex: 'id', width: 50, align: 'center' },
-  { title: pageText.value.caseName, dataIndex: 'name', slotName: 'name', width: 180, ellipsis: true, tooltip: false, align: 'center' },
-  { title: pageText.value.precondition, dataIndex: 'precondition', width: 120, ellipsis: true, tooltip: true, align: 'center' },
-  { title: pageText.value.priority, dataIndex: 'level', slotName: 'level', width: 80, align: 'center' },
-  { title: pageText.value.testType, dataIndex: 'test_type', slotName: 'testType', width: 90, align: 'center' },
-  { title: pageText.value.reviewStatus, dataIndex: 'review_status', slotName: 'reviewStatus', width: 120, align: 'center' },
-  { title: pageText.value.module, dataIndex: 'module_detail', slotName: 'module', width: 100, ellipsis: true, tooltip: true, align: 'center' },
+  { title: 'ID', dataIndex: 'id', width: getColumnWidth('id'), align: 'center' },
+  { title: pageText.value.caseName, dataIndex: 'name', slotName: 'name', width: getColumnWidth('name'), ellipsis: true, tooltip: false, align: 'center' },
+  { title: pageText.value.precondition, dataIndex: 'precondition', width: getColumnWidth('precondition'), ellipsis: true, tooltip: true, align: 'center' },
+  { title: pageText.value.priority, dataIndex: 'level', slotName: 'level', width: getColumnWidth('level'), align: 'center' },
+  { title: pageText.value.testType, dataIndex: 'test_type', slotName: 'testType', width: getColumnWidth('test_type'), align: 'center' },
+  { title: pageText.value.reviewStatus, dataIndex: 'review_status', slotName: 'reviewStatus', width: getColumnWidth('review_status'), align: 'center' },
+  { title: pageText.value.module, dataIndex: 'module_detail', slotName: 'module', width: getColumnWidth('module_detail'), ellipsis: true, tooltip: true, align: 'center' },
   {
     title: pageText.value.creator,
     dataIndex: 'creator_detail',
-    render: ({ record }: { record: TestCase }) => record.creator_detail?.username || '-',
-    width: 80,
+    slotName: 'creator',
+    width: getColumnWidth('creator_detail'),
     align: 'center',
   },
   {
     title: pageText.value.createdAt,
     dataIndex: 'created_at',
     render: ({ record }: { record: TestCase }) => formatDate(record.created_at),
-    width: 130,
+    width: getColumnWidth('created_at'),
     align: 'center',
   },
   { title: pageText.value.actions, slotName: 'operations', width: 200, fixed: 'right', align: 'center' },
-]);
+]) as TableColumnData[]);
+
+const handleColumnResize = (dataIndex: string, width: number) => {
+  if (!(dataIndex in defaultColumnWidths)) return;
+  columnWidths[dataIndex] = Math.max(40, Math.round(width));
+  saveColumnWidths();
+};
+
+const handleTableChange = async (
+  data: TestCase[],
+  extra: { type?: string }
+) => {
+  if (extra.type !== 'drag' || !currentProjectId.value) return;
+
+  const orderedIds = data.map(item => item.id);
+  if (orderedIds.length === 0) return;
+
+  testCaseData.value = [...data];
+
+  try {
+    const response = await reorderTestCases(currentProjectId.value, orderedIds);
+    if (response.success) {
+      Message.success(response.message || '测试用例顺序已保存');
+    } else {
+      Message.error(response.error || '保存测试用例顺序失败');
+      fetchTestCases();
+    }
+  } catch (error) {
+    Message.error('保存测试用例顺序时发生错误');
+    fetchTestCases();
+  }
+};
 
 const fetchTestCases = async () => {
   if (!currentProjectId.value) {
@@ -727,6 +895,48 @@ const handleBatchDelete = () => {
       }
     },
   });
+};
+
+const openMoveModal = (testCaseIds: number[]) => {
+  if (!currentProjectId.value || testCaseIds.length === 0) return;
+  movingTestCaseIds.value = [...new Set(testCaseIds)];
+  targetModuleId.value = undefined;
+  moveModalVisible.value = true;
+};
+
+const handleConfirmMove = async (): Promise<boolean> => {
+  if (!currentProjectId.value || !targetModuleId.value) {
+    Message.warning(pageText.value.selectTargetModuleFirst);
+    return false;
+  }
+
+  isMoving.value = true;
+  try {
+    const response = await batchMoveTestCases(
+      currentProjectId.value,
+      movingTestCaseIds.value,
+      targetModuleId.value,
+    );
+    if (!response.success) {
+      Message.error(response.error || pageText.value.moveCasesFailed);
+      return false;
+    }
+
+    const movedCount = response.data?.moved_count ?? movingTestCaseIds.value.length;
+    const moduleName = response.data?.target_module?.name || '';
+    Message.success(pageText.value.moveCasesSuccess(movedCount, moduleName));
+    selectedTestCaseIds.value = selectedTestCaseIds.value.filter(
+      (testCaseId) => !movingTestCaseIds.value.includes(testCaseId),
+    );
+    fetchTestCases();
+    emit('testCasesMoved');
+    return true;
+  } catch (error) {
+    Message.error(pageText.value.moveCasesError);
+    return false;
+  } finally {
+    isMoving.value = false;
+  }
 };
 
 
@@ -977,16 +1187,32 @@ defineExpose({
   height: 100%;
 }
 
+:deep(.test-case-table .arco-table-tr-draggable) {
+  cursor: grab;
+}
+
+:deep(.test-case-table .arco-table-tr-drag) {
+  opacity: 0.72;
+}
+
+:deep(.test-case-table .arco-table-operation .arco-icon) {
+  cursor: grab;
+}
+
 .testcase-name-link {
-  display: inline-block;
-  max-width: 160px;
   color: var(--theme-accent);
   cursor: pointer;
   text-decoration: none;
   transition: color 0.2s;
+}
+
+.testcase-text-cell {
+  display: inline-block;
+  width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  vertical-align: middle;
 }
 
 .testcase-name-link:hover {

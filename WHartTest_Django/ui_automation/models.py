@@ -335,10 +335,12 @@ class UiBatchExecutionRecord(models.Model):
 
     def update_statistics(self):
         """更新统计信息"""
+        was_completed = self.status in (2, 3, 4)
         records = self.execution_records.all()
         self.passed_cases = records.filter(status=2).count()
         self.failed_cases = records.filter(status=3).count()
         completed = self.passed_cases + self.failed_cases
+        completed_now = False
         if completed >= self.total_cases:
             if self.failed_cases == 0:
                 self.status = 2  # 全部成功
@@ -346,11 +348,15 @@ class UiBatchExecutionRecord(models.Model):
                 self.status = 4  # 全部失败
             else:
                 self.status = 3  # 部分失败
+            completed_now = not was_completed
             from django.utils import timezone
             self.end_time = timezone.now()
             if self.start_time:
                 self.duration = (self.end_time - self.start_time).total_seconds()
         self.save()
+        if completed_now:
+            from wharttest_django.notification_service import notify_ui_batch_execution
+            notify_ui_batch_execution(self)
 
 
 class UiExecutionRecord(models.Model):

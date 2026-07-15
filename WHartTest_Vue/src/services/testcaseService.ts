@@ -17,6 +17,7 @@ export type ReviewStatus =
   | 'approved'
   | 'needs_optimization'
   | 'optimization_pending_review'
+  | 'pending_product_confirmation'
   | 'unavailable';
 
 // 截图接口
@@ -64,6 +65,7 @@ export interface TestCase {
   screenshots?: TestCaseScreenshot[]; // 新的多截图字段
   review_status?: ReviewStatus; // 审核状态
   creator: number;
+  sort_order?: number;
   creator_detail: {
     id: number;
     username: string;
@@ -140,6 +142,10 @@ export interface OperationResponse {
   statusCode?: number;
 }
 
+export interface ReorderTestCasesResponse extends OperationResponse {
+  orderedIds?: number[];
+}
+
 // 截图上传请求参数
 export interface UploadScreenshotsRequest {
   screenshots?: File[]; // 多个图片文件，最多10张
@@ -206,7 +212,7 @@ export const getTestCaseList = async (projectId: number, params?: PaginationPara
         return {
           success: true,
           data: response.data.data,
-          total: response.data.data.length,
+          total: response.data.total ?? response.data.count ?? response.data.data.length,
           statusCode: response.data.code,
         };
       }
@@ -215,7 +221,7 @@ export const getTestCaseList = async (projectId: number, params?: PaginationPara
         return {
           success: true,
           data: response.data.data.results,
-          total: response.data.data.count,
+          total: response.data.total ?? response.data.data.count ?? response.data.data.results.length,
           statusCode: response.data.code,
         };
       }
@@ -479,6 +485,69 @@ export const deleteTestCase = async (projectId: number, testCaseId: number): Pro
 };
 
 // 批量删除相关类型定义
+export const reorderTestCases = async (projectId: number, testCaseIds: number[]): Promise<ReorderTestCasesResponse> => {
+  const authStore = useAuthStore();
+  const accessToken = authStore.getAccessToken;
+
+  if (!accessToken) {
+    return {
+      success: false,
+      error: '未登录或会话已过期',
+    };
+  }
+
+  if (!testCaseIds || testCaseIds.length === 0) {
+    return {
+      success: false,
+      error: '请提供要排序的测试用例',
+    };
+  }
+
+  try {
+    const response = await axios.post(
+      `${API_BASE_URL}/projects/${projectId}/testcases/reorder/`,
+      { ids: testCaseIds },
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+      }
+    );
+
+    if (response.data && response.data.status === 'success') {
+      return {
+        success: true,
+        message: response.data.message || '测试用例顺序已保存',
+        orderedIds: response.data.data?.ordered_ids,
+        statusCode: response.data.code,
+      };
+    }
+
+    if (response.data?.ordered_ids) {
+      return {
+        success: true,
+        message: response.data.message || '测试用例顺序已保存',
+        orderedIds: response.data.ordered_ids,
+      };
+    }
+
+    return {
+      success: false,
+      error: response.data?.message || response.data?.error || '保存测试用例顺序失败',
+      statusCode: response.data?.code,
+    };
+  } catch (error: any) {
+    console.error('保存测试用例顺序出错:', error);
+    return {
+      success: false,
+      error: error.response?.data?.message || error.response?.data?.error || error.message || '保存测试用例顺序时发生错误',
+      statusCode: error.response?.status,
+    };
+  }
+};
+
 export interface BatchDeleteRequest {
   ids: number[];
 }
@@ -501,6 +570,66 @@ export interface BatchDeleteResponse {
   error?: string;
   statusCode?: number;
 }
+
+export interface BatchMoveResponse {
+  success: boolean;
+  message?: string;
+  data?: {
+    message: string;
+    moved_count: number;
+    target_module: { id: number; name: string };
+  };
+  error?: string;
+  statusCode?: number;
+}
+
+export const batchMoveTestCases = async (
+  projectId: number,
+  testCaseIds: number[],
+  targetModuleId: number,
+): Promise<BatchMoveResponse> => {
+  const authStore = useAuthStore();
+  const accessToken = authStore.getAccessToken;
+
+  if (!accessToken) {
+    return { success: false, error: '未登录或会话已过期' };
+  }
+
+  try {
+    const response = await axios.post(
+      `${API_BASE_URL}/projects/${projectId}/testcases/batch-move/`,
+      { ids: testCaseIds, target_module_id: targetModuleId },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+      },
+    );
+
+    if (response.data?.status === 'success') {
+      return {
+        success: true,
+        message: response.data.message,
+        data: response.data.data,
+        statusCode: response.data.code,
+      };
+    }
+
+    return {
+      success: false,
+      error: response.data?.message || response.data?.error || '移动测试用例失败',
+      statusCode: response.data?.code,
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      error: error.response?.data?.message || error.response?.data?.error || error.message || '移动测试用例失败',
+      statusCode: error.response?.status,
+    };
+  }
+};
 
 /**
  * 批量删除测试用例

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, watch, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import { Message, Modal } from '@arco-design/web-vue'
 import { testcaseService } from '../../services/testcaseService'
 import type { ApiTestCase } from '../../types/testcase'
@@ -18,6 +18,7 @@ const projectStore = useProjectStore()
 const environmentStore = useEnvironmentStore()
 const themeStore = useThemeStore()
 const router = useRouter()
+const route = useRoute()
 const { isEnglish, tl } = useAppI18n()
 const loading = ref(false)
 const testcases = ref<ApiTestCase[]>([])
@@ -26,6 +27,16 @@ const isDarkTheme = computed(() => themeStore.isBlack)
 const emit = defineEmits(['run'])
 
 const TEST_CASES_TAB_QUERY = { tab: 'testcases' } as const
+const TEST_CASE_LIST_QUERY_KEYS = [
+  'tcName',
+  'tcDescription',
+  'tcPriority',
+  'tcGroup',
+  'tcTags',
+  'tcPage',
+  'tcPageSize',
+  'tcOrdering'
+] as const
 
 interface QueryParams {
   name?: string
@@ -58,17 +69,96 @@ const pagination = reactive({
   showPageSize: true
 })
 
+const getRouteQueryString = (key: string) => {
+  const value = route.query[key]
+  if (Array.isArray(value)) {
+    return typeof value[0] === 'string' ? value[0] : undefined
+  }
+  return typeof value === 'string' ? value : undefined
+}
+
+const parsePositiveInteger = (value: string | undefined, fallback?: number) => {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+const parseTags = (value: string | undefined) => {
+  if (!value) return undefined
+  const tags = value
+    .split(',')
+    .map(tag => Number(tag))
+    .filter(tag => Number.isInteger(tag) && tag > 0)
+
+  return tags.length ? tags : undefined
+}
+
+const normalizeQueryForCompare = (query: Record<string, any>) => {
+  return JSON.stringify(
+    Object.keys(query)
+      .sort()
+      .map(key => [key, Array.isArray(query[key]) ? query[key].join(',') : query[key] ?? ''])
+  )
+}
+
+const restoreListStateFromRoute = () => {
+  const page = parsePositiveInteger(getRouteQueryString('tcPage'), 1) ?? 1
+  const pageSize = parsePositiveInteger(getRouteQueryString('tcPageSize'), 10) ?? 10
+
+  Object.assign(queryParams, {
+    name: getRouteQueryString('tcName') ?? '',
+    description: getRouteQueryString('tcDescription') ?? '',
+    priority: getRouteQueryString('tcPriority') || undefined,
+    group: parsePositiveInteger(getRouteQueryString('tcGroup')),
+    tags: parseTags(getRouteQueryString('tcTags')),
+    ordering: getRouteQueryString('tcOrdering') || '-created_at',
+    page,
+    page_size: pageSize
+  })
+
+  pagination.current = page
+  pagination.page_size = pageSize
+}
+
+const buildTestCasesRouteQuery = (): LocationQueryRaw => {
+  const query: LocationQueryRaw = { ...route.query, ...TEST_CASES_TAB_QUERY }
+
+  TEST_CASE_LIST_QUERY_KEYS.forEach(key => {
+    delete query[key]
+  })
+
+  if (queryParams.name) query.tcName = queryParams.name
+  if (queryParams.description) query.tcDescription = queryParams.description
+  if (queryParams.priority) query.tcPriority = queryParams.priority
+  if (queryParams.group) query.tcGroup = String(queryParams.group)
+  if (queryParams.tags?.length) query.tcTags = queryParams.tags.join(',')
+  if (pagination.current !== 1) query.tcPage = String(pagination.current)
+  if (pagination.page_size !== 10) query.tcPageSize = String(pagination.page_size)
+  if (queryParams.ordering && queryParams.ordering !== '-created_at') query.tcOrdering = queryParams.ordering
+
+  return query
+}
+
+const syncListStateToRoute = () => {
+  const query = buildTestCasesRouteQuery()
+  if (normalizeQueryForCompare(query) === normalizeQueryForCompare(route.query)) return
+
+  router.replace({ path: route.path, query }).catch(() => undefined)
+}
+
 const fetchTestCases = async (page: number = 1) => {
   if (!projectStore.currentProjectId) return
   try {
     loading.value = true
+    pagination.current = page
     queryParams.page = page
     queryParams.page_size = pagination.page_size
+    syncListStateToRoute()
 
     const res = await testcaseService.list(projectStore.currentProjectId, queryParams)
     if (res.success && res.data) {
-      testcases.value = Array.isArray(res.data) ? res.data : (res.data as any).results || []
-      pagination.total = (res.data as any).count || testcases.value.length
+      const payload = res.data as any
+      testcases.value = Array.isArray(payload) ? payload : payload?.results || []
+      pagination.total = Number(res.total ?? payload?.count ?? testcases.value.length)
       pagination.current = page
     } else {
       throw new Error(res.error || tl('获取测试用例列表失败'))
@@ -129,14 +219,14 @@ const updateFilterParams = (data: Pick<QueryParams, 'priority' | 'group' | 'tags
 }
 
 const handleCreate = () => {
-  router.push({ name: 'ApiTestCaseCreate', query: TEST_CASES_TAB_QUERY })
+  router.push({ name: 'ApiTestCaseCreate', query: buildTestCasesRouteQuery() })
 }
 
 const handleEdit = (testcase: ApiTestCase) => {
   router.push({
     name: 'ApiTestCaseEdit',
     params: { id: testcase.id },
-    query: TEST_CASES_TAB_QUERY
+    query: buildTestCasesRouteQuery()
   })
 }
 
@@ -171,7 +261,7 @@ const handleReport = (testcase: ApiTestCase) => {
   router.push({
     name: 'ApiTestCaseReports',
     params: { id: testcase.id },
-    query: TEST_CASES_TAB_QUERY
+    query: buildTestCasesRouteQuery()
   })
 }
 
@@ -227,7 +317,8 @@ const handlePageSizeChange = (size: number) => {
 }
 
 // 初始加载
-fetchTestCases()
+restoreListStateFromRoute()
+fetchTestCases(pagination.current)
 </script>
 
 <template>

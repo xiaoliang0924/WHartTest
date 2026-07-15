@@ -9,6 +9,7 @@ from .models import (
     ApiTestTaskExecution,
     ApiTestTaskCaseResult,
 )
+from wharttest_django.notification_service import notify_api_task_execution
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,10 @@ class ApiTestTaskExecutionService:
     @staticmethod
     def execute_task(execution):
         """Execute a test task synchronously."""
-        from api_testcases.services import TestExecutionService
+        from api_testcases.services import (
+            TestExecutionService,
+            suppress_testcase_notifications,
+        )
 
         execution.start()
 
@@ -132,9 +136,10 @@ class ApiTestTaskExecutionService:
 
             try:
                 testcase = case_result.testcase
-                report = TestExecutionService.run_testcase(
-                    testcase, environment, execution.executed_by
-                )
+                with suppress_testcase_notifications():
+                    report = TestExecutionService.run_testcase(
+                        testcase, environment, execution.executed_by
+                    )
 
                 case_result.report = report
                 case_result.end_time = timezone.now()
@@ -181,6 +186,7 @@ class ApiTestTaskExecutionService:
                     break
 
         execution.complete(success_count, fail_count, error_count)
+        notify_api_task_execution(execution)
 
     @staticmethod
     def execute_task_async(execution_id):
@@ -194,5 +200,6 @@ class ApiTestTaskExecutionService:
             try:
                 execution = ApiTestTaskExecution.objects.get(id=execution_id)
                 execution.fail()
+                notify_api_task_execution(execution)
             except Exception:
                 pass

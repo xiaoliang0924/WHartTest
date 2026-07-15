@@ -416,7 +416,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void;
-  (e: 'submitSuccess'): void;
+  (e: 'submitSuccess', keepEditing?: boolean): void;
   (e: 'navigate', testCaseId: number): void; // 导航到指定用例
   (e: 'reviewStatusChanged'): void; // 审核状态变更后通知父组件刷新
 }>();
@@ -536,6 +536,7 @@ const text = computed(() => (isEnglish.value ? {
     approved: 'Approved',
     needs_optimization: 'Needs Optimization',
     optimization_pending_review: 'Optimization Pending Review',
+    pending_product_confirmation: 'Pending Product Confirmation',
     unavailable: 'Unavailable',
   } as Record<string, string>,
   testTypeLabels: {
@@ -635,6 +636,7 @@ const text = computed(() => (isEnglish.value ? {
     approved: '通过',
     needs_optimization: '优化',
     optimization_pending_review: '优化待审核',
+    pending_product_confirmation: '待产品确认',
     unavailable: '不可用',
   } as Record<string, string>,
   testTypeLabels: {
@@ -985,8 +987,9 @@ const handleSubmit = async () => {
 
       Message.success(isEditing.value ? text.value.updateSuccess : text.value.createSuccess);
 
-      // 无论是编辑还是新建，保存成功后都返回列表并刷新
-      emit('submitSuccess');
+      // Keep an edited case open so users can continue refining it. New cases
+      // retain the existing behavior of returning to the list after saving.
+      emit('submitSuccess', isEditing.value);
     } else {
       Message.error(response.error || (isEditing.value ? text.value.updateFailed : text.value.createFailed));
     }

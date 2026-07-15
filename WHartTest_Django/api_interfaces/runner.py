@@ -340,6 +340,32 @@ class InterfaceRunner(HttpRunner):
 
         interface_type = self.interface_data.get('type', 'http')
 
+        # Auto-inject API Key for internal API calls
+        try:
+            import os
+            api_key = os.environ.get('WHARTTEST_API_KEY', 'wharttest-default-mcp-key-2025')
+            if 'headers' not in self.interface_data:
+                self.interface_data['headers'] = {}
+            headers_dict = self.interface_data['headers']
+            if isinstance(headers_dict, dict):
+                if 'X-API-Key' not in headers_dict and 'x-api-key' not in headers_dict:
+                    headers_dict['X-API-Key'] = api_key
+            if not isinstance(headers_dict, dict):
+                # Convert to dict if it's a list or other format
+                from .payloads import flatten_key_value_pairs
+                headers_dict = flatten_key_value_pairs(headers_dict)
+                if 'X-API-Key' not in headers_dict and 'x-api-key' not in headers_dict:
+                    headers_dict['X-API-Key'] = api_key
+                self.interface_data['headers'] = headers_dict
+            # Rebuild the step with updated headers
+            self.teststeps = []
+            if interface_type == 'sql':
+                self._init_sql_step()
+            else:
+                self._init_http_step()
+        except Exception as e:
+            logger.error(f"Error auto-injecting API key: {str(e)}")
+
         # Process environment variables
         try:
             if environment and isinstance(environment, dict) and environment.get('variables'):

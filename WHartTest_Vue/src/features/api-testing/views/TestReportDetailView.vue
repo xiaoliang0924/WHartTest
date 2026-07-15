@@ -18,7 +18,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
@@ -57,22 +57,31 @@ const handleExportReport = () => {
   Message.info(isEnglish.value ? 'Export is under development...' : '导出功能开发中...')
 }
 
+const buildBackQuery = (tab: string): LocationQueryRaw => {
+  const query: LocationQueryRaw = { ...route.query, tab }
+  delete query.returnTo
+  delete query.testcaseId
+  return query
+}
+
 const handleBack = () => {
   const returnTo = typeof route.query.returnTo === 'string' ? route.query.returnTo : 'reports'
 
   if (returnTo === 'testcaseReports') {
     const testcaseId = Number(route.query.testcaseId)
     if (Number.isInteger(testcaseId) && testcaseId > 0) {
-      router.push({ name: 'ApiTestCaseReports', params: { id: testcaseId } })
+      router.push({
+        name: 'ApiTestCaseReports',
+        params: { id: testcaseId },
+        query: buildBackQuery('testcases')
+      })
       return
     }
   }
 
   router.push({
     path: '/api-testing',
-    query: {
-      tab: typeof route.query.tab === 'string' ? route.query.tab : 'reports'
-    }
+    query: buildBackQuery(typeof route.query.tab === 'string' ? route.query.tab : 'reports')
   })
 }
 

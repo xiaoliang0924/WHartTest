@@ -222,8 +222,9 @@ if DATABASE_TYPE == "postgres":
             "OPTIONS": {
                 "connect_timeout": 5,
             },
-            # 连接保持 600 秒（10 分钟），减少频繁建连开销。
-            "CONN_MAX_AGE": 600,
+            # ASGI 和线程池会为不同线程创建独立连接，默认不保留连接，
+            # 避免长会话和并发任务持续占用 PostgreSQL 连接槽位。
+            "CONN_MAX_AGE": int(os.environ.get("DB_CONN_MAX_AGE", "0")),
             # 启用连接健康检查。
             "CONN_HEALTH_CHECKS": True,
         }
@@ -692,6 +693,15 @@ CELERY_WORKER_TASK_LOG_FORMAT = "[%(asctime)s: %(levelname)s/%(processName)s][%(
 # 在本地开发环境中可以使用 http://localhost:8000
 # 内部服务调用基础地址。
 BASE_URL = os.environ.get("DJANGO_BASE_URL", "http://localhost:8000")
+FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "").rstrip("/")
+WHARTTEST_FRONTEND_BASE_URL = os.environ.get("WHARTTEST_FRONTEND_BASE_URL", "").rstrip("/")
+WECHAT_WORK_BOT_WEBHOOK = os.environ.get("WECHAT_WORK_BOT_WEBHOOK", "").strip()
+WECHAT_WORK_BOT_WEBHOOKS = os.environ.get("WECHAT_WORK_BOT_WEBHOOKS", "").strip()
+WEIXIN_WORK_BOT_WEBHOOK = os.environ.get("WEIXIN_WORK_BOT_WEBHOOK", "").strip()
+WEIXIN_WORK_BOT_WEBHOOKS = os.environ.get("WEIXIN_WORK_BOT_WEBHOOKS", "").strip()
+WECHAT_WORK_BOT_TIMEOUT_SECONDS = float(
+    os.environ.get("WECHAT_WORK_BOT_TIMEOUT_SECONDS", "5")
+)
 
 # DOCX Editor 集成配置
 # 主项目后端服务端访问 docx-editor 的地址，例如 http://127.0.0.1:18080
@@ -705,7 +715,7 @@ DOCX_EDITOR_SERVICE_KEY = os.environ.get("DOCX_EDITOR_SERVICE_KEY", "").strip()
 # 默认商店源 base URL，必须以 / 结尾，前端按相对路径拼 manifest.json 和 zip 包
 SKILL_STORE_DEFAULT_SOURCE = os.environ.get(
     "SKILL_STORE_DEFAULT_SOURCE",
-    "https://gitee.com/duanxiangchun/didactic-octo-spork/raw/main/WHartTest_Skills/",
+    "https://raw.githubusercontent.com/MGdaasLab/WHartTest/master/WHartTest_Skills/",
 )
 SKILL_STORE_DEFAULT_SOURCE_NAME = os.environ.get(
     "SKILL_STORE_DEFAULT_SOURCE_NAME",

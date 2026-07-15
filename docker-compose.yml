@@ -76,6 +76,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-wharttest}
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - DB_CONN_MAX_AGE=${DB_CONN_MAX_AGE:-0}
       # 其他配置
       - MEDIA_ROOT=${MEDIA_ROOT:-/app/data/media}
       - LANGGRAPH_CHECKPOINT_SQLITE_PATH=${LANGGRAPH_CHECKPOINT_SQLITE_PATH:-/app/data/chat_history.sqlite}
@@ -93,7 +94,12 @@ services:
       - QDRANT_URL=http://qdrant:6333
       # 内部API基础URL - 使用localhost因为在同一容器
       - DJANGO_BASE_URL=http://localhost:8000
+      # Skill 执行脚本访问内部 API 所需的认证信息
+      - WHARTTEST_API_KEY=${WHARTTEST_API_KEY:-wharttest-default-mcp-key-2025}
+      - FRONTEND_BASE_URL=${FRONTEND_BASE_URL:-http://localhost:80}
       - WEIXIN_PLUGIN_HOST_URL=http://weixin-plugin-host:3001
+      - WECHAT_WORK_BOT_WEBHOOK=${WECHAT_WORK_BOT_WEBHOOK:-}
+      - WECHAT_WORK_BOT_WEBHOOKS=${WECHAT_WORK_BOT_WEBHOOKS:-}
       - HF_ENDPOINT=${DOCKER_HF_ENDPOINT:-https://huggingface.co}
     depends_on:
       postgres:
@@ -108,7 +114,7 @@ services:
       - wharttest-network
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/')" ]
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/')" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -140,7 +146,7 @@ services:
       - wharttest-network
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health" ]
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3001/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -162,7 +168,7 @@ services:
       - wharttest-network
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/" ]
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -197,7 +203,7 @@ services:
       - wharttest-network
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/')" ]
+      test: [ "CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 8006), 5); s.close()" ]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Max
 from django.contrib.auth.models import User
 from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ValidationError
@@ -39,6 +40,7 @@ class TestCase(models.Model):
         ('approved', _('通过')),
         ('needs_optimization', _('优化')),
         ('optimization_pending_review', _('优化待审核')),
+        ('pending_product_confirmation', _('待产品确认')),
         ('unavailable', _('不可用')),
     ]
 
@@ -97,13 +99,26 @@ class TestCase(models.Model):
         blank=True,
     )
 
+    sort_order = models.PositiveIntegerField(_('鎺掑簭'), default=0, db_index=True)
+
     class Meta:
         verbose_name = _('用例')
         verbose_name_plural = _('用例')
-        ordering = ['-created_at']
+        ordering = ['project', 'sort_order', 'id']
 
     def __str__(self):
         return f"{self.project.name} - {self.name}"
+
+    def save(self, *args, **kwargs):
+        if self._state.adding and not self.sort_order and self.project_id:
+            max_sort_order = (
+                TestCase.objects.filter(project_id=self.project_id)
+                .aggregate(max_sort_order=Max("sort_order"))
+                .get("max_sort_order")
+                or 0
+            )
+            self.sort_order = max_sort_order + 1
+        super().save(*args, **kwargs)
 
 class TestCaseStep(models.Model):
     """
@@ -158,6 +173,7 @@ class TestCaseModule(models.Model):
         verbose_name=_('父模块')
     )
     level = models.PositiveSmallIntegerField(_('模块级别'), default=1)
+    sort_order = models.PositiveIntegerField(_('排序'), default=0, db_index=True)
     creator = models.ForeignKey(
         User,
         on_delete=models.SET_NULL,
@@ -171,7 +187,7 @@ class TestCaseModule(models.Model):
     class Meta:
         verbose_name = _('用例模块')
         verbose_name_plural = _('用例模块')
-        ordering = ['project', 'level', 'name']
+        ordering = ['project', 'parent_id', 'sort_order', 'id']
         unique_together = ('project', 'parent', 'name')  # 确保同一父模块下的子模块名称唯一
 
     def __str__(self):
@@ -447,3 +463,97 @@ class TestCaseResult(models.Model):
         if self.started_at and self.completed_at:
             return (self.completed_at - self.started_at).total_seconds()
         return self.execution_time
+
+
+class ManualTestRun(models.Model):
+    """人工测试的分派批次，不与自动化测试执行记录混用。"""
+
+    STATUS_CHOICES = [
+        ("pending", _("待执行")),
+        ("in_progress", _("执行中")),
+        ("completed", _("已完成")),
+    ]
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="manual_test_runs", verbose_name=_("所属项目"))
+    name = models.CharField(_("执行批次名称"), max_length=255)
+    description = models.TextField(_("说明"), blank=True, null=True)
+    status = models.CharField(_("执行状态"), max_length=20, choices=STATUS_CHOICES, default="pending")
+    creator = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="created_manual_test_runs", verbose_name=_("创建人"))
+    total_count = models.PositiveIntegerField(_("用例总数"), default=0)
+    passed_count = models.PositiveIntegerField(_("通过数"), default=0)
+    failed_count = models.PositiveIntegerField(_("不通过数"), default=0)
+    pending_count = models.PositiveIntegerField(_("待执行数"), default=0)
+    created_at = models.DateTimeField(_("创建时间"), auto_now_add=True)
+    updated_at = models.DateTimeField(_("更新时间"), auto_now=True)
+
+    class Meta:
+        verbose_name = _("人工用例执行批次")
+        verbose_name_plural = _("人工用例执行批次")
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.project.name} - {self.name}"
+
+    def refresh_statistics(self):
+        # Do not use the related-manager cache here. Assignment changes in the
+        # same request must be reflected in the task counters immediately.
+        assignments = ManualTestAssignment.objects.filter(run_id=self.pk)
+        total_count = assignments.count()
+        passed_count = assignments.filter(status="pass").count()
+        failed_count = assignments.filter(status="fail").count()
+        pending_count = assignments.filter(status="pending").count()
+        status = "completed" if total_count and not pending_count else "in_progress" if total_count != pending_count else "pending"
+        ManualTestRun.objects.filter(pk=self.pk).update(
+            total_count=total_count,
+            passed_count=passed_count,
+            failed_count=failed_count,
+            pending_count=pending_count,
+            status=status,
+        )
+        self.total_count = total_count
+        self.passed_count = passed_count
+        self.failed_count = failed_count
+        self.pending_count = pending_count
+        self.status = status
+
+
+class ManualTestAssignment(models.Model):
+    """一条由测试人员手工确认的用例执行记录。"""
+
+    STATUS_CHOICES = [
+        ("pending", _("待执行")),
+        ("pass", _("通过")),
+        ("fail", _("不通过")),
+    ]
+
+    run = models.ForeignKey(ManualTestRun, on_delete=models.CASCADE, related_name="assignments", verbose_name=_("执行批次"))
+    testcase = models.ForeignKey(
+        TestCase,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="manual_test_assignments",
+        verbose_name=_("测试用例"),
+    )
+    testcase_snapshot = models.JSONField(_("测试用例快照"), default=dict, blank=True)
+    assignee = models.ForeignKey(User, on_delete=models.PROTECT, related_name="manual_test_assignments", verbose_name=_("测试人员"))
+    status = models.CharField(_("执行结果"), max_length=20, choices=STATUS_CHOICES, default="pending")
+    failure_reason = models.TextField(_("失败原因"), blank=True, null=True)
+    comment = models.TextField(_("执行备注"), blank=True, null=True)
+    executed_at = models.DateTimeField(_("执行时间"), blank=True, null=True)
+    created_at = models.DateTimeField(_("分派时间"), auto_now_add=True)
+    updated_at = models.DateTimeField(_("更新时间"), auto_now=True)
+
+    class Meta:
+        verbose_name = _("人工用例执行记录")
+        verbose_name_plural = _("人工用例执行记录")
+        ordering = ["status", "created_at", "id"]
+        constraints = [models.UniqueConstraint(fields=["run", "testcase"], name="unique_manual_run_testcase")]
+
+    def __str__(self):
+        testcase_name = (
+            self.testcase.name
+            if self.testcase_id
+            else self.testcase_snapshot.get("name", f"已删除用例 #{self.testcase_snapshot.get('id', '-')}")
+        )
+        return f"{self.run.name} - {testcase_name}"

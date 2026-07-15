@@ -49,6 +49,7 @@ export const REVIEW_STATUS_OPTIONS = [
   { value: 'approved', label: '通过', color: 'green' },
   { value: 'needs_optimization', label: '优化', color: 'blue' },
   { value: 'optimization_pending_review', label: '优化待审核', color: 'purple' },
+  { value: 'pending_product_confirmation', label: '待产品确认', color: 'cyan' },
   { value: 'unavailable', label: '不可用', color: 'red' },
 ] as const;
 

@@ -14,6 +14,7 @@ import threading
 import json
 import mimetypes
 import re
+import signal
 from typing import Optional
 
 from langchain_core.tools import tool as langchain_tool
@@ -49,10 +50,153 @@ _ARTIFACT_EXTENSIONS = {
     ".pptx",
 }
 _MAX_ARTIFACT_SIZE_BYTES = 50 * 1024 * 1024
+_DEFAULT_SKILL_COMMAND_TIMEOUT_SECONDS = 120
+_DEFAULT_SKILL_OUTPUT_MAX_CHARS = 200_000
+_DEFAULT_WHARTTEST_BACKEND_URL = "http://localhost:8000"
+_DEFAULT_WHARTTEST_API_KEY = "wharttest-default-mcp-key-2025"
 _ARTIFACT_TOKEN_RE = re.compile(
     r"(?P<path>(?:[A-Za-z]:)?[^\s<>\"'`|]+?\.(?:drawio|png|jpe?g|gif|svg|pdf|html?|txt|json|csv|xml|zip|docx?|xlsx?|pptx?))",
     re.IGNORECASE,
 )
+
+
+def _get_skill_runtime_env() -> dict[str, str]:
+    """Build the environment passed to skills that call the internal API."""
+    env = os.environ.copy()
+    backend_url = getattr(settings, "WHARTTEST_BACKEND_URL", None) or env.get(
+        "WHARTTEST_BACKEND_URL", _DEFAULT_WHARTTEST_BACKEND_URL
+    )
+    api_key = getattr(settings, "WHARTTEST_API_KEY", None) or env.get(
+        "WHARTTEST_API_KEY", _DEFAULT_WHARTTEST_API_KEY
+    )
+    env["WHARTTEST_BACKEND_URL"] = backend_url
+    env["WHARTTEST_API_KEY"] = api_key
+    return env
+
+
+def _get_skill_command_timeout_seconds() -> int:
+    return int(
+        getattr(
+            settings,
+            "SKILL_COMMAND_TIMEOUT_SECONDS",
+            _DEFAULT_SKILL_COMMAND_TIMEOUT_SECONDS,
+        )
+    )
+
+
+def _get_skill_output_max_chars() -> int:
+    return int(
+        getattr(
+            settings,
+            "SKILL_COMMAND_OUTPUT_MAX_CHARS",
+            _DEFAULT_SKILL_OUTPUT_MAX_CHARS,
+        )
+    )
+
+
+def _truncate_skill_output(output: str) -> str:
+    if not output:
+        return output
+
+    max_chars = max(10_000, _get_skill_output_max_chars())
+    if len(output) <= max_chars:
+        return output
+
+    head_len = int(max_chars * 0.7)
+    tail_len = max_chars - head_len
+    omitted = len(output) - head_len - tail_len
+    return (
+        output[:head_len]
+        + f"\n\n[output truncated: omitted {omitted} characters; "
+        + f"limit={max_chars}]\n\n"
+        + output[-tail_len:]
+    )
+
+
+def _decode_command_output(data: bytes) -> str:
+    if not data:
+        return ""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            import locale
+
+            encoding = locale.getpreferredencoding(False) or "utf-8"
+            return data.decode(encoding, errors="replace")
+        except Exception:
+            return data.decode("gbk", errors="replace")
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return
+        except Exception:
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=3)
+            return
+        except Exception:
+            pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except Exception:
+            pass
+
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
+def _run_skill_command(
+    exec_command: str,
+    *,
+    cwd: str,
+    env: dict[str, str],
+    timeout_seconds: int,
+) -> tuple[int, str, str]:
+    popen_kwargs: dict[str, object] = {
+        "shell": True,
+        "cwd": cwd,
+        "env": env,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(exec_command, **popen_kwargs)
+    try:
+        stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(proc)
+        try:
+            proc.communicate(timeout=3)
+        except Exception:
+            pass
+        raise
+
+    stdout = strip_terminal_control_sequences(_decode_command_output(stdout_bytes))
+    stderr = strip_terminal_control_sequences(_decode_command_output(stderr_bytes))
+    return proc.returncode or 0, stdout, stderr
 _QUOTED_ARTIFACT_TOKEN_RE = re.compile(
     r"[`'\"](?P<path>[^`'\"]+?\.(?:drawio|png|jpe?g|gif|svg|pdf|html?|txt|json|csv|xml|zip|docx?|xlsx?|pptx?))[`'\"]",
     re.IGNORECASE,
@@ -439,11 +583,7 @@ def get_skill_tools(
 
             logger.info(f"[execute_skill_script] 在目录 {skill_dir} 执行: {command}")
 
-            env = os.environ.copy()
-            env["WHARTTEST_BACKEND_URL"] = getattr(
-                settings, "WHARTTEST_BACKEND_URL", "http://localhost:8000"
-            )
-            env["WHARTTEST_API_KEY"] = getattr(settings, "WHARTTEST_API_KEY", "")
+            env = _get_skill_runtime_env()
 
             case_dir_key = None
             if current_test_case_id:
@@ -522,6 +662,7 @@ def get_skill_tools(
                             f"[execute_skill_script] 持久化会话执行完成, session_key={session_key}"
                         )
                         cleaned_output = strip_terminal_control_sequences(output)
+                        cleaned_output = _truncate_skill_output(cleaned_output)
                         result_output = (
                             cleaned_output.strip()
                             if cleaned_output.strip()
@@ -551,45 +692,12 @@ def get_skill_tools(
                         )
                         return f"错误: {str(e)}"
 
-            # Windows 编码处理：cmd.exe 默认使用 GBK (cp936)，需要使用系统默认编码
-            import locale
-
-            if platform.system() == "Windows":
-                # Windows cmd 默认使用 GBK 编码，使用 None 让 subprocess 自动检测
-                result = subprocess.run(
-                    exec_command,
-                    shell=True,
-                    cwd=skill_dir,
-                    capture_output=True,
-                    timeout=120,
-                    env=env,
-                )
-
-                # 智能解码：先尝试 UTF-8（现代工具通常输出 UTF-8），失败再用 GBK（Windows cmd 默认）
-                def smart_decode(data: bytes) -> str:
-                    if not data:
-                        return ""
-                    try:
-                        return data.decode("utf-8")
-                    except UnicodeDecodeError:
-                        return data.decode("gbk", errors="replace")
-
-                stdout = strip_terminal_control_sequences(smart_decode(result.stdout))
-                stderr = strip_terminal_control_sequences(smart_decode(result.stderr))
-            else:
-                result = subprocess.run(
-                    exec_command,
-                    shell=True,
-                    cwd=skill_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                    env=env,
-                    encoding="utf-8",
-                    errors="replace",
-                )
-                stdout = strip_terminal_control_sequences(result.stdout or "")
-                stderr = strip_terminal_control_sequences(result.stderr or "")
+            returncode, stdout, stderr = _run_skill_command(
+                exec_command,
+                cwd=skill_dir,
+                env=env,
+                timeout_seconds=_get_skill_command_timeout_seconds(),
+            )
 
             output = ""
             if stdout:
@@ -599,11 +707,13 @@ def get_skill_tools(
                     output += "\n--- stderr ---\n"
                 output += stderr
 
-            if result.returncode != 0:
-                output = f"命令执行失败 (退出码: {result.returncode})\n{output}"
+            output = _truncate_skill_output(output)
+
+            if returncode != 0:
+                output = f"命令执行失败 (退出码: {returncode})\n{output}"
 
             logger.info(
-                f"[execute_skill_script] 执行完成, returncode={result.returncode}, output_len={len(output)}"
+                f"[execute_skill_script] 执行完成, returncode={returncode}, output_len={len(output)}"
             )
             if output:
                 logger.debug(f"[execute_skill_script] output: {output[:500]}")

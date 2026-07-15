@@ -66,7 +66,7 @@
 
       <div class="precondition-section">
         <h3>前置条件</h3>
-        <div class="precondition-content" style="white-space: pre-wrap;">{{ testCaseDetail.precondition || '-' }}</div>
+        <div class="precondition-content" style="white-space: pre-wrap;">{{ formatMultilineText(testCaseDetail.precondition) }}</div>
       </div>
 
       <div class="steps-section view-steps">
@@ -82,7 +82,7 @@
 
       <div class="notes-section">
         <h3>备注</h3>
-        <div class="notes-content" style="white-space: pre-wrap;">{{ testCaseDetail.notes || '-' }}</div>
+        <div class="notes-content" style="white-space: pre-wrap;">{{ formatMultilineText(testCaseDetail.notes) }}</div>
       </div>
 
       <div class="screenshots-section">
@@ -391,6 +391,11 @@ const currentPreviewIndex = ref<number>(0); // 当前预览图片索引
 
 // 图片加载错误状态
 const imageLoadErrors = ref<Record<number, boolean>>({});
+
+const formatMultilineText = (value?: string | null): string => {
+  if (!value) return '-';
+  return value.replace(/\\r\\n|\\n|\\r/g, '\n');
+};
 
 // 批量删除截图相关状态
 const selectedScreenshotIds = ref<number[]>([]);

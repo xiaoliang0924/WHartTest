@@ -23,7 +23,9 @@ const { isEnglish } = useAppI18n()
 
 const form = ref({
   name: props.initialValues?.name || '',
-  code: props.initialValues?.code || '',
+  code: props.initialValues?.code || (props.mode === 'create'
+    ? '# 请在下方定义 Python 函数 (必须以 def 开头)\n# 例如:\ndef example(param1, param2):\n    """函数说明"""\n    result = param1 + param2\n    return result\n'
+    : ''),
   description: props.initialValues?.description || ''
 })
 
@@ -199,6 +201,12 @@ const handleTest = async () => {
                 style="height: 400px; width: 100%;"
               />
             </div>
+            <div class="code-hint mt-2 text-xs">
+              ⚠ {{ isEnglish
+                ? 'Code must contain at least one "def" function definition. Comments and blank lines are allowed.'
+                : '代码中必须包含至少一个 "def" 函数定义。支持注释、空行和多函数定义。'
+              }}
+            </div>
           </div>
 
           <!-- 测试区域 -->
@@ -278,6 +286,11 @@ const handleTest = async () => {
   border-radius: 0.5rem;
   overflow: hidden;
   background: var(--func-editor-bg);
+}
+
+.code-hint {
+  color: var(--func-text-subtle);
+  line-height: 1.5;
 }
 
 .test-shell {

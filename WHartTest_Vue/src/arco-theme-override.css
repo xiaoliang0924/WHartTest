@@ -975,3 +975,120 @@ body:not([arco-theme='dark']) .arco-table-th,
 body:not([arco-theme='dark']) .arco-table-header {
   background-color: var(--color-neutral-2) !important;
 }
+
+/* ── 修复暗色主题下拉菜单/弹出层"幻影"问题 —— 使用完全不透明背景 ── */
+
+/* 所有弹出层容器 —— 完全不透明背景 + 清除模糊 */
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-popup,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-popup-inner,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-dropdown,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-dropdown-inner,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-dropdown,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-dropdown-list,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-dropdown-menu,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-dropdown-panel,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-popup,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-popup-inner,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-menu,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-menu-inner,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-popup-container,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-popover,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-popover-content,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-popover-content-inner,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-cascader-popup,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-cascader-popup-inner,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-picker-panel,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-picker-dropdown,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-picker-popup,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-menu-pop,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-menu-pop-inner,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-autocomplete-popup,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-tree-select-popup,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-tree-select-dropdown,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-mention-dropdown,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-tooltip-content {
+  background-color: #1e293b !important;
+  background-image: none !important;
+  border: 1px solid rgba(148, 163, 184, 0.22) !important;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.6) !important;
+  backdrop-filter: none !important;
+}
+
+/* 选项文字 */
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-option,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-dropdown-option,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-menu-item,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-cascader-option,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-picker-cell,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-menu-pop-item,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-autocomplete-option,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-tree-select-option,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-mention-option {
+  color: #e2e8f0 !important;
+  background-color: transparent !important;
+}
+
+/* hover */
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-option:hover,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-dropdown-option:hover,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-menu-item:hover,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-cascader-option:hover,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-menu-pop-item:hover,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-autocomplete-option:hover,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-tree-select-option:hover {
+  background-color: rgba(59, 130, 246, 0.18) !important;
+  color: #f1f5f9 !important;
+}
+
+/* 选中态 */
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-option.arco-select-option-selected,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-option.arco-select-option-active,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-menu-item.arco-trigger-menu-item-selected,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-menu-pop-item.arco-menu-pop-item-selected {
+  background-color: rgba(59, 130, 246, 0.22) !important;
+  color: #60a5fa !important;
+  font-weight: 600;
+}
+
+/* 禁用态 */
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-option-disabled,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-menu-item-disabled {
+  color: rgba(148, 163, 184, 0.35) !important;
+}
+
+/* 空状态 */
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-dropdown .arco-select-option-empty,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-menu-empty {
+  color: rgba(148, 163, 184, 0.5) !important;
+}
+
+/* 弹出层搜索框 */
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-dropdown .arco-select-header,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-popup .arco-select-header {
+  background-color: transparent !important;
+  border-bottom-color: rgba(148, 163, 184, 0.15) !important;
+}
+
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-dropdown .arco-input-wrapper,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-popup .arco-input-wrapper {
+  background-color: rgba(15, 23, 42, 0.7) !important;
+}
+
+/* 弹出层分组标题 */
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-option-group-title,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-menu-group-title {
+  color: rgba(148, 163, 184, 0.6) !important;
+}
+
+/* 弹出层分割线 */
+:root[data-theme='black'] body[arco-theme='dark'] .arco-dropdown-menu > .arco-divider,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-menu .arco-divider {
+  border-color: rgba(148, 163, 184, 0.12) !important;
+}
+
+/* 弹出层底部/顶部区域 */
+:root[data-theme='black'] body[arco-theme='dark'] .arco-select-dropdown .arco-select-footer,
+:root[data-theme='black'] body[arco-theme='dark'] .arco-trigger-popup .arco-select-footer {
+  background-color: transparent !important;
+  border-top-color: rgba(148, 163, 184, 0.15) !important;
+}

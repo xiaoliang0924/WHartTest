@@ -253,7 +253,7 @@ class PlaywrightExecutor:
             'go_forward': lambda: page.go_forward(),
             'wait': lambda: page.wait_for_timeout(_parse_wait_timeout(step.input_value)),
             'wait_load': lambda: page.wait_for_load_state("load"),
-            'wait_network': lambda: page.wait_for_load_state("networkidle"),
+            'wait_network': lambda: page.wait_for_load_state("domcontentloaded"),
         }
         
         if operation in page_operations:
@@ -377,7 +377,7 @@ class PlaywrightExecutor:
                     base_url = config.env_config.get('base_url', '') or ''
                 if base_url:
                     logger.info(f"导航到环境 base_url: {base_url}")
-                    await page.goto(base_url, wait_until="networkidle")
+                    await page.goto(base_url, wait_until="domcontentloaded")
 
                 for page_step in config.page_steps:
                     if self._stop_requested:
@@ -463,7 +463,7 @@ class PlaywrightExecutor:
                     # 页面步骤执行完毕后，等待页面稳定（处理可能的页面跳转）
                     try:
                         await page.wait_for_load_state("load", timeout=10000)
-                        await page.wait_for_load_state("networkidle", timeout=10000)
+                        await page.wait_for_load_state("domcontentloaded", timeout=10000)
                     except Exception:
                         logger.debug(f"页面步骤 {page_step.page_name} 执行后等待页面稳定超时，继续执行")
 
@@ -628,7 +628,7 @@ class PlaywrightExecutor:
                 base_url = config.env_config.get('base_url', '') or ''
             if base_url:
                 logger.info(f"[并发] 导航到环境 base_url: {base_url}")
-                await page.goto(base_url, wait_until="networkidle")
+                await page.goto(base_url, wait_until="domcontentloaded")
 
             for page_step in config.page_steps:
                 if self._stop_requested:
@@ -709,7 +709,7 @@ class PlaywrightExecutor:
                 # 页面步骤执行完毕后，等待页面稳定（处理可能的页面跳转）
                 try:
                     await page.wait_for_load_state("load", timeout=10000)
-                    await page.wait_for_load_state("networkidle", timeout=10000)
+                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
                 except Exception:
                     logger.debug(f"[并发] 页面步骤 {page_step.page_name} 执行后等待页面稳定超时，继续执行")
 

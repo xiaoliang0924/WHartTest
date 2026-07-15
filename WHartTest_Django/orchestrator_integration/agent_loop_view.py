@@ -30,7 +30,7 @@ from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.authentication import JWTAuthentication
-from asgiref.sync import sync_to_async
+from channels.db import database_sync_to_async as sync_to_async
 
 from langchain_core.messages import (
     AIMessage,
@@ -503,6 +503,78 @@ def _build_sanitized_messages(messages: List[Any]) -> tuple[List[Any], int]:
     pending_call_ids: List[str] = []
     pending_call_names: Dict[str, str] = {}
 
+    def _copy_message(message: AIMessage) -> AIMessage:
+        if hasattr(message, "model_copy"):
+            return message.model_copy(deep=True)
+        return message.copy(deep=True)
+
+    def _normalize_ai_tool_calls(message: AIMessage) -> tuple[AIMessage, List[Dict[str, Any]], int]:
+        """Normalize parsed and OpenAI-compatible raw tool-call representations."""
+        parsed_calls = list(getattr(message, "tool_calls", None) or [])
+        additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+        raw_calls = (
+            additional_kwargs.get("tool_calls", [])
+            if isinstance(additional_kwargs, dict)
+            else []
+        )
+        source_calls = parsed_calls or raw_calls
+        if not source_calls:
+            return message, [], 0
+
+        normalized_calls: List[Dict[str, Any]] = []
+        raw_normalized_calls: List[Dict[str, Any]] = []
+        generated_ids = 0
+
+        for index, call in enumerate(source_calls):
+            call_data = call if isinstance(call, dict) else {}
+            raw_function = call_data.get("function")
+            raw_function = raw_function if isinstance(raw_function, dict) else {}
+            name = call_data.get("name") or raw_function.get("name") or "unknown"
+            args = call_data.get("args", raw_function.get("arguments", {}))
+            if isinstance(args, str):
+                try:
+                    parsed_args = json.loads(args)
+                    args = parsed_args if isinstance(parsed_args, dict) else {}
+                except (TypeError, ValueError):
+                    args = {}
+            elif not isinstance(args, dict):
+                args = {}
+
+            call_id = call_data.get("id")
+            if not call_id:
+                # A deterministic ID keeps a repaired checkpoint valid across retries.
+                seed = "%s:%d:%s:%s" % (
+                    getattr(message, "id", "") or "history",
+                    index,
+                    name,
+                    json.dumps(args, ensure_ascii=True, sort_keys=True),
+                )
+                call_id = "history_tool_" + uuid.uuid5(uuid.NAMESPACE_URL, seed).hex
+                generated_ids += 1
+            call_id = str(call_id)
+
+            normalized_calls.append({"id": call_id, "name": str(name), "args": args})
+            raw_normalized_calls.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": str(name),
+                        "arguments": json.dumps(args, ensure_ascii=False),
+                    },
+                }
+            )
+
+        normalized_message = _copy_message(message)
+        normalized_message.tool_calls = normalized_calls
+        normalized_message.additional_kwargs = dict(additional_kwargs)
+        # ChatOpenAI serializes this raw representation when present, so it must
+        # carry the same valid IDs as the parsed tool_calls field.
+        normalized_message.additional_kwargs["tool_calls"] = raw_normalized_calls
+        if hasattr(normalized_message, "invalid_tool_calls"):
+            normalized_message.invalid_tool_calls = []
+        return normalized_message, normalized_calls, generated_ids
+
     def _flush_pending() -> None:
         nonlocal fix_count
         for tc_id in pending_call_ids:
@@ -528,29 +600,38 @@ def _build_sanitized_messages(messages: List[Any]) -> tuple[List[Any], int]:
         return False
 
     for msg in messages:
-        # 带 tool_calls 的 AIMessage
-        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-            _flush_pending()
-            result.append(msg)
+        # AI tool calls may live in either tool_calls or OpenAI-compatible
+        # additional_kwargs["tool_calls"]. Normalize both before they reach a model.
+        if isinstance(msg, AIMessage):
+            normalized_msg, tool_calls, generated_ids = _normalize_ai_tool_calls(msg)
+            if not tool_calls:
+                result.append(msg)
+                continue
 
-            for tc in msg.tool_calls:
-                tc_id = (
-                    tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-                )
-                tc_name = (
-                    tc.get("name")
-                    if isinstance(tc, dict)
-                    else getattr(tc, "name", None)
-                )
-                if tc_id:
-                    tc_id = str(tc_id)
-                    pending_call_ids.append(tc_id)
-                    pending_call_names[tc_id] = tc_name or "unknown"
+            _flush_pending()
+            result.append(normalized_msg)
+            fix_count += generated_ids
+
+            for tc in tool_calls:
+                tc_id = str(tc["id"])
+                pending_call_ids.append(tc_id)
+                pending_call_names[tc_id] = tc.get("name") or "unknown"
             continue
 
         # ToolMessage 消息
         if isinstance(msg, ToolMessage):
             tc_id = str(getattr(msg, "tool_call_id", "") or "")
+            # Older streamed responses can omit the tool result ID. When there is
+            # exactly one outstanding call it is unambiguous and can be repaired.
+            if tc_id not in pending_call_ids and len(pending_call_ids) == 1:
+                tc_id = pending_call_ids[0]
+                msg = ToolMessage(
+                    content=getattr(msg, "content", ""),
+                    tool_call_id=tc_id,
+                    name=getattr(msg, "name", None)
+                    or pending_call_names.get(tc_id, "unknown"),
+                )
+                fix_count += 1
             if tc_id in pending_call_ids:
                 pending_call_ids.remove(tc_id)
                 if _is_tool_content_problematic(msg):

@@ -1,11 +1,27 @@
 from typing import Dict, List, Optional, Tuple
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from django.utils import timezone
 from django.db import transaction
 from .models import ApiTestCase, ApiTestCaseStep, ApiTestReport, ApiTestReportDetail
 from .runner import TestCaseRunner
+from wharttest_django.notification_service import notify_api_test_report
 
 logger = logging.getLogger('testrunner')
+_suppress_testcase_notification = ContextVar(
+    'suppress_api_testcase_notification',
+    default=False,
+)
+
+
+@contextmanager
+def suppress_testcase_notifications():
+    token = _suppress_testcase_notification.set(True)
+    try:
+        yield
+    finally:
+        _suppress_testcase_notification.reset(token)
 
 
 class TestCaseService:
@@ -131,7 +147,8 @@ class TestExecutionService:
     def run_testcase(
         testcase: ApiTestCase,
         environment: Optional[Dict] = None,
-        user=None
+        user=None,
+        notify: bool = True,
     ) -> ApiTestReport:
         config = TestExecutionService._prepare_config(testcase.config, environment)
         testcase.config = config
@@ -185,17 +202,21 @@ class TestExecutionService:
                     logger.error(f"Failed to create test report detail: {str(e)}")
                     continue
 
+        if notify and not _suppress_testcase_notification.get():
+            notify_api_test_report(report)
+
         return report
 
     @staticmethod
     def run_batch(
         testcases: List[ApiTestCase],
         environment: Optional[Dict] = None,
-        user=None
+        user=None,
+        notify: bool = True,
     ) -> List[ApiTestReport]:
         reports = []
         for testcase in testcases:
-            report = TestExecutionService.run_testcase(testcase, environment, user)
+            report = TestExecutionService.run_testcase(testcase, environment, user, notify=notify)
             reports.append(report)
         return reports
 

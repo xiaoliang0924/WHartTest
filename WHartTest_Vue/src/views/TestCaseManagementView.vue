@@ -23,6 +23,7 @@
           @view-test-case="showViewTestCaseDetail"
           @execute-test-case="handleExecuteTestCase"
           @test-case-deleted="handleTestCaseDeleted"
+          @test-cases-moved="handleTestCaseDeleted"
           @module-filter-change="handleModuleSelected"
           @request-optimization="handleRequestOptimization"
           ref="testCaseListRef"
@@ -404,8 +405,10 @@ const backToList = () => {
   currentViewingTestCaseId.value = null;
 };
 
-const handleFormSubmitSuccess = () => {
-  backToList();
+const handleFormSubmitSuccess = (keepEditing = false) => {
+  if (!keepEditing) {
+    backToList();
+  }
   testCaseListRef.value?.refreshTestCases(); // 刷新列表
   // 如果用例创建/更新影响了模块的用例数量，需要通知模块面板刷新
   modulePanelRef.value?.refreshModules();

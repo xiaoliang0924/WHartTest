@@ -32,6 +32,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 
 # 导入自定义 token 获取视图。
 from accounts.views import MyTokenObtainPairView
+from wharttest_django.health import health_check
 
 # 导入项目视图集。
 from projects.views import ProjectViewSet
@@ -43,6 +44,7 @@ from testcases.views import (
     TestSuiteViewSet,
     TestExecutionViewSet,
 )
+from testcases.manual_execution_views import ManualTestAssignmentViewSet, ManualTestRunViewSet
 
 # 导入技能视图集。
 from skills.views import SkillViewSet
@@ -108,6 +110,16 @@ projects_router.register(
     TestExecutionViewSet,
     basename="project-test-executions",
 )
+projects_router.register(
+    r"manual-test-runs",
+    ManualTestRunViewSet,
+    basename="project-manual-test-runs",
+)
+projects_router.register(
+    r"manual-test-assignments",
+    ManualTestAssignmentViewSet,
+    basename="project-manual-test-assignments",
+)
 
 # 注册项目下技能路由。
 projects_router.register(r"skills", SkillViewSet, basename="project-skills")
@@ -135,6 +147,8 @@ projects_router.register(r'api-global-sync-configs', ApiGlobalSyncConfigViewSet,
 
 # 定义根 URL 路由表。
 urlpatterns = [
+    # 容器就绪检查，同时验证数据库可以建立连接并执行查询。
+    path("api/health/", health_check, name="health-check"),
     # 挂载 Django Admin。
     path("admin/", admin.site.urls),
     # 挂载 JWT 获取接口。

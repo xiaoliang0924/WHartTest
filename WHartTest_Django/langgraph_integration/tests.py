@@ -52,6 +52,32 @@ class LLMConfigDeepSeekTests(TestCase):
 			api_base="https://api.deepseek.com/v1",
 		)
 
+	@patch("langgraph_integration.views.ToolCallCompatibleChatOpenAI")
+	def test_openai_compatible_uses_tool_call_compatible_model(
+		self, mock_chat_openai
+	):
+		from .views import create_llm_instance
+
+		active_config = Mock()
+		active_config.name = "compatible-model"
+		active_config.provider = "openai_compatible"
+		active_config.api_url = "https://example.test/v1"
+		active_config.api_key = "compatible-key"
+		active_config.request_timeout = 90
+		active_config.max_retries = 2
+
+		llm = create_llm_instance(active_config, temperature=0.2)
+
+		self.assertEqual(llm, mock_chat_openai.return_value)
+		mock_chat_openai.assert_called_once_with(
+			model="compatible-model",
+			temperature=0.2,
+			api_key="compatible-key",
+			base_url="https://example.test/v1",
+			timeout=90,
+			max_retries=2,
+		)
+
 	def test_reasoning_compatible_chatdeepseek_round_trips_reasoning_content(self):
 		from .deepseek_chat_model import ReasoningCompatibleChatDeepSeek
 

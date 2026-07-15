@@ -4,8 +4,8 @@
     <a-layout-header class="header">
       <div class="left-section">
         <div class="logo" unselectable="on">
-          <img :src="brandLogoUrl" alt="WHartTest Logo" class="logo-icon" />
-          <span class="logo-text">WHartTest</span>
+          <img :src="brandLogoUrl" alt="BaiYunTest Logo" class="logo-icon" />
+          <span class="logo-text">BaiYunTest</span>
         </div>
         <div class="project-selector" v-if="showProjectSelector">
           <a-select
@@ -59,7 +59,7 @@
         <a-popover v-if="hasUpdate" position="bottom" trigger="hover" content-class="version-popover">
           <a 
             class="version-badge update-available" 
-            :href="versionInfo?.releaseUrl || 'https://github.com/mgdaaslab/WHartTest/releases'"
+            :href="versionInfo?.releaseUrl || 'https://github.com/mgdaaslab/BaiYunTest/releases'"
             target="_blank"
           >
             {{ tl('当前版本:') }} {{ currentVersion }}
@@ -76,7 +76,7 @@
               </div>
               <a 
                 class="version-update-footer"
-                :href="versionInfo?.releaseUrl || 'https://github.com/mgdaaslab/WHartTest/releases'"
+                :href="versionInfo?.releaseUrl || 'https://github.com/mgdaaslab/BaiYunTest/releases'"
                 target="_blank"
               >
                 {{ tl('点击查看完整更新日志') }}
@@ -175,6 +175,10 @@
             <a-menu-item key="test-executions" v-if="hasTestExecutionsPermission">
               <template #icon><icon-history /></template>
               <a href="#" @click="checkProjectAndNavigate($event, '/test-executions')">{{ executionHistoryMenuLabel }}</a>
+            </a-menu-item>
+            <a-menu-item key="manual-test-executions" v-if="hasTestcasesPermission">
+              <template #icon><icon-check-circle /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/manual-test-executions')">{{ manualExecutionMenuLabel }}</a>
             </a-menu-item>
           </a-sub-menu>
 
@@ -335,6 +339,7 @@ const testManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Test
 const caseManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Cases' : tl('用例管理')));
 const suitesMenuLabel = computed(() => (locale.value === 'en-US' ? 'Suites' : tl('测试套件')));
 const executionHistoryMenuLabel = computed(() => (locale.value === 'en-US' ? 'History' : tl('执行历史')));
+const manualExecutionMenuLabel = computed(() => (locale.value === 'en-US' ? 'Case Execution' : tl('用例执行')));
 const chatMenuLabel = computed(() => (locale.value === 'en-US' ? 'Chat' : tl('LLM对话')));
 const systemMenuLabel = computed(() => (locale.value === 'en-US' ? 'Admin' : tl('系统管理')));
 const usersMenuLabel = computed(() => (locale.value === 'en-US' ? 'Users' : tl('用户管理')));
@@ -390,6 +395,7 @@ const activeMenu = computed(() => {
   if (path.startsWith('/ui-automation')) return 'ui-automation';
   if (path.startsWith('/testsuites')) return 'testsuites'; // 添加对测试套件路由的识别
   if (path.startsWith('/test-executions')) return 'test-executions'; // 添加对执行历史路由的识别
+  if (path.startsWith('/manual-test-executions')) return 'manual-test-executions';
   if (path.startsWith('/testcases')) return 'testcases';
   if (path.startsWith('/users')) return 'users';
   if (path.startsWith('/organizations')) return 'organizations';

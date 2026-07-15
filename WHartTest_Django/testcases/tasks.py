@@ -18,7 +18,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import TestExecution, TestSuite, TestCaseResult, TestCase
 from prompts.models import UserPrompt, PromptType
-from asgiref.sync import sync_to_async
+from channels.db import database_sync_to_async as sync_to_async
+from wharttest_django.notification_service import notify_test_suite_execution
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ def execute_test_suite(self, execution_id):
         execution.status = 'completed' if execution.status != 'cancelled' else 'cancelled'
         execution.completed_at = timezone.now()
         execution.save(update_fields=['status', 'completed_at', 'updated_at'])
+        notify_test_suite_execution(execution)
         
         logger.info(f"测试套件执行完成: {suite.name}, "
                    f"通过: {execution.passed_count}, "
@@ -120,6 +122,7 @@ def execute_test_suite(self, execution_id):
             execution.status = 'failed'
             execution.completed_at = timezone.now()
             execution.save(update_fields=['status', 'completed_at', 'updated_at'])
+            notify_test_suite_execution(execution)
         except:
             pass
             

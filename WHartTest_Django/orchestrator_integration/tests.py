@@ -8,9 +8,12 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase
 from django.test import TestCase
 from django.test.utils import override_settings
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGenerationChunk
 
 from . import agent_loop_view
 from .agent_loop_view import (
+	_build_sanitized_messages,
     _extract_linked_image_urls,
     _is_linked_image_url_allowed,
     _normalize_uploaded_image_base64_list,
@@ -21,6 +24,7 @@ from .builtin_tools.skill_tools import (
     _collect_skill_artifacts,
     _build_skill_screenshots_dir,
     _finalize_skill_result,
+    _get_skill_runtime_env,
     _prepare_skill_screenshots_dir,
     _sanitize_runtime_path_segment,
 )
@@ -28,6 +32,204 @@ from .builtin_tools.output_sanitizer import strip_terminal_control_sequences
 from .middleware_config import get_user_friendly_llm_error, _model_retry_should_retry
 from projects.models import Project, ProjectMember
 from requirements.models import DocumentImage, RequirementDocument
+
+
+class SkillRuntimeEnvTests(SimpleTestCase):
+    @override_settings(WHARTTEST_API_KEY="", WHARTTEST_BACKEND_URL="")
+    def test_runtime_environment_preserves_configured_api_key(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WHARTTEST_API_KEY": "runtime-api-key",
+                "WHARTTEST_BACKEND_URL": "http://runtime-backend:8000",
+            },
+        ):
+            env = _get_skill_runtime_env()
+
+        self.assertEqual(env["WHARTTEST_API_KEY"], "runtime-api-key")
+        self.assertEqual(
+            env["WHARTTEST_BACKEND_URL"], "http://runtime-backend:8000"
+        )
+
+
+class ToolCallHistorySanitizerTests(SimpleTestCase):
+    def test_repairs_ai_tool_call_without_id_and_inserts_interrupted_result(self):
+        message = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "id": None,
+                    "name": "knowledge_search",
+                    "args": {"query": "test"},
+                }
+            ],
+        )
+
+        sanitized, fixed_count = _build_sanitized_messages([message])
+
+        self.assertEqual(len(sanitized), 2)
+        self.assertTrue(sanitized[0].tool_calls[0]["id"])
+        self.assertIsInstance(sanitized[1], ToolMessage)
+        self.assertEqual(
+            sanitized[1].tool_call_id, sanitized[0].tool_calls[0]["id"]
+        )
+        self.assertEqual(fixed_count, 2)
+
+    def test_repairs_raw_tool_call_history_before_next_user_message(self):
+        message = AIMessage(
+            content="",
+            additional_kwargs={
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "knowledge_search",
+                            "arguments": '{"query":"test"}',
+                        },
+                    }
+                ]
+            },
+        )
+
+        sanitized, fixed_count = _build_sanitized_messages(
+            [HumanMessage(content="search"), message, HumanMessage(content="continue")]
+        )
+
+        self.assertEqual(fixed_count, 1)
+        self.assertEqual(len(sanitized), 4)
+        self.assertIsInstance(sanitized[2], ToolMessage)
+        self.assertEqual(sanitized[2].tool_call_id, "call_123")
+        self.assertIsInstance(sanitized[3], HumanMessage)
+
+
+class CompatibleToolCallChunkTests(SimpleTestCase):
+    def test_filters_duplicate_tool_call_chunk_without_id(self):
+        from langgraph_integration.openai_compatible_chat_model import (
+            repair_tool_call_chunks,
+        )
+
+        message = AIMessageChunk(
+            content="",
+            tool_call_chunks=[
+                {
+                    "name": "knowledge_search",
+                    "args": '{"query":"test"}',
+                    "id": "call_123",
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                },
+                {
+                    "name": None,
+                    "args": '{"query":"test"}',
+                    "id": None,
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                },
+            ],
+        )
+
+        self.assertTrue(repair_tool_call_chunks(message, {0: "call_123"}))
+        self.assertEqual(len(message.tool_call_chunks), 1)
+        self.assertEqual(
+            message.tool_calls,
+            [
+                {
+                    "name": "knowledge_search",
+                    "args": {"query": "test"},
+                    "id": "call_123",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+    def test_attaches_id_to_later_tool_argument_fragments(self):
+        from langgraph_integration.openai_compatible_chat_model import (
+            repair_tool_call_chunks,
+        )
+
+        ids = {}
+        first = AIMessageChunk(
+            content="",
+            tool_call_chunks=[
+                {
+                    "name": "knowledge_search",
+                    "args": None,
+                    "id": "call_123",
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                }
+            ],
+        )
+        second = AIMessageChunk(
+            content="",
+            tool_call_chunks=[
+                {
+                    "name": None,
+                    "args": '{"query":"test"}',
+                    "id": None,
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                }
+            ],
+        )
+
+        self.assertFalse(repair_tool_call_chunks(first, ids))
+        self.assertTrue(repair_tool_call_chunks(second, ids))
+        combined = first + second
+
+        self.assertEqual(combined.tool_calls[0]["id"], "call_123")
+        self.assertEqual(combined.tool_calls[0]["name"], "knowledge_search")
+        self.assertEqual(combined.tool_calls[0]["args"], {"query": "test"})
+
+    def test_async_stream_repairs_later_tool_argument_fragments(self):
+        from langgraph_integration.openai_compatible_chat_model import (
+            ToolCallCompatibleChatOpenAI,
+        )
+        from langchain_openai import ChatOpenAI
+
+        first = AIMessageChunk(
+            content="",
+            tool_call_chunks=[
+                {
+                    "name": "knowledge_search",
+                    "args": None,
+                    "id": "call_123",
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                }
+            ],
+        )
+        second = AIMessageChunk(
+            content="",
+            tool_call_chunks=[
+                {
+                    "name": None,
+                    "args": '{"query":"test"}',
+                    "id": None,
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                }
+            ],
+        )
+
+        async def fake_astream(self, *args, **kwargs):
+            yield ChatGenerationChunk(message=first)
+            yield ChatGenerationChunk(message=second)
+
+        async def collect_chunks(model):
+            chunks = []
+            async for chunk in model._astream([]):
+                chunks.append(chunk.message)
+            return chunks
+
+        model = ToolCallCompatibleChatOpenAI(model="test", api_key="test")
+        with patch.object(ChatOpenAI, "_astream", fake_astream):
+            chunks = async_to_sync(collect_chunks)(model)
+
+        combined = chunks[0] + chunks[1]
+        self.assertEqual(combined.tool_calls[0]["id"], "call_123")
+        self.assertEqual(combined.tool_calls[0]["args"], {"query": "test"})
 
 
 class LLMFriendlyErrorTests(SimpleTestCase):

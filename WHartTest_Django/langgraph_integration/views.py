@@ -13,7 +13,7 @@ from rest_framework.exceptions import AuthenticationFailed
 from .models import LLMConfig, ChatSession, ChatMessage, TokenUsageRecord
 from .serializers import LLMConfigSerializer
 import logging
-from asgiref.sync import sync_to_async
+from channels.db import database_sync_to_async as sync_to_async
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,7 @@ from langchain_core.messages import (
     SystemMessage,
 )
 from langchain_openai import ChatOpenAI
+from .openai_compatible_chat_model import ToolCallCompatibleChatOpenAI
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages  # Correct import for add_messages
 from langchain.agents import create_agent  # For agent with tools (v1 API)
@@ -204,7 +205,7 @@ def create_llm_instance(active_config, temperature=0.7):
                 "timeout": request_timeout,  # 单次请求超时
                 "max_retries": max_retries,  # 自动重试次数
             }
-            llm = ChatOpenAI(**llm_kwargs)
+            llm = ToolCallCompatibleChatOpenAI(**llm_kwargs)
 
         logger.info(
             "Initialized LLM: provider=%s, model=%s, base_url=%s, timeout=%ss, max_retries=%s",

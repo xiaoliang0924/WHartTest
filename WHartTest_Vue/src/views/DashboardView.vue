@@ -304,6 +304,7 @@ const dashboardText = computed(() => (
         runsUnit: 'runs',
         approved: 'Approved',
         pendingReview: 'Pending',
+        pendingProductConfirmation: 'Product confirmation',
         unavailable: 'N/A',
         periodDay: 'Day',
         periodWeek: 'Week',
@@ -347,6 +348,7 @@ const dashboardText = computed(() => (
         runsUnit: '次',
         approved: '已通过',
         pendingReview: '待审核',
+        pendingProductConfirmation: '待产品确认',
         unavailable: '不可用',
         periodDay: '日',
         periodWeek: '周',
@@ -391,6 +393,7 @@ const reviewStatusData = computed(() => {
     { key: 'pending', label: dashboardText.value.pendingReview, value: statuses?.pending_review || 0, percent: getPercent(statuses?.pending_review || 0), color: '#faad14' },
     { key: 'optimization', label: dashboardText.value.needsOptimization, value: statuses?.needs_optimization || 0, percent: getPercent(statuses?.needs_optimization || 0), color: '#1890ff' },
     { key: 'opt_pending', label: dashboardText.value.optimizationPending, value: statuses?.optimization_pending_review || 0, percent: getPercent(statuses?.optimization_pending_review || 0), color: '#722ed1' },
+    { key: 'product_confirmation', label: dashboardText.value.pendingProductConfirmation, value: statuses?.pending_product_confirmation || 0, percent: getPercent(statuses?.pending_product_confirmation || 0), color: '#13c2c2' },
     { key: 'unavailable', label: dashboardText.value.unavailable, value: statuses?.unavailable || 0, percent: getPercent(statuses?.unavailable || 0), color: '#ff4d4f' },
   ];
 });

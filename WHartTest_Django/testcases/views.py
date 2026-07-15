@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.utils import timezone
 from django.http import HttpResponse
 from django.conf import settings
 from openpyxl import Workbook
@@ -21,16 +22,27 @@ from .models import (
     TestSuite,
     TestExecution,
     TestCaseResult,
+    ManualTestRun,
+    ManualTestAssignment,
 )
 from .serializers import (
     TestCaseSerializer,
     TestCaseListSerializer,
     TestCaseModuleSerializer,
     TestCaseScreenshotSerializer,
+    ManualTestRunSerializer,
+    ManualTestRunCreateSerializer,
+    ManualTestAssignmentSerializer,
+    ManualTestResultSerializer,
 )
-from .permissions import IsProjectMemberForTestCase, IsProjectMemberForTestCaseModule
+from .permissions import (
+    IsProjectMemberForTestCase,
+    IsProjectMemberForTestCaseModule,
+    IsProjectMemberForManualTestRun,
+)
 from .filters import TestCaseFilter  # 导入自定义过滤器
 from wharttest_django.pagination import StandardPagination
+from projects.models import ProjectMember
 
 # 确保导入项目自定义的权限类
 from wharttest_django.permissions import HasModelPermission, permission_required
@@ -107,6 +119,8 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             qs = TestCase.objects.filter(project=project).select_related(
                 "creator", "module"
             )
+            if self.action == "list":
+                qs = qs.order_by("sort_order", "id")
             if self.action != "list":
                 qs = qs.prefetch_related("steps")
             return qs
@@ -356,6 +370,84 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             else status.HTTP_400_BAD_REQUEST,
         )
 
+    @action(detail=False, methods=["post"], url_path="reorder")
+    def reorder(self, request, project_pk=None):
+        """
+        保存当前测试用例列表的拖拽顺序。
+        POST /api/projects/{project_pk}/testcases/reorder/
+        请求体: {"ids": [35, 36, 37]}
+        """
+        ids_data = request.data.get("ids") or request.data.get("ordered_ids")
+        if not isinstance(ids_data, list):
+            return Response(
+                {"error": "ids参数格式错误，应为数字列表"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            ordered_ids = [int(item) for item in ids_data]
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "ids参数格式错误，应为数字列表"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not ordered_ids:
+            return Response(
+                {"error": "用例ID列表不能为空"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if len(set(ordered_ids)) != len(ordered_ids):
+            return Response(
+                {"error": "用例ID列表不能包含重复项"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        project = get_object_or_404(Project, pk=project_pk)
+
+        with transaction.atomic():
+            testcases = list(
+                TestCase.objects.select_for_update().filter(
+                    project=project,
+                    id__in=ordered_ids,
+                )
+            )
+            testcase_map = {testcase.id: testcase for testcase in testcases}
+            not_found_ids = [
+                testcase_id for testcase_id in ordered_ids if testcase_id not in testcase_map
+            ]
+            if not_found_ids:
+                return Response(
+                    {
+                        "error": f"以下用例ID不存在或不属于当前项目: {not_found_ids}",
+                        "not_found_ids": not_found_ids,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            sort_start = min(
+                [testcase.sort_order or testcase.id for testcase in testcases] or [1]
+            )
+            sort_start = max(1, sort_start)
+
+            ordered_testcases = []
+            for index, testcase_id in enumerate(ordered_ids):
+                testcase = testcase_map[testcase_id]
+                testcase.sort_order = sort_start + index
+                ordered_testcases.append(testcase)
+
+            TestCase.objects.bulk_update(ordered_testcases, ["sort_order"])
+
+        return Response(
+            {
+                "message": "测试用例顺序已保存",
+                "ordered_ids": ordered_ids,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
     @action(detail=False, methods=["post"], url_path="batch-delete")
     def batch_delete(self, request, **kwargs):
         """
@@ -436,6 +528,57 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 {"error": f"删除过程中发生错误: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    @action(detail=False, methods=["post"], url_path="batch-move")
+    @permission_required("testcases.change_testcase")
+    def batch_move(self, request, project_pk=None, **kwargs):
+        """Move one or more test cases to another module in the same project."""
+        ids_data = request.data.get("ids", [])
+        target_module_id = request.data.get("target_module_id")
+
+        if not ids_data:
+            return Response(
+                {"error": "请选择要移动的测试用例"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            testcase_ids = list(dict.fromkeys(int(testcase_id) for testcase_id in ids_data))
+            target_module_id = int(target_module_id)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "用例ID和目标模块ID必须为数字"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        project = get_object_or_404(Project, pk=project_pk)
+        target_module = get_object_or_404(
+            TestCaseModule,
+            pk=target_module_id,
+            project=project,
+        )
+        testcases_to_move = self.get_queryset().filter(id__in=testcase_ids)
+        found_ids = set(testcases_to_move.values_list("id", flat=True))
+        missing_ids = [testcase_id for testcase_id in testcase_ids if testcase_id not in found_ids]
+        if missing_ids:
+            return Response(
+                {"error": "部分测试用例不存在或不属于当前项目", "missing_ids": missing_ids},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            moved_count = testcases_to_move.exclude(module=target_module).update(
+                module=target_module
+            )
+
+        return Response(
+            {
+                "message": f"已移动 {moved_count} 条测试用例到模块 {target_module.name}",
+                "moved_count": moved_count,
+                "target_module": {"id": target_module.id, "name": target_module.name},
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["post"], url_path="upload-screenshots")
     @permission_required("testcases.add_testcasescreenshot")
@@ -697,8 +840,19 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
             # 权限类 IsProjectMemberForTestCaseModule 已经检查了用户是否是此项目的成员
             return TestCaseModule.objects.filter(project=project).select_related(
                 "creator", "parent"
-            )
+            ).order_by("parent_id", "sort_order", "id")
         return TestCaseModule.objects.none()
+
+    def _normalize_sibling_order(self, project, parent_id):
+        siblings = list(
+            TestCaseModule.objects.filter(project=project, parent_id=parent_id)
+            .order_by("sort_order", "id")
+        )
+        for index, module in enumerate(siblings, start=1):
+            if module.sort_order != index:
+                module.sort_order = index
+                module.save(update_fields=["sort_order"])
+        return siblings
 
     def perform_create(self, serializer):
         """
@@ -710,6 +864,44 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
         serializer.context["project"] = project
         # 保存模块，设置创建人和项目
         serializer.save(creator=self.request.user, project=project)
+
+    @action(detail=True, methods=["post"], url_path="move")
+    def move(self, request, project_pk=None, pk=None):
+        """
+        在同一父级下上移或下移模块。
+        """
+        module = self.get_object()
+        direction = request.data.get("direction")
+        if direction not in {"up", "down"}:
+            return Response(
+                {"error": "direction 参数必须是 up 或 down"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            siblings = self._normalize_sibling_order(module.project, module.parent_id)
+            current_index = next(
+                (index for index, item in enumerate(siblings) if item.id == module.id),
+                None,
+            )
+            if current_index is None:
+                return Response(
+                    {"error": "模块不在当前同级列表中"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            target_index = current_index - 1 if direction == "up" else current_index + 1
+            if target_index < 0 or target_index >= len(siblings):
+                serializer = self.get_serializer(module)
+                return Response(serializer.data, status=status.HTTP_200_OK)
+
+            target = siblings[target_index]
+            module.sort_order, target.sort_order = target.sort_order, module.sort_order
+            module.save(update_fields=["sort_order"])
+            target.save(update_fields=["sort_order"])
+
+        serializer = self.get_serializer(module)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     def perform_destroy(self, instance):
         """

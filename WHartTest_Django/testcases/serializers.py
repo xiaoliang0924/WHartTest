@@ -8,6 +8,8 @@ from .models import (
     TestSuite,
     TestExecution,
     TestCaseResult,
+    ManualTestRun,
+    ManualTestAssignment,
 )
 from projects.models import Project  # 确保导入Project模型以便进行校验
 from accounts.serializers import UserDetailSerializer  # 用于显示创建者信息
@@ -63,6 +65,7 @@ class TestCaseListSerializer(serializers.ModelSerializer):
             "updated_at",
             "review_status",
             "test_type",
+            "sort_order",
         ]
         read_only_fields = fields
 
@@ -108,6 +111,7 @@ class TestCaseSerializer(serializers.ModelSerializer):
             "updated_at",
             "review_status",
             "test_type",
+            "sort_order",
         ]
         read_only_fields = [
             "id",
@@ -117,6 +121,7 @@ class TestCaseSerializer(serializers.ModelSerializer):
             "creator_detail",
             "created_at",
             "updated_at",
+            "sort_order",
         ]
         # project 字段在创建时是必需的，但通常从 URL 获取，不在 request.data 中。
         # 如果要通过 request.data 传递 project_id，则需要将其从 read_only_fields 中移除，
@@ -264,6 +269,7 @@ class TestCaseModuleSerializer(serializers.ModelSerializer):
             "parent",
             "parent_id",
             "level",
+            "sort_order",
             "creator",
             "creator_detail",
             "created_at",
@@ -274,6 +280,7 @@ class TestCaseModuleSerializer(serializers.ModelSerializer):
             "id",
             "project",
             "level",
+            "sort_order",
             "creator",
             "creator_detail",
             "created_at",
@@ -341,15 +348,38 @@ class TestCaseModuleSerializer(serializers.ModelSerializer):
         else:
             validated_data["level"] = 1
 
+        siblings = TestCaseModule.objects.filter(
+            project=validated_data["project"],
+            parent=parent,
+        )
+        max_sort_order = max(
+            [order for order in siblings.values_list("sort_order", flat=True)] or [0]
+        )
+        validated_data["sort_order"] = max_sort_order + 1
+
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
         # 更新模块级别
+        old_parent_id = instance.parent_id
         parent = validated_data.get("parent")
         if parent:
             validated_data["level"] = parent.level + 1
         elif "parent" in validated_data and validated_data["parent"] is None:
             validated_data["level"] = 1
+
+        if "parent" in validated_data:
+            new_parent = validated_data.get("parent")
+            new_parent_id = new_parent.id if new_parent else None
+            if new_parent_id != old_parent_id:
+                siblings = TestCaseModule.objects.filter(
+                    project=instance.project,
+                    parent=new_parent,
+                ).exclude(pk=instance.pk)
+                max_sort_order = max(
+                    [order for order in siblings.values_list("sort_order", flat=True)] or [0]
+                )
+                validated_data["sort_order"] = max_sort_order + 1
 
         return super().update(instance, validated_data)
 
@@ -652,3 +682,70 @@ class TestExecutionCreateSerializer(serializers.Serializer):
             return value
         except TestSuite.DoesNotExist:
             raise serializers.ValidationError("测试套件不存在")
+
+
+class ManualTestAssignmentSerializer(serializers.ModelSerializer):
+    testcase = serializers.SerializerMethodField()
+    testcase_detail = serializers.SerializerMethodField()
+    assignee_detail = UserDetailSerializer(source="assignee", read_only=True)
+    run_name = serializers.CharField(source="run.name", read_only=True)
+
+    class Meta:
+        model = ManualTestAssignment
+        fields = [
+            "id", "run", "run_name", "testcase", "testcase_detail", "assignee",
+            "assignee_detail", "status", "failure_reason", "comment", "executed_at",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "run", "testcase", "assignee", "status", "failure_reason", "comment",
+            "executed_at", "created_at", "updated_at",
+        ]
+
+    def get_testcase(self, obj):
+        return obj.testcase_id or obj.testcase_snapshot.get("id")
+
+    def get_testcase_detail(self, obj):
+        if obj.testcase_id:
+            return TestCaseSerializer(obj.testcase, context=self.context).data
+        return obj.testcase_snapshot or None
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        representation["testcase"] = self.get_testcase(instance)
+        return representation
+
+
+class ManualTestRunSerializer(serializers.ModelSerializer):
+    creator_detail = UserDetailSerializer(source="creator", read_only=True)
+    assignments = ManualTestAssignmentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = ManualTestRun
+        fields = [
+            "id", "project", "name", "description", "status", "creator", "creator_detail",
+            "total_count", "passed_count", "failed_count", "pending_count", "assignments",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "project", "status", "creator", "creator_detail", "total_count",
+            "passed_count", "failed_count", "pending_count", "assignments", "created_at", "updated_at",
+        ]
+
+
+class ManualTestRunCreateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=255)
+    description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    testcase_ids = serializers.ListField(child=serializers.IntegerField(), allow_empty=False)
+    assignee_id = serializers.IntegerField()
+
+
+class ManualTestResultSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=["pending", "pass", "fail"])
+    failure_reason = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    comment = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def validate(self, attrs):
+        if attrs["status"] == "fail" and not (attrs.get("failure_reason") or "").strip():
+            raise serializers.ValidationError({"failure_reason": "标记为不通过时必须填写失败原因"})
+        return attrs

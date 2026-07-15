@@ -560,6 +560,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 )
                 logger.info(f"测试用例状态已更新: case_id={case_id}, status={status}")
 
+            if not batch_id:
+                from wharttest_django.notification_service import notify_ui_execution_record
+                notify_ui_execution_record(record)
+
             # 更新批量执行记录统计
             if batch_id:
                 try:

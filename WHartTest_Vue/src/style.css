@@ -62,7 +62,7 @@
   --theme-input-border: rgba(148, 163, 184, 0.16);
   --theme-input-hover: rgba(var(--theme-accent-rgb), 0.08);
   --theme-input-focus-bg: rgba(19, 30, 47, 0.92);
-  --theme-overlay-bg: linear-gradient(180deg, rgba(29, 38, 57, 0.98), rgba(25, 33, 51, 0.98));
+  --theme-overlay-bg: #1d2639;
   --theme-overlay-border: rgba(148, 163, 184, 0.14);
   --theme-overlay-shadow: 0 22px 42px rgba(2, 6, 23, 0.42);
   --theme-focus-ring: rgba(var(--theme-accent-rgb), 0.22);

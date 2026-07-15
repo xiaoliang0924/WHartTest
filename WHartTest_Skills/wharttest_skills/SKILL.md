@@ -3,6 +3,14 @@ name: whart-test
 description: WHartTest测试管理平台工具集。用于管理项目、模块、测试用例的增删改查，以及测试截图上传。当用户需要操作测试用例、查询项目信息或上传截图时使用。
 ---
 
+## 用例数量规则（必须遵守）
+
+使用 `get_testcases` 查询模块用例时，返回的 `total` 和 `authoritative_summary` 是唯一的权威统计结果。
+
+- 回答用例数量、重复用例审查结果或覆盖范围时，必须直接引用 `total`。
+- 不得通过 ID 范围、分组展示条数或人工计数推导数量。
+- 即使只对部分用例做了逐条分析，也必须说明分析范围，不能把部分数量写成模块总数。
+
 # WHartTest 测试管理平台
 
 ## 快速开始
@@ -42,7 +50,7 @@ python whart_tools.py --action <action_name> [--参数名 参数值]
 | `upload_screenshot` | 上传单张截图 | `--project_id`, `--case_id`, `--file_path`, `--title`, `--description`, `--step_number`, `--page_url` |
 | `upload_screenshots` | 批量上传截图 | `--project_id`, `--case_id`, `--file_paths`(逗号分隔), `--title`, `--description`, `--step_number`, `--page_url` |
 
-**截图路径约定**：playwright-skill 保存的截图位于 `SCREENSHOT_DIR` 环境变量指定的目录。上传时只需传入文件名（无需路径），系统会自动从 `SCREENSHOT_DIR` 查找。
+**截图路径约定**：自动化技能（如 `playwright-skill`、`agent-browser-skill`）生成的截图应优先保存到 `SCREENSHOT_DIR` 环境变量指定的目录。上传时只需传入文件名（无需路径），系统会优先从 `SCREENSHOT_DIR` 查找；若未命中，会再回退到常见临时截图目录做兼容搜索。
 
 **单张上传**：`--file_path "case_11_step1.png"`
 **批量上传**：`--file_paths "step1.png,step2.png,step3.png"`（最多10张，逗号分隔）

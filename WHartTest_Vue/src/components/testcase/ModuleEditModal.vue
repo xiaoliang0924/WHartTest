@@ -114,7 +114,7 @@ const handleSubmit = async () => {
     let response;
     const payload: CreateTestCaseModuleRequest | UpdateTestCaseModuleRequest = {
       name: formState.name,
-      parent: formState.parent || undefined,
+      parent: formState.parent ?? null,
     };
 
     if (isEditing.value && formState.id) {

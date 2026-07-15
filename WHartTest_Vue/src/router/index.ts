@@ -11,6 +11,7 @@ import ProjectManagementView from '../views/ProjectManagementView.vue'; // 导�
 import TestCaseManagementView from '../views/TestCaseManagementView.vue'; // 导入测试用例管理页面组件。
 import TestSuiteManagementView from '../views/TestSuiteManagementView.vue'; // 导入测试套件管理页面组件。
 import TestExecutionHistoryView from '../views/TestExecutionHistoryView.vue'; // 导入测试执行历史页面组件。
+import ManualTestExecutionView from '../views/ManualTestExecutionView.vue';
 import LlmConfigManagementView from '@/features/langgraph/views/LlmConfigManagementView.vue'; // 导入 LLM 配置管理页面组件。
 import LangGraphChatView from '@/features/langgraph/views/LangGraphChatView.vue'; // 导入 LangGraph 聊天页面组件。
 import KnowledgeManagementView from '@/features/knowledge/views/KnowledgeManagementView.vue'; // 导入知识库管理页面组件。
@@ -83,6 +84,11 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
         path: 'test-executions', // 定义测试执行历史子路径。
         name: 'TestExecutionHistory', // 定义测试执行历史路由名称。
         component: TestExecutionHistoryView, // 指定测试执行历史页面组件。
+      },
+      {
+        path: 'manual-test-executions',
+        name: 'ManualTestExecution',
+        component: ManualTestExecutionView,
       },
       {
         path: 'llm-configs', // 定义 LLM 配置管理子路径。

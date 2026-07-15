@@ -1,79 +1,95 @@
-// 项目状态仓库
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { computed, ref } from 'vue';
 import { getProjectList, type Project } from '@/services/projectService';
 
 const PROJECT_STORAGE_KEY = 'selected_project_id';
+const PROJECT_DEFAULT_MIGRATION_KEY = 'selected_project_default_migrated_to_work_order_ai';
+const DEFAULT_PROJECT_NAMES = ['智慧AI工单系统', '智慧工单AI系统'];
+const LEGACY_DEFAULT_PROJECT_NAME = '演示项目 (Demo Project)';
 
 export const useProjectStore = defineStore('project', () => {
-  // 当前选中的项目
   const currentProject = ref<Project | null>(null);
-  
-  // 项目列表
   const projectList = ref<Project[]>([]);
-  
-  // 加载状态
   const loading = ref(false);
-  
-  // 错误信息
   const error = ref<string | null>(null);
-  
-  // 计算属性：当前项目ID
-  const currentProjectId = computed(() => currentProject.value?.id || null);
-  
-  // 计算属性：项目选项列表（用于下拉选择器）
-  const projectOptions = computed(() => {
-    return projectList.value.map(project => ({
-      label: project.name,
-      value: project.id
-    }));
-  });
 
-  // 从localStorage获取保存的项目ID
+  const currentProjectId = computed(() => currentProject.value?.id || null);
+
+  const projectOptions = computed(() =>
+    projectList.value.map(project => ({
+      label: project.name,
+      value: project.id,
+    })),
+  );
+
   const getSavedProjectId = (): number | null => {
     try {
       const savedId = localStorage.getItem(PROJECT_STORAGE_KEY);
       return savedId ? parseInt(savedId, 10) : null;
-    } catch (error) {
-      console.warn('读取保存的项目ID失败:', error);
+    } catch (err) {
+      console.warn('读取保存的项目ID失败:', err);
       return null;
     }
   };
 
-  // 将项目ID保存到localStorage
   const saveProjectId = (projectId: number) => {
     try {
       localStorage.setItem(PROJECT_STORAGE_KEY, projectId.toString());
-    } catch (error) {
-      console.warn('保存项目ID失败:', error);
+    } catch (err) {
+      console.warn('保存项目ID失败:', err);
     }
   };
-  
-  // 加载项目列表
+
+  const hasMigratedDefaultProject = (): boolean => {
+    try {
+      return localStorage.getItem(PROJECT_DEFAULT_MIGRATION_KEY) === 'true';
+    } catch (err) {
+      console.warn('读取默认项目迁移状态失败:', err);
+      return false;
+    }
+  };
+
+  const markDefaultProjectMigrated = () => {
+    try {
+      localStorage.setItem(PROJECT_DEFAULT_MIGRATION_KEY, 'true');
+    } catch (err) {
+      console.warn('保存默认项目迁移状态失败:', err);
+    }
+  };
+
+  const pickDefaultProject = (savedProject: Project | null): Project | null => {
+    const preferredDefaultProject = projectList.value.find(project =>
+      DEFAULT_PROJECT_NAMES.includes(project.name),
+    ) || null;
+
+    if (
+      preferredDefaultProject &&
+      (!savedProject ||
+        (savedProject.name === LEGACY_DEFAULT_PROJECT_NAME && !hasMigratedDefaultProject()))
+    ) {
+      markDefaultProjectMigrated();
+      return preferredDefaultProject;
+    }
+
+    return savedProject || projectList.value[0] || null;
+  };
+
   const fetchProjects = async () => {
     loading.value = true;
     error.value = null;
-    
+
     try {
       const response = await getProjectList();
-      
+
       if (response.success && response.data) {
         projectList.value = response.data;
-        
-        // 优先尝试恢复之前保存的项目
+
         const savedProjectId = getSavedProjectId();
-        let projectToSelect: Project | null = null;
-        
-        if (savedProjectId) {
-          projectToSelect = projectList.value.find(p => p.id === savedProjectId) || null;
-        }
-        
-        // 如果没有保存的项目或保存的项目不存在，则选择第一个项目
-        if (!projectToSelect && projectList.value.length > 0) {
-          projectToSelect = projectList.value[0];
-        }
-        
-        // 设置当前项目（如果找到了合适的项目）
+        const savedProject = savedProjectId
+          ? projectList.value.find(project => project.id === savedProjectId) || null
+          : null;
+        const projectToSelect = pickDefaultProject(savedProject);
+
         if (projectToSelect) {
           setCurrentProject(projectToSelect);
         }
@@ -87,36 +103,32 @@ export const useProjectStore = defineStore('project', () => {
       loading.value = false;
     }
   };
-  
-  // 设置当前项目
+
   const setCurrentProject = (project: Project) => {
     currentProject.value = project;
-    // 保存到localStorage
     saveProjectId(project.id);
   };
-  
-  // 根据ID设置当前项目
+
   const setCurrentProjectById = (projectId: number) => {
-    const project = projectList.value.find(p => p.id === projectId);
+    const project = projectList.value.find(project => project.id === projectId);
     if (project) {
       setCurrentProject(project);
     }
   };
-  
-  // 重置状态（用于用户退出时清空）
+
   const reset = () => {
     currentProject.value = null;
     projectList.value = [];
     error.value = null;
     loading.value = false;
-    // 清除 localStorage 中保存的项目ID
+
     try {
       localStorage.removeItem(PROJECT_STORAGE_KEY);
     } catch (err) {
       console.warn('清除保存的项目ID失败:', err);
     }
   };
-  
+
   return {
     currentProject,
     currentProjectId,
@@ -127,6 +139,6 @@ export const useProjectStore = defineStore('project', () => {
     fetchProjects,
     setCurrentProject,
     setCurrentProjectById,
-    reset
+    reset,
   };
 });
