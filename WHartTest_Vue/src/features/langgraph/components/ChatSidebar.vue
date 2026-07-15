@@ -73,18 +73,39 @@
           class="history-item-checkbox"
           @click.stop
         />
-        <div class="history-item-content" @click="$emit('switch-session', session.id)">
+        <div class="history-item-content" @click="editingSessionId !== session.id && $emit('switch-session', session.id)">
           <div class="history-item-info">
-            <div class="history-item-title">{{ session.title || text.untitledChat }}</div>
+            <template v-if="editingSessionId === session.id">
+              <a-input
+                v-model="editingTitle"
+                size="mini"
+                autofocus
+                @press-enter="handleSaveRename(session.id)"
+                @blur="handleSaveRename(session.id)"
+                @keydown.esc="cancelRename"
+                @click.stop
+                style="width: 100%; margin-bottom: 4px;"
+              />
+            </template>
+            <template v-else>
+              <div class="history-item-title">{{ session.title || text.untitledChat }}</div>
+            </template>
             <div class="history-item-time">{{ formatTime(session.lastTime) }}</div>
           </div>
         </div>
-        <div v-if="selectedSessions.length === 0" class="history-item-actions">
-          <a-button type="text" size="mini" @click.stop="$emit('delete-session', session.id)">
-            <template #icon>
-              <icon-delete style="color: #f53f3f;" />
-            </template>
-          </a-button>
+        <div v-if="selectedSessions.length === 0 && editingSessionId !== session.id" class="history-item-actions">
+          <a-space :size="4">
+            <a-button type="text" size="mini" @click.stop="startRename(session)">
+              <template #icon>
+                <icon-edit style="color: #4e5969;" />
+              </template>
+            </a-button>
+            <a-button type="text" size="mini" @click.stop="$emit('delete-session', session.id)">
+              <template #icon>
+                <icon-delete style="color: #f53f3f;" />
+              </template>
+            </a-button>
+          </a-space>
         </div>
       </div>
     </div>
@@ -93,8 +114,8 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue';
-import { Button as AButton, Checkbox as ACheckbox, Space as ASpace, Modal, Message } from '@arco-design/web-vue';
-import { IconPlus, IconDelete, IconCheckCircle, IconCloseCircle } from '@arco-design/web-vue/es/icon';
+import { Button as AButton, Checkbox as ACheckbox, Input as AInput, Space as ASpace, Modal, Message } from '@arco-design/web-vue';
+import { IconPlus, IconDelete, IconCheckCircle, IconCloseCircle, IconEdit } from '@arco-design/web-vue/es/icon';
 import { useAppI18n } from '@/composables/useAppI18n';
 
 interface ChatSession {
@@ -154,10 +175,39 @@ const emit = defineEmits<{
   'switch-session': [id: string];
   'delete-session': [id: string];
   'batch-delete-sessions': [sessionIds: string[]];
+  'rename-session': [id: string, title: string];
 }>();
 
 // 选中的会话列表
 const selectedSessions = ref<string[]>([]);
+
+// 编辑会话标题相关状态
+const editingSessionId = ref<string | null>(null);
+const editingTitle = ref<string>('');
+
+// 进入编辑模式
+const startRename = (session: ChatSession) => {
+  editingSessionId.value = session.id;
+  editingTitle.value = session.title;
+};
+
+// 取消编辑
+const cancelRename = () => {
+  editingSessionId.value = null;
+  editingTitle.value = '';
+};
+
+// 保存重命名
+const handleSaveRename = (id: string) => {
+  if (!editingSessionId.value) return;
+  const newTitle = editingTitle.value.trim();
+  if (newTitle && newTitle !== props.sessions.find(s => s.id === id)?.title) {
+    emit('rename-session', id, newTitle);
+  }
+  editingSessionId.value = null;
+  editingTitle.value = '';
+};
+
 
 // 计算是否全选
 const isAllSelected = computed(() => {

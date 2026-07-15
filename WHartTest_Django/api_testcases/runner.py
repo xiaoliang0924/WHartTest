@@ -1,8 +1,10 @@
 from typing import Dict, List, Optional
+import copy
 import json
 import logging
 import types
 from httprunner import HttpRunner, Config, Step, RunRequest, RunSqlRequest
+from api_interfaces.logging_utils import new_trace_id, summarize_for_log
 from api_interfaces.payloads import (
     flatten_key_value_pairs,
     normalize_request_body,
@@ -70,6 +72,18 @@ def load_custom_functions(project_id):
 
 class TestCaseRunner(HttpRunner):
     """Test case runner extending HttpRunner."""
+
+    @staticmethod
+    def _coerce_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {'true', '1', 'yes', 'on'}:
+                return True
+            if normalized in {'false', '0', 'no', 'off'}:
+                return False
+        return None
 
     @staticmethod
     def _validators_indicate_failure(validators: Optional[Dict]) -> bool:
@@ -159,6 +173,9 @@ class TestCaseRunner(HttpRunner):
         super().__init__()
         self.testcase = testcase
         self.teststeps = []
+        self.trace_id = new_trace_id('tc')
+        self.step_body_diagnostics = []
+        self.step_request_snapshots = []
 
         # Load and register custom functions
         try:
@@ -167,11 +184,27 @@ class TestCaseRunner(HttpRunner):
                 self.functions = custom_functions
                 from httprunner.parser import Parser
                 self.parser = Parser(functions_mapping=custom_functions)
-                logger.info(f"Test case [{testcase.name}] loaded custom functions: {list(custom_functions.keys())}")
+                logger.info(
+                    "Test case loaded custom functions: trace_id=%s testcase_id=%s "
+                    "testcase_name=%s functions=%s",
+                    self.trace_id,
+                    testcase.id,
+                    testcase.name,
+                    list(custom_functions.keys()),
+                )
             else:
-                logger.warning(f"Project [{testcase.project.name}] has no available custom functions")
+                logger.warning(
+                    "Project has no available custom functions: trace_id=%s project=%s",
+                    self.trace_id,
+                    testcase.project.name,
+                )
         except Exception as e:
-            logger.error(f"Failed to load custom functions for project [{testcase.project.name}]: {str(e)}")
+            logger.error(
+                "Failed to load custom functions: trace_id=%s project=%s error=%s",
+                self.trace_id,
+                testcase.project.name,
+                str(e),
+            )
 
         # Build config
         try:
@@ -186,7 +219,14 @@ class TestCaseRunner(HttpRunner):
                 testcase.config = {}
 
             self.base_url = self.testcase.config.get('base_url', '')
-            self.verify = self.testcase.config.get('verify', None)
+            raw_verify = self.testcase.config.get('verify', None)
+            parsed_verify = self._coerce_bool(raw_verify)
+            self.case_verify_explicit = getattr(
+                testcase,
+                '_case_verify_explicit',
+                parsed_verify is not None,
+            )
+            self.verify = parsed_verify
             variables = self.testcase.config.get('variables', {})
             if isinstance(variables, str):
                 try:
@@ -216,8 +256,18 @@ class TestCaseRunner(HttpRunner):
 
             if step_type == 'sql':
                 step_obj = self._create_sql_step(step.name, interface_data)
+                request_snapshot = None
             else:
                 step_obj = self._create_http_step(step.name, interface_data)
+                snapshot_url = interface_data.get('url', '')
+                if not snapshot_url.startswith(('http://', 'https://')):
+                    snapshot_url = f"{self.base_url.rstrip('/')}/{snapshot_url.lstrip('/')}"
+                request_snapshot = {
+                    'method': interface_data.get('method'),
+                    'url': snapshot_url,
+                    'headers': {},
+                    'body': None,
+                }
 
             # Add params for HTTP requests
             if step_type != 'sql' and interface_data.get('params'):
@@ -244,23 +294,138 @@ class TestCaseRunner(HttpRunner):
 
                         if headers_dict:
                             step_obj = step_obj.with_headers(**headers_dict)
+                            if request_snapshot is not None:
+                                request_snapshot['headers'] = copy.deepcopy(headers_dict)
                 except Exception as e:
                     logger.error(f"Error processing headers for step [{step.name}]: {str(e)}")
 
             # Add request body for HTTP requests
+            if step_type != 'sql':
+                raw_body = interface_data.get('body')
+                body_diagnostic = {
+                    'trace_id': self.trace_id,
+                    'body_source': 'testcase_step_interface_data',
+                    'testcase_id': self.testcase.id,
+                    'step_id': step.id,
+                    'step_order': step.order,
+                    'step_name': step.name,
+                    'body_present': 'body' in interface_data,
+                    'raw_summary': summarize_for_log(raw_body),
+                    'prepared': False,
+                    'skipped_reason': None,
+                }
+                logger.info(
+                    "Testcase step body source: trace_id=%s testcase_id=%s "
+                    "testcase_name=%s step_id=%s step_order=%s step_name=%s "
+                    "method=%s url=%s body_source=%s body_present=%s body_summary=%s",
+                    self.trace_id,
+                    self.testcase.id,
+                    self.testcase.name,
+                    step.id,
+                    step.order,
+                    step.name,
+                    interface_data.get('method'),
+                    interface_data.get('url'),
+                    body_diagnostic['body_source'],
+                    'body' in interface_data,
+                    summarize_for_log(raw_body),
+                )
+            else:
+                body_diagnostic = None
+
             if step_type != 'sql' and interface_data.get('body'):
-                normalized_body = normalize_request_body(interface_data['body'])
-                body = prepare_request_body_for_runner(normalized_body)
+                try:
+                    normalized_body = normalize_request_body(interface_data['body'])
+                    body = prepare_request_body_for_runner(normalized_body)
+                except Exception:
+                    logger.exception(
+                        "Testcase step body normalization failed: trace_id=%s "
+                        "testcase_id=%s testcase_name=%s step_id=%s step_name=%s "
+                        "body_summary=%s",
+                        self.trace_id,
+                        self.testcase.id,
+                        self.testcase.name,
+                        step.id,
+                        step.name,
+                        summarize_for_log(interface_data.get('body')),
+                    )
+                    raise
+
                 if isinstance(body, str) and body.startswith('$'):
                     var_name = body[1:]
                     if isinstance(self.variables, dict) and var_name in self.variables:
                         body = self.variables[var_name]
 
                 if body is not None:
+                    target = (
+                        'data'
+                        if normalized_body['type'] in {'form-data', 'x-www-form-urlencoded', 'binary'}
+                        else 'json'
+                    )
+                    logger.info(
+                        "Testcase step body prepared: trace_id=%s testcase_id=%s "
+                        "testcase_name=%s step_id=%s step_order=%s step_name=%s "
+                        "body_type=%s target=%s "
+                        "prepared_summary=%s",
+                        self.trace_id,
+                        self.testcase.id,
+                        self.testcase.name,
+                        step.id,
+                        step.order,
+                        step.name,
+                        normalized_body['type'],
+                        target,
+                        summarize_for_log(body),
+                    )
+                    if body_diagnostic is not None:
+                        body_diagnostic.update({
+                            'prepared': True,
+                            'body_type': normalized_body['type'],
+                            'target': target,
+                            'prepared_summary': summarize_for_log(body),
+                        })
+                    if request_snapshot is not None:
+                        request_snapshot['body'] = copy.deepcopy(body)
                     if normalized_body['type'] in {'form-data', 'x-www-form-urlencoded', 'binary'}:
                         step_obj = step_obj.with_data(body)
                     else:
                         step_obj = step_obj.with_json(body)
+                else:
+                    logger.info(
+                        "Testcase step body normalized to empty payload: trace_id=%s "
+                        "testcase_id=%s testcase_name=%s step_id=%s step_order=%s "
+                        "step_name=%s body_type=%s",
+                        self.trace_id,
+                        self.testcase.id,
+                        self.testcase.name,
+                        step.id,
+                        step.order,
+                        step.name,
+                        normalized_body['type'],
+                    )
+                    if body_diagnostic is not None:
+                        body_diagnostic.update({
+                            'body_type': normalized_body['type'],
+                            'skipped_reason': 'normalized_body_is_none',
+                        })
+            elif step_type != 'sql':
+                if body_diagnostic is not None:
+                    body_diagnostic['skipped_reason'] = (
+                        'missing_or_falsey_body_by_current_runner_condition'
+                    )
+                logger.info(
+                    "Testcase step body skipped by current runner condition: "
+                    "trace_id=%s testcase_id=%s testcase_name=%s step_id=%s "
+                    "step_order=%s step_name=%s skipped_reason=%s body_summary=%s",
+                    self.trace_id,
+                    self.testcase.id,
+                    self.testcase.name,
+                    step.id,
+                    step.order,
+                    step.name,
+                    body_diagnostic['skipped_reason'] if body_diagnostic else None,
+                    summarize_for_log(interface_data.get('body')),
+                )
 
             # Set export variables
             if interface_data.get('export'):
@@ -309,15 +474,56 @@ class TestCaseRunner(HttpRunner):
                                 logger.warning(f"Unsupported comparator: {comparator}")
 
             self.teststeps.append(step)
+            if body_diagnostic is not None:
+                self.step_body_diagnostics.append(body_diagnostic)
+            if request_snapshot is not None:
+                self.step_request_snapshots.append(request_snapshot)
 
     def run_testcase(self, environment: Optional[Dict] = None) -> "TestCaseRunner":
         """Execute the test case."""
-        logger.info(f"Starting test case execution: {self.testcase.name}")
+        logger.info(
+            "Starting test case execution: trace_id=%s testcase_id=%s testcase_name=%s",
+            self.trace_id,
+            self.testcase.id,
+            self.testcase.name,
+        )
+
+        case_variables = self.variables.copy() if isinstance(self.variables, dict) else {}
 
         if environment:
             if environment.get('base_url'):
                 self.config.base_url(environment['base_url'])
-                logger.info(f"Using environment base_url: {environment['base_url']}")
+                logger.info(
+                    "Using environment base_url: trace_id=%s testcase_id=%s base_url=%s",
+                    self.trace_id,
+                    self.testcase.id,
+                    environment['base_url'],
+                )
+
+            verify_value = None
+            if 'verify_ssl' in environment:
+                verify_value = self._coerce_bool(environment.get('verify_ssl'))
+            elif 'verify' in environment:
+                verify_value = self._coerce_bool(environment.get('verify'))
+
+            if verify_value is not None and not getattr(self, 'case_verify_explicit', False):
+                self.verify = verify_value
+                self.config.verify(verify_value)
+                logger.info(
+                    "Using environment verify setting: trace_id=%s testcase_id=%s verify=%s",
+                    self.trace_id,
+                    self.testcase.id,
+                    verify_value,
+                )
+            elif verify_value is not None:
+                logger.info(
+                    "Keeping testcase verify setting over environment: "
+                    "trace_id=%s testcase_id=%s testcase_verify=%s environment_verify=%s",
+                    self.trace_id,
+                    self.testcase.id,
+                    self.verify,
+                    verify_value,
+                )
 
             if environment.get('variables'):
                 env_variables = environment.get('variables', {})
@@ -328,6 +534,8 @@ class TestCaseRunner(HttpRunner):
                 case_variables = self.variables.copy()
                 case_variables.update(env_variables)
                 self.config.variables(**case_variables)
+        elif isinstance(self.variables, dict):
+            self.config.variables(**case_variables)
 
         # Auto-inject API Key for internal API calls
         try:
@@ -383,19 +591,65 @@ class TestCaseRunner(HttpRunner):
 
         try:
             self.test_start()
-            logger.info(f"Test case execution complete: {self.testcase.name}")
+            logger.info(
+                "Test case execution complete: trace_id=%s testcase_id=%s testcase_name=%s",
+                self.trace_id,
+                self.testcase.id,
+                self.testcase.name,
+            )
         except Exception as e:
-            logger.error(f"Test case execution error: {str(e)}")
+            logger.error(
+                "Test case execution error: trace_id=%s testcase_id=%s error=%s",
+                self.trace_id,
+                self.testcase.id,
+                str(e),
+            )
             raise
 
         return self
+
+    @staticmethod
+    def _apply_prepared_request_fallback(
+        request_data: Dict,
+        status_code,
+        request_snapshot: Optional[Dict],
+    ) -> bool:
+        """Recover display request data when httprunner safe mode drops it."""
+        if status_code != 0 or not request_snapshot:
+            return False
+
+        fallback_used = False
+
+        if not request_data.get('method') and request_snapshot.get('method'):
+            request_data['method'] = request_snapshot['method']
+            fallback_used = True
+
+        if not request_data.get('url') and request_snapshot.get('url'):
+            request_data['url'] = request_snapshot['url']
+            fallback_used = True
+
+        if not request_data.get('headers') and request_snapshot.get('headers'):
+            request_data['headers'] = copy.deepcopy(request_snapshot['headers'])
+            fallback_used = True
+
+        if request_data.get('body') is None and request_snapshot.get('body') is not None:
+            request_data['body'] = copy.deepcopy(request_snapshot['body'])
+            fallback_used = True
+
+        return fallback_used
 
     def get_step_results(self) -> List[Dict]:
         """Get step execution results."""
         summary = super().get_summary()
         results = []
+        request_result_index = 0
+        trace_id = getattr(self, 'trace_id', 'unknown')
+        testcase = getattr(self, 'testcase', None)
+        testcase_id = getattr(testcase, 'id', None)
+        step_body_diagnostics = getattr(self, 'step_body_diagnostics', [])
+        step_request_snapshots = getattr(self, 'step_request_snapshots', [])
 
-        for step_result in summary.step_results:
+        for index, step_result in enumerate(summary.step_results):
             step_type = step_result.step_type
             validators = getattr(step_result.data, 'validators', {})
             success = step_result.success and not self._validators_indicate_failure(validators)
@@ -414,21 +668,104 @@ class TestCaseRunner(HttpRunner):
 
             if step_type == 'request':
                 req_resp = step_result.data.req_resps[-1] if step_result.data.req_resps else None
+                body_diagnostic = None
+                if request_result_index < len(step_body_diagnostics):
+                    body_diagnostic = step_body_diagnostics[request_result_index]
+                request_snapshot = None
+                if request_result_index < len(step_request_snapshots):
+                    request_snapshot = step_request_snapshots[request_result_index]
+                request_result_index += 1
+                request_data = {
+                    'method': req_resp.request.method if req_resp else None,
+                    'url': req_resp.request.url if req_resp else None,
+                    'headers': req_resp.request.headers if req_resp else {},
+                    'body': req_resp.request.body if req_resp else None
+                }
+                status_code = req_resp.response.status_code if req_resp else None
+                response_error = (
+                    getattr(req_resp.response, 'error', None)
+                    if req_resp else None
+                )
+                response_error_type = (
+                    getattr(req_resp.response, 'error_type', None)
+                    if req_resp else None
+                )
+                is_transport_error = bool(
+                    getattr(req_resp.response, 'is_transport_error', False)
+                    if req_resp else False
+                )
+                if is_transport_error:
+                    success = False
+                    result['success'] = False
+                recorded_body = request_data['body']
+                fallback_used = self._apply_prepared_request_fallback(
+                    request_data,
+                    status_code,
+                    request_snapshot,
+                )
                 result['data'].update({
-                    'request': {
-                        'method': req_resp.request.method if req_resp else None,
-                        'url': req_resp.request.url if req_resp else None,
-                        'headers': req_resp.request.headers if req_resp else {},
-                        'body': req_resp.request.body if req_resp else None
-                    },
+                    'request': request_data,
                     'response': {
-                        'status_code': req_resp.response.status_code if req_resp else None,
+                        'status_code': status_code,
                         'headers': req_resp.response.headers if req_resp else {},
                         'body': req_resp.response.body if req_resp else None,
                         'content_size': step_result.data.stat.content_size,
                         'response_time_ms': step_result.data.stat.response_time_ms,
+                        'error': response_error,
+                        'error_type': response_error_type,
+                        'is_transport_error': is_transport_error,
                     }
                 })
+                logger.info(
+                    "Testcase step result assembled: trace_id=%s testcase_id=%s "
+                    "step_index=%s step_name=%s status_code=%s success=%s "
+                    "recorded_request_body_summary=%s display_request_body_summary=%s "
+                    "request_display_fallback_used=%s is_transport_error=%s "
+                    "response_error_type=%s response_error_summary=%s body_diagnostic=%s",
+                    trace_id,
+                    testcase_id,
+                    index + 1,
+                    step_result.name,
+                    status_code,
+                    success,
+                    summarize_for_log(recorded_body),
+                    summarize_for_log(result['data']['request']['body']),
+                    fallback_used,
+                    is_transport_error,
+                    response_error_type,
+                    summarize_for_log(response_error),
+                    body_diagnostic,
+                )
+                if status_code == 0 and recorded_body is None:
+                    if fallback_used:
+                        logger.warning(
+                            "Testcase recorded request body recovered from prepared request: "
+                            "trace_id=%s testcase_id=%s step_index=%s step_name=%s "
+                            "status_code=%s reason=request_failed_before_response "
+                            "note=httprunner_safe_mode_rebuilds_request_record_without_json_or_data "
+                            "display_request_body_summary=%s body_diagnostic=%s",
+                            trace_id,
+                            testcase_id,
+                            index + 1,
+                            step_result.name,
+                            status_code,
+                            summarize_for_log(result['data']['request']['body']),
+                            body_diagnostic,
+                        )
+                    else:
+                        logger.warning(
+                            "Testcase recorded request body is empty after transport failure: "
+                            "trace_id=%s testcase_id=%s step_index=%s step_name=%s "
+                            "status_code=%s reason=request_failed_before_response "
+                            "note=httprunner_safe_mode_rebuilds_request_record_without_json_or_data "
+                            "body_diagnostic=%s",
+                            trace_id,
+                            testcase_id,
+                            index + 1,
+                            step_result.name,
+                            status_code,
+                            body_diagnostic,
+                        )
             elif step_type == 'sql':
                 sql_result = None
                 if hasattr(step_result.data, 'sql_response'):

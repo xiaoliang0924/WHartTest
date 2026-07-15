@@ -89,6 +89,20 @@ def get_req_resp_record(resp_obj: Response) -> ReqRespData:
             resp_text = resp_obj.text
             response_body = omit_long_data(resp_text)
 
+    transport_error = getattr(resp_obj, "error", None)
+    transport_error_type = None
+    transport_error_message = None
+    if transport_error:
+        transport_error_type = transport_error.__class__.__name__
+        transport_error_message = str(transport_error)
+        if response_body in (None, "", b""):
+            response_body = {
+                "transport_error": {
+                    "type": transport_error_type,
+                    "message": transport_error_message,
+                }
+            }
+
     response_data = ResponseData(
         status_code=resp_obj.status_code,
         cookies=resp_obj.cookies or {},
@@ -96,6 +110,9 @@ def get_req_resp_record(resp_obj: Response) -> ReqRespData:
         headers=resp_headers,
         content_type=content_type,
         body=response_body,
+        error=transport_error_message,
+        error_type=transport_error_type,
+        is_transport_error=bool(transport_error),
     )
 
     # log response details in debug mode

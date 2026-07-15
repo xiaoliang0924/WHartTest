@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import {
   IconFile,
   IconSettings,
@@ -6,7 +7,7 @@ import {
 } from '@arco-design/web-vue/es/icon'
 
 interface TestCaseConfigData {
-  verify: boolean
+  verify?: boolean
   base_url: string
 }
 
@@ -34,6 +35,28 @@ const updateConfig = (key: keyof TestCaseConfigData, value: any) => {
       ...props.modelValue.config,
       [key]: value
     }
+  })
+}
+
+const sslVerifyMode = computed(() => {
+  if (props.modelValue.config.verify === true) return 'on'
+  if (props.modelValue.config.verify === false) return 'off'
+  return 'inherit'
+})
+
+const updateSslVerifyMode = (value: string | number | boolean) => {
+  const nextConfig = { ...props.modelValue.config }
+  if (value === 'on') {
+    nextConfig.verify = true
+  } else if (value === 'off') {
+    nextConfig.verify = false
+  } else {
+    delete nextConfig.verify
+  }
+
+  emit('update:modelValue', {
+    ...props.modelValue,
+    config: nextConfig
   })
 }
 </script>
@@ -64,14 +87,16 @@ const updateConfig = (key: keyof TestCaseConfigData, value: any) => {
       <div class="space-y-4">
         <div class="flex justify-between items-center">
           <span class="label-text">SSL验证</span>
-          <a-switch
-            :model-value="modelValue.config.verify"
-            @update:model-value="val => updateConfig('verify', val)"
+          <a-radio-group
+            type="button"
             size="small"
+            :model-value="sslVerifyMode"
+            @update:model-value="updateSslVerifyMode"
           >
-            <template #checked>开启</template>
-            <template #unchecked>关闭</template>
-          </a-switch>
+            <a-radio value="inherit">继承</a-radio>
+            <a-radio value="on">开启</a-radio>
+            <a-radio value="off">关闭</a-radio>
+          </a-radio-group>
         </div>
         <a-input
           :model-value="modelValue.config.base_url"

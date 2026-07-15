@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, computed, nextTick } from 'vue'
+import { ref, onMounted, watch, computed, nextTick, provide } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
 import type { FormInstance } from '@arco-design/web-vue'
 import { useProjectStore } from '@/store/projectStore'
 import { IconPlus, IconSearch, IconFolder, IconEdit, IconDelete, IconList, IconApps, IconInfoCircle, IconSend } from '@arco-design/web-vue/es/icon'
 import type { ApiModule, PaginatedData, ApiInterface } from '../../services/interfaceService'
 import { getInterfaces, getInterfaceById, deleteInterface } from '../../services/interfaceService'
-import { getModules, createModule, updateModule, deleteModule } from '../../services/moduleService'
+import { getModules, createModule, updateModule, deleteModule, moveModule } from '../../services/moduleService'
+import { toArray } from '../../services/responseHelpers'
 import ApiDetail from './ApiDetail.vue'
 import ApiTabs from './ApiTabs.vue'
 import ModuleTree from './ModuleTree.vue'
@@ -54,6 +55,10 @@ const currentModuleName = computed(() => {
   return selectedApi.value.name
 })
 
+const toInterfaceList = (results: unknown): ApiInterface[] => {
+  return toArray<ApiInterface>(results)
+}
+
 // 获取接口列表（支持分页）
 const fetchInterfaceListForDisplay = async () => {
   if (!projectStore.currentProjectId) {
@@ -69,12 +74,13 @@ const fetchInterfaceListForDisplay = async () => {
       page_size: pagination.value.pageSize,
       ...(selectedApi.value ? { module_id: selectedApi.value.id } : {})
     }
-    
+
     const { data } = await getInterfaces(params)
     if (data) {
-      allInterfaces.value = data.results || []
+      const resultList = toInterfaceList(data.results ?? data)
+      allInterfaces.value = resultList
       pagination.value.total = data.count || 0
-      console.log(`获取到${data.results?.length || 0}个接口，总数：${data.count}`)
+      console.log(`获取到${resultList.length}个接口，总数：${data.count}`)
     } else {
       allInterfaces.value = []
       pagination.value.total = 0
@@ -102,12 +108,13 @@ const fetchInterfaces = async (moduleId?: number | null) => {
       project_id: Number(projectStore.currentProjectId),
       page_size: 1000 // 设置较大的页面大小，确保能显示所有接口
     })
-    if (data?.results) {
-      interfaces.value = data.results
-      console.log(`获取到${data.results.length}个接口`)
+    const resultList = toInterfaceList(data?.results ?? data)
+    if (resultList.length > 0) {
+      interfaces.value = resultList
+      console.log(`获取到${resultList.length}个接口`)
       // 如果有选中的接口，更新它的数据
       if (selectedInterface.value) {
-        const updatedInterface = data.results.find(item => item.id === selectedInterface.value?.id)
+        const updatedInterface = resultList.find(item => item.id === selectedInterface.value?.id)
         if (updatedInterface) {
           selectedInterface.value = updatedInterface
         }
@@ -139,11 +146,11 @@ const fetchNoModuleInterfaces = async () => {
       page_size: 1000,
       no_module: true
     })
-    
-    if (data?.results && data.results.length > 0) {
-      noModuleInterfaces.value = data.results
+    const resultList = toInterfaceList(data?.results ?? data)
+    if (resultList.length > 0) {
+      noModuleInterfaces.value = resultList
       hasNoModuleInterfaces.value = true
-      console.log(`获取到${data.results.length}个无模块接口`)
+      console.log(`获取到${resultList.length}个无模块接口`)
     } else {
       noModuleInterfaces.value = []
       hasNoModuleInterfaces.value = false
@@ -163,6 +170,60 @@ const formType = ref<'create' | 'edit'>('create')
 const formParentId = ref<number | undefined>()
 const currentModule = ref<ApiModule | undefined>()
 
+// 模块拖拽排序状态
+const draggingModule = ref<ApiModule | null>(null)
+const dragOverModule = ref<ApiModule | null>(null)
+const dragOverPosition = ref<number | null>(null) // -1: before, 0: inside, 1: after
+
+provide('draggingModule', draggingModule)
+provide('dragOverModule', dragOverModule)
+provide('dragOverPosition', dragOverPosition)
+
+const handleModuleDrop = async (dragged: ApiModule, target: ApiModule, position: number) => {
+  if (!projectStore.currentProjectId || dragged.id === target.id) return
+
+  // 检查移动后的深度是否超过5级限制
+  let newLevel = target.level as number
+  if (position === 0) {
+    newLevel = (target.level as number) + 1
+  }
+
+  const getSubtreeDepth = (module: ApiModule): number => {
+    if (!module.children || module.children.length === 0) return 1
+    return 1 + Math.max(...module.children.map(child => getSubtreeDepth(child)))
+  }
+
+  const subtreeDepth = getSubtreeDepth(dragged)
+  if (newLevel + subtreeDepth - 1 > 5) {
+    Message.error('移动后模块层级将超过5级限制')
+    return
+  }
+
+  loading.value = true
+  try {
+    const response = await moveModule(dragged.id, {
+      target_id: target.id,
+      drop_position: position
+    })
+
+    if (response.status === 'success') {
+      Message.success('模块排序/移动成功')
+      await fetchApiModules()
+    } else {
+      Message.error(response.message || '移动模块失败')
+    }
+  } catch (error: any) {
+    console.error('Failed to move module:', error)
+    Message.error(error.message || '移动模块时发生错误')
+  } finally {
+    loading.value = false
+    draggingModule.value = null
+    dragOverModule.value = null
+    dragOverPosition.value = null
+  }
+}
+provide('handleModuleDrop', handleModuleDrop)
+
 // 获取API模块列表
 const fetchApiModules = async () => {
   if (!projectStore.currentProjectId) {
@@ -178,12 +239,7 @@ const fetchApiModules = async () => {
       project_id: projectStore.currentProjectId
     })
 
-    if (response.data?.results) {
-      apis.value = response.data.results
-    } else {
-      apis.value = []
-    }
-    
+    apis.value = toArray<ApiModule>(response.data?.results ?? response.data)
     // 获取无模块接口
     await fetchNoModuleInterfaces()
   } catch (error: any) {
@@ -199,19 +255,19 @@ const getFilteredModules = computed(() => {
   if (!searchKeyword.value) return apis.value
 
   const keyword = searchKeyword.value.toLowerCase()
-  
+
   const filterModules = (modules: ApiModule[]): ApiModule[] => {
     return modules.reduce((filtered: ApiModule[], module) => {
       const isMatch = module.name.toLowerCase().includes(keyword)
       const children = module.children ? filterModules(module.children) : []
-      
+
       if (isMatch || children.length > 0) {
         filtered.push({
           ...module,
           children: children
         })
       }
-      
+
       return filtered
     }, [])
   }
@@ -234,13 +290,13 @@ const handleToggleExpand = async (moduleId: number) => {
 // 选择模块
 const handleSelectModule = async (module: ApiModule) => {
   selectedApi.value = module
-  
+
   // 根据树显示模式决定右侧显示什么
   if (treeDisplayMode.value === 'list') {
     // 列表模式：点击模块显示接口列表
     viewMode.value = 'list'
     pagination.value.page = 1 // 重置页码
-    
+
     try {
       loading.value = true
       const { data } = await getInterfaces({
@@ -248,18 +304,18 @@ const handleSelectModule = async (module: ApiModule) => {
         project_id: Number(projectStore.currentProjectId),
         page_size: 1000 // 设置较大的页面大小，确保能显示所有接口
       })
-      
-      if (data?.results && data.results.length > 0) {
-        console.log(`模块${module.name}获取到${data.results.length}个接口`)
+      const resultList = toInterfaceList(data?.results ?? data)
+      if (resultList.length > 0) {
+        console.log(`模块${module.name}获取到${resultList.length}个接口`)
       }
-      interfaces.value = data?.results || []
+      interfaces.value = resultList
     } catch (error: any) {
       Message.error(error.message || '获取接口列表失败')
       interfaces.value = []
     } finally {
       loading.value = false
     }
-    
+
     // 获取用于列表显示的接口数据
     await fetchInterfaceListForDisplay()
   } else {
@@ -271,15 +327,15 @@ const handleSelectModule = async (module: ApiModule) => {
         project_id: Number(projectStore.currentProjectId),
         page_size: 1000
       })
-      
-      if (data?.results && data.results.length > 0) {
-        console.log(`模块${module.name}获取到${data.results.length}个接口`)
+      const resultList = toInterfaceList(data?.results ?? data)
+      if (resultList.length > 0) {
+        console.log(`模块${module.name}获取到${resultList.length}个接口`)
         // 如果有接口数据，就展开该模块
         if (!expandedIds.value.includes(module.id)) {
           expandedIds.value.push(module.id)
         }
       }
-      interfaces.value = data?.results || []
+      interfaces.value = resultList
     } catch (error: any) {
       Message.error(error.message || '获取接口列表失败')
       interfaces.value = []
@@ -406,10 +462,10 @@ const handleSelectInterface = (api: ApiInterface) => {
   console.log('父组件收到接口选择事件:', api)
   selectedInterface.value = api
   viewMode.value = 'detail' // 切换到详情模式
-  
+
   // 创建或激活页签
   const tabId = tabsStore.openOrActivateInterface(api)
-  
+
   // 如果是已存在的页签，强制触发状态恢复
   const existingTab = tabsStore.tabs.find(t => t.id === tabId)
   if (existingTab && existingTab.activeTab) {
@@ -419,7 +475,7 @@ const handleSelectInterface = (api: ApiInterface) => {
       detailKey.value++
     })
   }
-  
+
   console.log('已更新选中的接口:', selectedInterface.value)
 }
 
@@ -431,7 +487,7 @@ const handleUpdateInterface = (api: ApiInterface) => {
     console.log('接收到接口数据，设置为当前选中接口:', api)
     // 设置当前选中的接口
     selectedInterface.value = api
-    
+
     // 如果接口有ID且在接口列表中存在，则更新列表中的数据
     if (api.id) {
       const index = interfaces.value.findIndex(item => item.id === api.id)
@@ -443,7 +499,7 @@ const handleUpdateInterface = (api: ApiInterface) => {
         interfaces.value.push(api)
       }
     }
-    
+
     // 确保在下一个tick渲染完成后，detailKey不会导致selectedInterface被清空
     nextTick(() => {
       console.log('确认选中接口状态:', selectedInterface.value)
@@ -471,7 +527,7 @@ const removeInterfacesFromLocalLists = (interfaceIds: number[]) => {
 // 删除接口
 const handleDeleteInterface = (api: ApiInterface) => {
   const modalLoading = ref(false)
-  
+
   Modal.error({
     title: '确认删除',
     content: `确定要删除接口"${api.name}"吗？删除后不可恢复。`,
@@ -484,7 +540,7 @@ const handleDeleteInterface = (api: ApiInterface) => {
     async onOk() {
       if (modalLoading.value) return
       modalLoading.value = true
-      
+
       try {
         const previousActiveTabId = tabsStore.activeTabId
         const deletingCurrentInterface = selectedInterface.value?.id === api.id
@@ -511,7 +567,7 @@ const handleDeleteInterface = (api: ApiInterface) => {
         const deletedActiveTab = previousActiveTabId
           ? removedTabIds.includes(previousActiveTabId)
           : false
-        
+
         // 如果删除的是当前选中的接口，清空选中状态
         if (selectedInterface.value?.id === api.id) {
           selectedInterface.value = undefined
@@ -525,14 +581,14 @@ const handleDeleteInterface = (api: ApiInterface) => {
             detailKey.value++
           }
         }
-        
+
         // 如果接口有模块ID，刷新该模块的接口列表
         if (api.module) {
           // 确保模块是展开状态
           if (!expandedIds.value.includes(api.module)) {
             expandedIds.value.push(api.module)
           }
-          
+
           // 先从expandedIds中移除，再添加回来，强制刷新
           const index = expandedIds.value.indexOf(api.module)
           if (index > -1) {
@@ -564,7 +620,7 @@ const handleEditInterface = (api: ApiInterface) => {
   // 创建或激活页签
   const tabId = tabsStore.openOrActivateInterface(api)
   viewMode.value = 'detail' // 切换到详情模式进行编辑
-  
+
   // 如果是已存在的页签，强制触发状态恢复
   const existingTab = tabsStore.tabs.find(t => t.id === tabId)
   if (existingTab && existingTab.activeTab) {
@@ -584,7 +640,7 @@ const handleSelectNoModuleInterface = async (api: ApiInterface) => {
     const tabId = tabsStore.openOrActivateInterface(response.data)
     // 切换到详情视图
     viewMode.value = 'detail'
-    
+
     // 如果是已存在的页签，强制触发状态恢复
     const existingTab = tabsStore.tabs.find(t => t.id === tabId)
     if (existingTab && existingTab.activeTab) {
@@ -592,7 +648,7 @@ const handleSelectNoModuleInterface = async (api: ApiInterface) => {
         detailKey.value++
       })
     }
-    
+
     // 刷新无模块接口列表
     await fetchNoModuleInterfaces()
   } catch (error: any) {
@@ -601,7 +657,7 @@ const handleSelectNoModuleInterface = async (api: ApiInterface) => {
     selectedInterface.value = api
     // 创建或激活页签
     const tabId = tabsStore.openOrActivateInterface(api)
-    
+
     // 如果是已存在的页签，强制触发状态恢复
     const existingTab = tabsStore.tabs.find(t => t.id === tabId)
     if (existingTab && existingTab.activeTab) {
@@ -609,7 +665,7 @@ const handleSelectNoModuleInterface = async (api: ApiInterface) => {
         detailKey.value++
       })
     }
-    
+
     // 即使出错也要切换到详情视图
     viewMode.value = 'detail'
   } finally {
@@ -622,12 +678,12 @@ const handleRefresh = async (moduleId?: number) => {
   try {
     loading.value = true
     console.log('刷新模块:', moduleId, '当前选中接口:', selectedInterface.value)
-    
+
     // 如果有模块ID，确保模块是展开状态
     if (moduleId && !expandedIds.value.includes(moduleId)) {
       expandedIds.value.push(moduleId)
     }
-    
+
     // 同时刷新模块列表和接口列表
     if (moduleId) {
       await Promise.all([
@@ -718,7 +774,7 @@ const handleInterfaceRun = async (api: ApiInterface) => {
   autoDebug.value = true
   // 切换到详情模式
   viewMode.value = 'detail'
-  
+
   // 如果是已存在的页签，强制触发状态恢复
   const existingTab = tabsStore.tabs.find(t => t.id === tabId)
   if (existingTab && existingTab.activeTab) {
@@ -740,7 +796,7 @@ const handleRunInterface = async (api: ApiInterface) => {
   autoDebug.value = true
   // 切换到详情模式
   viewMode.value = 'detail'
-  
+
   // 如果是已存在的页签，强制触发状态恢复
   const existingTab = tabsStore.tabs.find(t => t.id === tabId)
   if (existingTab && existingTab.activeTab) {
@@ -775,16 +831,16 @@ const handleCreateInterface = () => {
   // 清空选中的接口,但保留选中的模块
   console.log('准备创建新接口，清空当前选中接口')
   selectedInterface.value = undefined
-  
+
   // 切换到详情视图模式
   viewMode.value = 'detail'
-  
+
   // 创建新的空白页签
   tabsStore.createTab()
-  
+
   // 强制重新渲染右侧组件，确保所有状态都被重置
   detailKey.value++
-  
+
   // 使用nextTick确保在DOM更新后执行
   nextTick(() => {
     console.log('创建新接口模式已准备就绪')
@@ -823,7 +879,7 @@ const handleTabChange = (tabId: string) => {
       // 尝试从各个列表中找到接口数据
       const foundInterface = [...interfaces.value, ...noModuleInterfaces.value, ...allInterfaces.value]
         .find(api => api.id === tab.interfaceId)
-      
+
       if (foundInterface) {
         // 创建一个包含页签保存数据的接口对象
         selectedInterface.value = {
@@ -844,7 +900,7 @@ const handleTabChange = (tabId: string) => {
       // 新建接口页签
       selectedInterface.value = undefined
     }
-    
+
     viewMode.value = 'detail'
     // 不再强制刷新，让 ApiDetail 组件自己处理状态恢复
     // detailKey.value++

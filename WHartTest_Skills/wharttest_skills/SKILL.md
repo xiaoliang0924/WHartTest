@@ -32,6 +32,7 @@ python whart_tools.py --action <action_name> [--参数名 参数值]
 |--------|------|------|
 | `get_projects` | 获取所有项目列表 | 无 |
 | `get_modules` | 获取项目下的模块列表 | `--project_id` |
+| `add_module` | 新增功能用例模块 | `--project_id`, `--name`, `--parent_id` (可选) |
 
 ### 用例管理
 
@@ -87,6 +88,12 @@ python whart_tools.py --action get_projects
 
 # 获取项目1的模块
 python whart_tools.py --action get_modules --project_id 1
+
+# 新增用例模块
+python whart_tools.py --action add_module --project_id 1 --name "新功能模块"
+
+# 新增子用例模块
+python whart_tools.py --action add_module --project_id 1 --name "子功能模块" --parent_id 10
 
 # 获取用例列表
 python whart_tools.py --action get_testcases --project_id 1 --module_id 5

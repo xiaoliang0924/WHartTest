@@ -3,6 +3,7 @@ import { ref, onMounted, watch, computed } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
 import { IconPlus } from '@arco-design/web-vue/es/icon'
 import { syncApi, type ApiSyncConfig } from '../../services/syncService'
+import { toArray } from '../../services/responseHelpers'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
@@ -121,8 +122,8 @@ const fetchConfigs = async () => {
   try {
     loading.value = true
     const { data } = await syncApi.getApiConfigs(projectStore.currentProject.id)
-    configs.value = data.results
-    total.value = data.count
+    configs.value = toArray<ApiSyncConfig>(data?.results ?? data)
+    total.value = data?.count ?? configs.value.length
   } catch (error) {
     Message.error(text.value.fetchConfigListFailed)
     console.error(error)

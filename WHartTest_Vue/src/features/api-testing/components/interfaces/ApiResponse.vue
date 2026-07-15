@@ -98,6 +98,31 @@ const responseMessage = computed(() => {
   }
   return props.response.data?.message || ''
 })
+
+const inferValueType = (value: any, explicitType?: string) => {
+  if (explicitType) return explicitType
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'list'
+  if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'float'
+  if (typeof value === 'string') return 'str'
+  if (typeof value === 'boolean') return 'bool'
+  if (typeof value === 'object') return 'dict'
+  if (value === undefined) return 'undefined'
+  return typeof value
+}
+
+const formatValidationValue = (value: any) => {
+  if (value === null) return 'null'
+  if (value === undefined) return 'undefined'
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
+}
 </script>
 
 <template>
@@ -199,14 +224,20 @@ const responseMessage = computed(() => {
                     <!-- 实际值 -->
                     <div class="flex flex-col gap-1">
                       <div class="response-summary-meta text-sm">实际值:
-                        <span class="response-pre font-mono">{{ result.check_value }}</span>
+                        <span class="response-pre font-mono">{{ formatValidationValue(result.check_value) }}</span>
+                        <a-tag size="small" color="arcoblue" class="validation-type-tag">
+                          {{ inferValueType(result.check_value, result.check_value_type) }}
+                        </a-tag>
                       </div>
                     </div>
 
                     <!-- 期望值 -->
                     <div class="flex flex-col gap-1">
                       <div class="response-summary-meta text-sm">期望值:
-                        <span class="response-pre font-mono">{{ result.expect_value }}</span>
+                        <span class="response-pre font-mono">{{ formatValidationValue(result.expect_value) }}</span>
+                        <a-tag size="small" color="arcoblue" class="validation-type-tag">
+                          {{ inferValueType(result.expect_value, result.expect_value_type) }}
+                        </a-tag>
                       </div>
                     </div>
 
@@ -296,6 +327,10 @@ const responseMessage = computed(() => {
 
 .response-pre {
   color: var(--response-shell-text);
+}
+
+.validation-type-tag {
+  @apply ml-2 align-middle;
 }
 
 .extracted-item {

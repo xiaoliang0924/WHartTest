@@ -57,6 +57,7 @@
 import { ref, reactive, computed } from 'vue';
 import { testCaseApi, moduleApi } from '@/features/ui-automation/api';
 import { useAppI18n } from '@/composables/useAppI18n';
+import { normalizeListPayload } from '@/features/api-testing/services/responseHelpers';
 
 const props = defineProps<{
   projectId: number;
@@ -129,16 +130,9 @@ const loadData = async () => {
 
     const res = await testCaseApi.list(params);
     const data = (res as any).data?.data;
-    if (data?.results) {
-      testCases.value = data.results;
-      pagination.total = data.count || 0;
-    } else if (Array.isArray(data)) {
-      testCases.value = data;
-      pagination.total = data.length;
-    } else {
-      testCases.value = [];
-      pagination.total = 0;
-    }
+    const { results, count } = normalizeListPayload(data);
+    testCases.value = results;
+    pagination.total = count;
   } catch {
     testCases.value = [];
     pagination.total = 0;

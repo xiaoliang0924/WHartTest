@@ -14,6 +14,7 @@ import {
   type TestTaskSuite,
   type TestCase 
 } from '../../services/testTaskService'
+import { toArray } from '../../services/responseHelpers'
 import AddTestCaseModal from './AddTestCaseModal.vue'
 import { useEnvironmentStore } from '../../stores/environmentStore'
 import { useThemeStore } from '@/store/themeStore'
@@ -292,7 +293,7 @@ const fetchTestCases = async () => {
       page_size: pagination.value.pageSize,
       ordering: '-created_at'
     })
-    testCases.value = response.data.results
+    testCases.value = toArray<TestCase>(response.data?.results ?? response.data)
     pagination.value.total = response.data.count
   } catch (error) {
     console.error('获取测试用例列表失败', error)

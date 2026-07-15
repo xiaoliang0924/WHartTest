@@ -33,8 +33,6 @@ IMAGE_MIME_TYPES = {
     '.jpeg': 'image/jpeg',
     '.gif': 'image/gif',
 }
-
-
 def _normalize_multiline_text(value):
     """Convert literal newline escape sequences from generated commands to text lines."""
     if not isinstance(value, str):
@@ -76,6 +74,25 @@ def get_modules(project_id: int):
         resp.raise_for_status()
         data = resp.json().get("data", [])
         return _extract_tree(data, "module_id", "module_name")
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def add_module(project_id: int, name: str, parent_id: int = None):
+    """新增用例模块"""
+    url = f"{BASE_URL}/api/projects/{project_id}/testcase-modules/"
+    data = {
+        "name": name,
+    }
+    if parent_id is not None:
+        data["parent"] = parent_id
+    try:
+        resp = requests.post(url, headers=HEADERS, json=data)
+        resp.raise_for_status()
+        result = resp.json()
+        if result.get("code") == 201:
+            return {"message": "保存成功", "module": {"id": result.get("data", {}).get("id"), "name": result.get("data", {}).get("name", name)}}
+        return {"message": "保存失败", "response": result}
     except Exception as e:
         return {"error": str(e)}
 
@@ -408,6 +425,7 @@ def _parse_steps(steps_str):
 ACTIONS = {
     "get_projects": lambda args: get_projects(),
     "get_modules": lambda args: get_modules(args.project_id),
+    "add_module": lambda args: add_module(args.project_id, args.name, args.parent_id),
     "get_levels": lambda args: get_levels(),
     "get_testcases": lambda args: get_testcases(args.project_id, args.module_id),
     "get_testcase_detail": lambda args: get_testcase_detail(args.project_id, args.case_id),
@@ -443,6 +461,7 @@ def main():
     parser.add_argument("--action", required=True, choices=ACTIONS.keys(), help="要执行的操作")
     parser.add_argument("--project_id", type=int, help="项目ID")
     parser.add_argument("--module_id", type=int, help="模块ID")
+    parser.add_argument("--parent_id", type=int, help="父模块ID")
     parser.add_argument("--case_id", type=int, help="用例ID")
     parser.add_argument("--name", help="用例名称")
     parser.add_argument("--level", help="用例等级 (P0/P1/P2/P3)")

@@ -483,7 +483,7 @@ class TestExecutionServiceTest(TestCase):
     def test_prepare_config_defaults(self):
         config = TestExecutionService._prepare_config({}, None)
         self.assertEqual(config['base_url'], '')
-        self.assertTrue(config['verify'])
+        self.assertFalse(config['verify'])
         self.assertEqual(config['variables'], {})
 
     def test_prepare_config_with_environment(self):
@@ -590,11 +590,117 @@ class TestExecutionServiceTest(TestCase):
         self.assertEqual(detail.response['status_code'], 500)
 
 
+class TestExecutionConfigSslTest(TestCase):
+    """SSL verify precedence tests for testcase execution."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='testuser', password='testpass')
+        self.project = Project.objects.create(name='Test Project', creator=self.user)
+
+    def test_prepare_config_testcase_verify_overrides_environment(self):
+        config = TestExecutionService._prepare_config(
+            {'verify': True},
+            {'verify_ssl': False},
+        )
+
+        self.assertTrue(config['verify'])
+
+    def test_prepare_config_uses_environment_verify_when_case_missing(self):
+        config = TestExecutionService._prepare_config(
+            {},
+            {'verify_ssl': False},
+        )
+
+        self.assertFalse(config['verify'])
+
+    def test_prepare_config_can_enable_verify_from_environment(self):
+        config = TestExecutionService._prepare_config(
+            {},
+            {'verify_ssl': True},
+        )
+
+        self.assertTrue(config['verify'])
+
+    @patch('api_testcases.runner.TestCaseRunner.test_start')
+    def test_runner_keeps_testcase_verify_over_environment(self, mock_test_start):
+        testcase = ApiTestCase.objects.create(
+            name='SSL Test',
+            project=self.project,
+            created_by=self.user,
+            config={'verify': True},
+        )
+        ApiTestCaseStep.objects.create(
+            name='Step 1',
+            order=1,
+            interface_data={'method': 'GET', 'url': '/oauth/token'},
+            testcase=testcase,
+        )
+
+        runner = TestCaseRunner(testcase)
+        runner.run_testcase({'verify_ssl': False})
+
+        self.assertTrue(runner.config.struct().verify)
+        mock_test_start.assert_called_once()
+
+    @patch('api_testcases.runner.TestCaseRunner.test_start')
+    def test_runner_uses_environment_verify_when_case_missing(self, mock_test_start):
+        testcase = ApiTestCase.objects.create(
+            name='SSL Env Test',
+            project=self.project,
+            created_by=self.user,
+            config={},
+        )
+        ApiTestCaseStep.objects.create(
+            name='Step 1',
+            order=1,
+            interface_data={'method': 'GET', 'url': '/oauth/token'},
+            testcase=testcase,
+        )
+
+        runner = TestCaseRunner(testcase)
+        runner.run_testcase({'verify_ssl': False})
+
+        self.assertFalse(runner.config.struct().verify)
+        mock_test_start.assert_called_once()
+
+    @patch('api_testcases.runner.TestCaseRunner.test_start')
+    def test_runner_can_enable_verify_from_environment(self, mock_test_start):
+        testcase = ApiTestCase.objects.create(
+            name='SSL Env On Test',
+            project=self.project,
+            created_by=self.user,
+            config={},
+        )
+        ApiTestCaseStep.objects.create(
+            name='Step 1',
+            order=1,
+            interface_data={'method': 'GET', 'url': '/oauth/token'},
+            testcase=testcase,
+        )
+
+        runner = TestCaseRunner(testcase)
+        runner.run_testcase({'verify_ssl': True})
+
+        self.assertTrue(runner.config.struct().verify)
+        mock_test_start.assert_called_once()
+
+
 class TestCaseRunnerSummaryTest(TestCase):
     """TestCaseRunner summary/result tests."""
 
     @staticmethod
-    def _build_request_step_result(status_code=500, success=True, validators=None):
+    def _build_request_step_result(
+        status_code=500,
+        success=True,
+        validators=None,
+        response_body=None,
+        response_error=None,
+        response_error_type=None,
+        is_transport_error=False,
+    ):
+        if response_body is None:
+            response_body = {'message': 'expected'}
+
         return SimpleNamespace(
             name='Step 1',
             step_type='request',
@@ -615,7 +721,10 @@ class TestCaseRunnerSummaryTest(TestCase):
                         response=SimpleNamespace(
                             status_code=status_code,
                             headers={},
-                            body={'message': 'expected'},
+                            body=response_body,
+                            error=response_error,
+                            error_type=response_error_type,
+                            is_transport_error=is_transport_error,
                         ),
                     )
                 ],
@@ -635,6 +744,70 @@ class TestCaseRunnerSummaryTest(TestCase):
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0]['success'])
         self.assertEqual(results[0]['data']['response']['status_code'], 500)
+
+    @patch('api_testcases.runner.HttpRunner.get_summary')
+    def test_get_step_results_recovers_request_body_on_transport_failure(
+        self,
+        mock_get_summary,
+    ):
+        mock_get_summary.return_value = SimpleNamespace(
+            step_results=[
+                self._build_request_step_result(
+                    status_code=0,
+                    success=True,
+                    response_body={
+                        'transport_error': {
+                            'type': 'ConnectionError',
+                            'message': 'connection refused',
+                        },
+                    },
+                    response_error='connection refused',
+                    response_error_type='ConnectionError',
+                    is_transport_error=True,
+                )
+            ],
+        )
+
+        runner = TestCaseRunner.__new__(TestCaseRunner)
+        runner.trace_id = 'tc-test'
+        runner.testcase = SimpleNamespace(id=123)
+        runner.step_body_diagnostics = [{
+            'prepared': True,
+            'target': 'data',
+            'prepared_summary': {'type': 'dict', 'size': 1},
+        }]
+        runner.step_request_snapshots = [{
+            'method': 'POST',
+            'url': 'http://example.com/error',
+            'headers': {'Authorization': 'Bearer token'},
+            'body': {'username': 'tester'},
+        }]
+
+        results = runner.get_step_results()
+
+        self.assertFalse(results[0]['success'])
+        self.assertEqual(results[0]['data']['response']['status_code'], 0)
+        self.assertEqual(
+            results[0]['data']['request']['headers'],
+            {'Authorization': 'Bearer token'},
+        )
+        self.assertEqual(
+            results[0]['data']['request']['body'],
+            {'username': 'tester'},
+        )
+        self.assertTrue(results[0]['data']['response']['is_transport_error'])
+        self.assertEqual(
+            results[0]['data']['response']['error_type'],
+            'ConnectionError',
+        )
+        self.assertEqual(
+            results[0]['data']['response']['error'],
+            'connection refused',
+        )
+        self.assertEqual(
+            results[0]['data']['response']['body']['transport_error']['message'],
+            'connection refused',
+        )
 
     @patch('api_testcases.runner.HttpRunner.get_summary')
     def test_get_summary_uses_step_assertions_not_status_code(self, mock_get_summary):
@@ -813,6 +986,90 @@ class ApiTestCaseAPITest(TestCase):
         response = self.client.get(f'{self.base_url}{tc.pk}/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data['steps']), 1)
+
+    def test_update_testcase_renames_existing_step_without_copying(self):
+        tc = ApiTestCase.objects.create(
+            name='Edit TC', project=self.project, created_by=self.user,
+            priority='P3',
+        )
+        step = ApiTestCaseStep.objects.create(
+            name='Old Step', order=1,
+            interface_data={'method': 'GET', 'url': '/old'},
+            testcase=tc, origin_interface=self.interface,
+        )
+
+        data = {
+            'name': 'Edit TC',
+            'priority': 'P2',
+            'update_mode': 'update',
+            'steps_info': [{
+                'id': step.pk,
+                'name': 'Renamed Step',
+                'order': 1,
+                'interface_id': self.interface.pk,
+                'interface_data': {
+                    'method': 'POST',
+                    'url': '/changed',
+                    'headers': [],
+                    'params': [],
+                    'body': {'type': 'raw', 'content': '{"ok": true}'},
+                    'validators': [],
+                    'extract': {},
+                    'setup_hooks': [],
+                    'teardown_hooks': [],
+                    'variables': {},
+                },
+            }],
+        }
+
+        response = self.client.put(f'{self.base_url}{tc.pk}/', data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(tc.steps.count(), 1)
+        step.refresh_from_db()
+        self.assertEqual(step.name, 'Renamed Step')
+        self.assertEqual(step.interface_data['method'], 'POST')
+        self.assertEqual(step.interface_data['body']['content'], '{"ok": true}')
+
+    def test_update_testcase_legacy_step_rename_by_order_does_not_copy(self):
+        tc = ApiTestCase.objects.create(
+            name='Legacy Edit TC', project=self.project, created_by=self.user,
+            priority='P3',
+        )
+        step = ApiTestCaseStep.objects.create(
+            name='Old Step', order=1,
+            interface_data={'method': 'GET', 'url': '/old'},
+            testcase=tc, origin_interface=self.interface,
+        )
+
+        data = {
+            'name': 'Legacy Edit TC',
+            'priority': 'P3',
+            'steps_info': [{
+                'name': 'Renamed Step',
+                'order': 1,
+                'interface_id': self.interface.pk,
+                'interface_data': {
+                    'method': 'GET',
+                    'url': '/old',
+                    'headers': [],
+                    'params': [],
+                    'body': {'type': 'raw', 'content': ''},
+                    'validators': [],
+                    'extract': {},
+                    'setup_hooks': [],
+                    'teardown_hooks': [],
+                    'variables': {},
+                },
+            }],
+        }
+
+        response = self.client.put(f'{self.base_url}{tc.pk}/', data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(tc.steps.count(), 1)
+        step.refresh_from_db()
+        self.assertEqual(step.name, 'Renamed Step')
 
     def test_copy_testcase(self):
         tc = ApiTestCase.objects.create(
@@ -1632,6 +1889,7 @@ class TestExecutionServiceTest(TestCase):
         result = TestExecutionService._prepare_config(None, None)
         self.assertEqual(result['variables'], {})
         self.assertEqual(result['base_url'], '')
+        self.assertFalse(result['verify'])
 
     def test_prepare_config_string_variables(self):
         """字符串格式的变量被正确解析"""

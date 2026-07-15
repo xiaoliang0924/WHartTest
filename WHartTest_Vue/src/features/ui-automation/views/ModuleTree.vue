@@ -9,11 +9,13 @@
 
     <a-spin :loading="loading" class="tree-content">
       <a-tree
-        v-if="treeData.length"
-        :data="treeData"
-        :field-names="{ key: 'id', title: 'name', children: 'children' }"
+        v-if="mappedTreeData.length"
+        :data="mappedTreeData"
         :selected-keys="selectedKeys"
         show-line
+        block-node
+        :draggable="true"
+        @drop="onDrop"
         @select="onSelect"
       >
         <template #title="node">
@@ -67,6 +69,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
+import type { TreeNodeData } from '@arco-design/web-vue'
 import { IconPlus, IconEdit, IconDelete, IconMore } from '@arco-design/web-vue/es/icon'
 import { moduleApi } from '../api'
 import type { UiModule, UiModuleForm } from '../types'
@@ -82,6 +85,17 @@ const projectId = computed(() => projectStore.currentProject?.id)
 const loading = ref(false)
 const submitting = ref(false)
 const treeData = ref<UiModule[]>([])
+const mapTreeData = (modules: UiModule[]): any[] => {
+  return modules.map(module => ({
+    ...module,
+    key: module.id,
+    title: module.name,
+    children: module.children ? mapTreeData(module.children) : []
+  }))
+}
+const mappedTreeData = computed(() => {
+  return mapTreeData(treeData.value)
+})
 const selectedKeys = ref<number[]>([])
 const modalVisible = ref(false)
 const isEdit = ref(false)
@@ -115,6 +129,51 @@ const fetchModules = async () => {
 const onSelect = (keys: (string | number)[], data: { node?: UiModule }) => {
   selectedKeys.value = keys as number[]
   emit('select', data.node || null)
+}
+
+const onDrop = async (info: {
+  e: DragEvent
+  dragNode: TreeNodeData
+  dropNode: TreeNodeData
+  dropPosition: number
+}) => {
+  const { dragNode, dropNode, dropPosition } = info
+  if (!dragNode || !dropNode) return
+
+  if (dragNode.id === dropNode.id) return
+
+  // 检查移动后的深度是否超过5级限制
+  let newLevel = dropNode.level as number
+  if (dropPosition === 0) {
+    newLevel = (dropNode.level as number) + 1
+  }
+
+  const getSubtreeDepth = (node: TreeNodeData): number => {
+    if (!node.children || node.children.length === 0) return 1
+    return 1 + Math.max(...(node.children as TreeNodeData[]).map(child => getSubtreeDepth(child)))
+  }
+
+  const subtreeDepth = getSubtreeDepth(dragNode)
+  if (newLevel + subtreeDepth - 1 > 5) {
+    Message.error('移动后模块层级将超过5级限制')
+    return
+  }
+
+  loading.value = true
+  try {
+    await moduleApi.move(dragNode.id as number, {
+      target_id: dropNode.id as number,
+      drop_position: dropPosition
+    })
+    Message.success('模块排序/移动成功')
+    await fetchModules()
+  } catch (error) {
+    console.error('移动模块出错:', error)
+    Message.error('移动模块时发生错误')
+    await fetchModules()
+  } finally {
+    loading.value = false
+  }
 }
 
 const resetForm = () => {

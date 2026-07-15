@@ -3,6 +3,7 @@ import { ref, reactive, watch, computed } from 'vue'
 import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import { Message, Modal } from '@arco-design/web-vue'
 import { testcaseService } from '../../services/testcaseService'
+import { toArray } from '../../services/responseHelpers'
 import type { ApiTestCase } from '../../types/testcase'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
@@ -156,9 +157,8 @@ const fetchTestCases = async (page: number = 1) => {
 
     const res = await testcaseService.list(projectStore.currentProjectId, queryParams)
     if (res.success && res.data) {
-      const payload = res.data as any
-      testcases.value = Array.isArray(payload) ? payload : payload?.results || []
-      pagination.total = Number(res.total ?? payload?.count ?? testcases.value.length)
+      testcases.value = toArray<ApiTestCase>((res.data as any)?.results ?? res.data)
+      pagination.total = Number(res.total ?? (res.data as any)?.count ?? testcases.value.length)
       pagination.current = page
     } else {
       throw new Error(res.error || tl('获取测试用例列表失败'))

@@ -6,7 +6,8 @@ import type {
   ChatRequest,
   ChatResponseData,
   ChatHistoryResponseData,
-  ChatSessionsResponseData
+  ChatSessionsResponseData,
+  ChatSessionDetail
 } from '@/features/langgraph/types/chat';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
 import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolResultParser';
@@ -198,6 +199,7 @@ export async function sendChatMessage(
  */
 export interface AgentLoopNonStreamResponse {
   session_id: string;
+  session_title?: string;
   content: string;
   total_steps: number;
   tool_results: Array<{ summary: string; step: number; tool_output?: unknown; tool_name?: string }>;
@@ -899,6 +901,46 @@ export async function getChatSessions(projectId: number): Promise<ApiResponse<Ch
       code: 500,
       message: response.error || 'Failed to get chat sessions',
       data: {} as ChatSessionsResponseData,
+      errors: { detail: [response.error || 'Unknown error'] }
+    };
+  }
+}
+
+/**
+ * 修改会话的标题
+ * @param sessionId 会话ID
+ * @param projectId 项目ID
+ * @param title 新标题
+ */
+export async function renameChatSession(
+  sessionId: string,
+  projectId: number | string,
+  title: string
+): Promise<ApiResponse<ChatSessionDetail>> {
+  const response = await request<ChatSessionDetail>({
+    url: `${API_BASE_URL}/sessions/`,
+    method: 'PUT',
+    data: {
+      session_id: sessionId,
+      project_id: String(projectId),
+      title: title
+    }
+  });
+
+  if (response.success) {
+    return {
+      status: 'success',
+      code: 200,
+      message: response.message || '修改会话标题成功',
+      data: response.data!,
+      errors: undefined
+    };
+  } else {
+    return {
+      status: 'error',
+      code: 500,
+      message: response.error || '修改会话标题失败',
+      data: {} as ChatSessionDetail,
       errors: { detail: [response.error || 'Unknown error'] }
     };
   }

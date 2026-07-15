@@ -14,6 +14,7 @@
             :disabled="projectStore.loading"
             :placeholder="t('layout.projectPlaceholder')"
             style="width: 200px; margin-left: 10px;"
+            :trigger-props="headerSelectTriggerProps"
             @change="handleProjectChange"
             @popup-visible-change="handlePopupVisibleChange"
           >
@@ -30,6 +31,7 @@
             :loading="environmentStore.loading"
             :placeholder="tl('选择环境')"
             style="width: 180px; margin-left: 10px;"
+            :trigger-props="headerSelectTriggerProps"
             @change="handleEnvironmentChange"
             @popup-visible-change="handleEnvironmentPopupVisibleChange"
             allow-clear
@@ -41,6 +43,21 @@
               :label="env.name"
             />
           </a-select>
+        </div>
+        <!-- 顶部视图切换器 - 仅在用例管理页面展示 -->
+        <div class="header-view-switch" v-if="isTestCaseManagementPage">
+          <a-radio-group type="button" v-model="testCaseActiveView" size="medium" class="view-selector-group">
+            <a-radio value="list">
+              <template #default>
+                <icon-list /> 列表视图
+              </template>
+            </a-radio>
+            <a-radio value="mindmap">
+              <template #default>
+                <icon-relation /> 思维导图
+              </template>
+            </a-radio>
+          </a-radio-group>
         </div>
       </div>
       <div class="user-info">
@@ -226,6 +243,10 @@
               <template #icon><icon-apps /></template>
               <a href="#" @click="checkProjectAndNavigate($event, '/skills')">{{ skillsMenuLabel }}</a>
             </a-menu-item>
+            <a-menu-item key="operation-logs" v-if="hasOperationLogsPermission">
+              <template #icon><icon-history /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/operation-logs')">{{ operationLogsMenuLabel }}</a>
+            </a-menu-item>
           </a-sub-menu>
         </a-menu>
         <!-- 侧边栏底部收起/展开按钮 -->
@@ -258,14 +279,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, watch } from 'vue';
+import { ref, computed, nextTick, onMounted, watch, provide } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '@/store/authStore';
 import { useProjectStore } from '@/store/projectStore';
 import { useThemeStore } from '@/store/themeStore';
 import { useEnvironmentStore } from '@/features/api-testing/stores/environmentStore';
 import { useAppI18n } from '@/composables/useAppI18n';
-import { brandLogoUrl } from '@/utils/assetUrl';
+import { brandLogoUrl, getPublicAssetUrl } from '@/utils/assetUrl';
+
+const brandBadgeUrl = getPublicAssetUrl('CE.svg');
 import AppLocaleToggle from '@/components/AppLocaleToggle.vue';
 import {
   getCurrentVersion,
@@ -282,6 +305,8 @@ import {
   SubMenu as ASubMenu,
   Select as ASelect,
   Popover as APopover,
+  Radio as ARadio,
+  RadioGroup as ARadioGroup,
   Message
 } from '@arco-design/web-vue';
 import {
@@ -307,6 +332,8 @@ import {
   IconSchedule,
   IconSunFill,
   IconMoonFill,
+  IconList,
+  IconRelation,
 } from '@arco-design/web-vue/es/icon';
 import '@arco-design/web-vue/dist/arco.css'; // 引入 Arco Design 样式
 
@@ -318,10 +345,20 @@ const AOption = ASelect.Option;
 
 const router = useRouter();
 const authStore = useAuthStore();
+
+const testCaseActiveView = ref<'list' | 'mindmap'>('list');
+provide('testCaseActiveView', testCaseActiveView);
+
+const isTestCaseManagementPage = computed(() => {
+  return router.currentRoute.value.name === 'TestCaseManagement';
+});
 const projectStore = useProjectStore();
 const themeStore = useThemeStore();
 const environmentStore = useEnvironmentStore();
 const { locale, t, tl } = useAppI18n();
+const headerSelectTriggerProps = {
+  contentClass: 'layout-header-select-dropdown',
+};
 
 // 版本信息
 const currentVersion = ref(formatVersion(getCurrentVersion()));
@@ -345,6 +382,7 @@ const systemMenuLabel = computed(() => (locale.value === 'en-US' ? 'Admin' : tl(
 const usersMenuLabel = computed(() => (locale.value === 'en-US' ? 'Users' : tl('用户管理')));
 const organizationsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Teams' : tl('组织管理')));
 const permissionsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Access' : tl('权限管理')));
+const operationLogsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Logs' : tl('操作日志')));
 const modelsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Models' : tl('LLM配置')));
 const mcpMenuLabel = computed(() => (locale.value === 'en-US' ? 'MCP' : tl('MCP配置')));
 const skillsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Skills' : tl('Skills管理')));
@@ -400,6 +438,7 @@ const activeMenu = computed(() => {
   if (path.startsWith('/users')) return 'users';
   if (path.startsWith('/organizations')) return 'organizations';
   if (path.startsWith('/permissions')) return 'permissions';
+  if (path.startsWith('/operation-logs')) return 'operation-logs';
   if (path.startsWith('/llm-configs')) return 'llm-configs';
   if (path.startsWith('/langgraph-chat')) return 'langgraph-chat';
   if (path.startsWith('/task-center')) return 'task-center';
@@ -475,6 +514,10 @@ const hasPermissionsPermission = computed(() => {
   return authStore.hasPermission('auth.view_permission');
 });
 
+const hasOperationLogsPermission = computed(() => {
+  return authStore.currentUser?.is_staff || authStore.hasPermission('operation_logs.view_operationlog');
+});
+
 const hasLlmConfigsPermission = computed(() => {
   return authStore.hasPermission('langgraph_integration.view_llmconfig') ||
          authStore.hasPermission('llm_config.view_llmconfiguration') ||
@@ -509,7 +552,8 @@ const hasSystemMenuItems = computed(() => {
          hasLlmConfigsPermission.value ||
          hasApiKeysPermission.value ||
          hasMcpConfigsPermission.value ||
-         hasSkillsPermission.value;
+         hasSkillsPermission.value ||
+         hasOperationLogsPermission.value;
 });
 
 // 切换侧边栏收起状态
@@ -701,7 +745,7 @@ onMounted(async () => {
   margin: 0;
   margin-right: 20px;
   box-sizing: border-box;
-  width: 140px;
+  width: 150px;
   user-select: none;
   -webkit-user-select: none;
   -moz-user-select: none;
@@ -720,9 +764,82 @@ onMounted(async () => {
   flex-shrink: 0;
 }
 
+.logo-ce-icon {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 15px;
+  margin-left: 6px;
+  object-fit: contain;
+  transform: translateY(-25%);
+}
+
 .project-selector {
   display: flex;
   align-items: center;
+}
+
+:global(.layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown.arco-select-dropdown) {
+  background: #ffffff !important;
+  border: 1px solid #e5e6eb !important;
+  border-radius: 6px !important;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12) !important;
+  color: #1d2129 !important;
+  padding: 4px !important;
+  margin: 4px 0 !important;
+}
+
+:global(.layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-dropdown-list) {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 2px !important;
+}
+
+:global(.layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option) {
+  display: flex !important;
+  align-items: center !important;
+  min-height: 32px !important;
+  margin: 2px 0 !important;
+  padding: 0 12px !important;
+  border: none !important;
+  border-radius: 4px !important;
+  background: transparent !important;
+  color: #1d2129 !important;
+  line-height: 32px !important;
+}
+
+:global(.layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option:hover) {
+  background: #f2f3f5 !important;
+  color: #1d2129 !important;
+}
+
+:global(.layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option-active),
+:global(.layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option-selected) {
+  background: rgba(var(--theme-accent-rgb), 0.12) !important;
+  color: var(--theme-accent) !important;
+}
+
+:global(:root[data-theme='black'] body[arco-theme='dark'] .layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown.arco-select-dropdown) {
+  background: #1d2639 !important;
+  border-color: rgba(148, 163, 184, 0.18) !important;
+  box-shadow: 0 22px 42px rgba(2, 6, 23, 0.42) !important;
+  color: var(--theme-text) !important;
+}
+
+:global(:root[data-theme='black'] body[arco-theme='dark'] .layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option) {
+  background: transparent !important;
+  color: var(--theme-text) !important;
+}
+
+:global(:root[data-theme='black'] body[arco-theme='dark'] .layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option:hover) {
+  background: #253347 !important;
+  color: var(--theme-text) !important;
+}
+
+:global(:root[data-theme='black'] body[arco-theme='dark'] .layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option-active),
+:global(:root[data-theme='black'] body[arco-theme='dark'] .layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option-selected) {
+  background: #2a3a52 !important;
+  color: #93c5fd !important;
 }
 
 .user-info {
@@ -1131,5 +1248,17 @@ onMounted(async () => {
   align-items: center;
   justify-content: center;
   margin: 0 auto;
+}
+
+.header-view-switch {
+  margin-left: 20px;
+  display: flex;
+  align-items: center;
+}
+
+.view-selector-group {
+  background-color: var(--theme-surface-soft) !important;
+  border-radius: 6px;
+  padding: 2px;
 }
 </style>

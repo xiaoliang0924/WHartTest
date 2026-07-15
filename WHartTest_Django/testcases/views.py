@@ -46,6 +46,7 @@ from projects.models import ProjectMember
 
 # 确保导入项目自定义的权限类
 from wharttest_django.permissions import HasModelPermission, permission_required
+from wharttest_django.pagination import StandardPagination
 
 
 def _normalize_media_url(url: str) -> str:
@@ -91,8 +92,13 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     filterset_class = TestCaseFilter  # 使用自定义的 FilterSet
     search_fields = ["name", "precondition"]
 
+    def _should_include_steps(self):
+        value = self.request.query_params.get("include_steps")
+        return str(value).lower() in {"1", "true", "yes"}
+
     def get_serializer_class(self):
-        if self.action == "list":
+        """列表接口默认使用精简序列化器，详情/写入接口保留完整步骤数据。"""
+        if self.action == "list" and not self._should_include_steps():
             return TestCaseListSerializer
         return TestCaseSerializer
 
@@ -116,14 +122,19 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         project_pk = self.kwargs.get("project_pk")
         if project_pk:
             project = get_object_or_404(Project, pk=project_pk)
+            # 权限类 IsProjectMemberForTestCase 已经检查了用户是否是此项目的成员，
+            # 所以这里可以直接返回项目下的用例。列表接口默认不预取 steps，减少传输和查询开销；
+            # 思维导图等场景可通过 include_steps=true/1/yes 显式获取步骤详情。
             qs = TestCase.objects.filter(project=project).select_related(
                 "creator", "module"
             )
             if self.action == "list":
                 qs = qs.order_by("sort_order", "id")
-            if self.action != "list":
+            if self.action != "list" or self._should_include_steps():
                 qs = qs.prefetch_related("steps")
             return qs
+        # 如果没有 project_pk (理论上不应该发生，因为路由是嵌套的)
+        # 返回空 queryset 或根据需求抛出错误
         return TestCase.objects.none()
 
     def perform_create(self, serializer):
@@ -846,13 +857,26 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
     def _normalize_sibling_order(self, project, parent_id):
         siblings = list(
             TestCaseModule.objects.filter(project=project, parent_id=parent_id)
-            .order_by("sort_order", "id")
+        )
+        siblings.sort(
+            key=lambda module: (
+                module.sort_order or module.order or module.id,
+                module.id,
+            )
         )
         for index, module in enumerate(siblings, start=1):
-            if module.sort_order != index:
-                module.sort_order = index
-                module.save(update_fields=["sort_order"])
+            module.sort_order = index
+            module.order = index
+        if siblings:
+            TestCaseModule.objects.bulk_update(siblings, ["sort_order", "order"])
         return siblings
+
+    def _persist_sibling_order(self, siblings):
+        for index, module in enumerate(siblings, start=1):
+            module.sort_order = index
+            module.order = index
+        if siblings:
+            TestCaseModule.objects.bulk_update(siblings, ["sort_order", "order"])
 
     def perform_create(self, serializer):
         """
@@ -865,54 +889,18 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
         # 保存模块，设置创建人和项目
         serializer.save(creator=self.request.user, project=project)
 
-    @action(detail=True, methods=["post"], url_path="move")
-    def move(self, request, project_pk=None, pk=None):
-        """
-        在同一父级下上移或下移模块。
-        """
-        module = self.get_object()
-        direction = request.data.get("direction")
-        if direction not in {"up", "down"}:
-            return Response(
-                {"error": "direction 参数必须是 up 或 down"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        with transaction.atomic():
-            siblings = self._normalize_sibling_order(module.project, module.parent_id)
-            current_index = next(
-                (index for index, item in enumerate(siblings) if item.id == module.id),
-                None,
-            )
-            if current_index is None:
-                return Response(
-                    {"error": "模块不在当前同级列表中"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            target_index = current_index - 1 if direction == "up" else current_index + 1
-            if target_index < 0 or target_index >= len(siblings):
-                serializer = self.get_serializer(module)
-                return Response(serializer.data, status=status.HTTP_200_OK)
-
-            target = siblings[target_index]
-            module.sort_order, target.sort_order = target.sort_order, module.sort_order
-            module.save(update_fields=["sort_order"])
-            target.save(update_fields=["sort_order"])
-
-        serializer = self.get_serializer(module)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
     def perform_destroy(self, instance):
         """
-        删除模块前检查是否有关联的测试用例
+        删除空模块；存在测试用例时阻止删除，避免误删业务数据。
         """
-        if instance.testcases.exists():
+        descendant_ids = instance.get_all_descendant_ids()
+        testcase_count = TestCase.objects.filter(module_id__in=descendant_ids).count()
+        if testcase_count:
             from rest_framework.exceptions import ValidationError
 
-            testcase_count = instance.testcases.count()
             raise ValidationError(
-                f"无法删除模块 '{instance.name}'，因为该模块下还有 {testcase_count} 个测试用例。请先删除或移动这些用例。"
+                f"无法删除模块 '{instance.name}'，该模块或子模块下还有 "
+                f"{testcase_count} 个测试用例。请先删除或移动这些用例。"
             )
         instance.delete()
 
@@ -926,6 +914,188 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
             project = get_object_or_404(Project, pk=project_pk)
             context["project"] = project
         return context
+
+    @action(detail=True, methods=["post"], url_path="move")
+    def move(self, request, project_pk=None, pk=None, **kwargs):
+        """
+        支持同级上移/下移，以及拖拽到目标模块之前、之后或内部。
+        """
+        instance = self.get_object()
+        direction = request.data.get("direction")
+
+        if direction is not None:
+            if direction not in {"up", "down"}:
+                return Response(
+                    {"error": "direction 参数必须是 up 或 down"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            with transaction.atomic():
+                siblings = self._normalize_sibling_order(
+                    instance.project, instance.parent_id
+                )
+                current_index = next(
+                    (
+                        index
+                        for index, module in enumerate(siblings)
+                        if module.id == instance.id
+                    ),
+                    None,
+                )
+                if current_index is None:
+                    return Response(
+                        {"error": "模块不在当前同级列表中"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                target_index = (
+                    current_index - 1 if direction == "up" else current_index + 1
+                )
+                if 0 <= target_index < len(siblings):
+                    siblings[current_index], siblings[target_index] = (
+                        siblings[target_index],
+                        siblings[current_index],
+                    )
+                    self._persist_sibling_order(siblings)
+
+            return Response(self.get_serializer(instance).data)
+
+        target_id = request.data.get("target_id")
+        drop_position = request.data.get("drop_position")  # -1 (before), 1 (after), 0 (inside)
+
+        if drop_position is None:
+            return Response(
+                {"error": "参数 drop_position 必填。"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            drop_position = int(drop_position)
+            if drop_position not in [-1, 0, 1]:
+                raise ValueError()
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "参数 drop_position 必须为 -1、0 或 1。"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            old_parent_id = instance.parent_id
+
+            # 如果 target_id 为 None，说明移动到根节点层级
+            if target_id is None:
+                if drop_position == 0:
+                    return Response(
+                        {"error": "无法将模块拖入空位置中。"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                instance.parent = None
+                instance.level = 1
+                instance.save(update_fields=["parent", "level", "updated_at"])
+
+                # 重新排序根节点模块
+                reordered = self._normalize_sibling_order(instance.project, None)
+                reordered = [module for module in reordered if module.id != instance.id]
+                reordered.append(instance)
+                self._persist_sibling_order(reordered)
+                if old_parent_id is not None:
+                    self._normalize_sibling_order(instance.project, old_parent_id)
+
+                serializer = self.get_serializer(instance)
+                return Response(serializer.data)
+
+            # 如果 target_id 不为 None
+            try:
+                target_module = TestCaseModule.objects.get(
+                    id=target_id, project_id=project_pk
+                )
+            except TestCaseModule.DoesNotExist:
+                return Response(
+                    {"error": "目标模块不存在。"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            # 循环引用校验：目标模块不能是自己或自己的子模块
+            descendant_ids = instance.get_all_descendant_ids()
+            if target_module.id in descendant_ids:
+                return Response(
+                    {"error": "无法移动模块到自身或其子模块下。"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if drop_position == 0:
+                # 移动到目标模块内部，作为其子模块
+                if target_module.level >= 5:
+                    return Response(
+                        {"error": "模块级别不能超过5级。"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                # 校验子树最大深度
+                subtree_depth = instance.get_max_depth()
+                if target_module.level + subtree_depth > 5:
+                    return Response(
+                        {"error": f"移动后模块层级将超过5级限制（当前子树深度: {subtree_depth}）。"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                instance.parent = target_module
+                instance.level = target_module.level + 1
+                instance.save(update_fields=["parent", "level", "updated_at"])
+
+                reordered = self._normalize_sibling_order(
+                    instance.project, target_module.id
+                )
+                reordered = [module for module in reordered if module.id != instance.id]
+                reordered.append(instance)
+                self._persist_sibling_order(reordered)
+
+            else:
+                # 移动到目标模块的前面或后面，成为同级模块
+                parent = target_module.parent
+
+                # 校验子树最大深度
+                target_parent_level = target_module.parent.level if target_module.parent else 0
+                subtree_depth = instance.get_max_depth()
+                if target_parent_level + subtree_depth > 5:
+                    return Response(
+                        {"error": f"移动后模块层级将超过5级限制（当前子树深度: {subtree_depth}）。"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                instance.parent = parent
+                instance.level = target_module.level
+                instance.save(update_fields=["parent", "level", "updated_at"])
+
+                # 重新排序所有同级模块
+                siblings = self._normalize_sibling_order(
+                    instance.project, target_module.parent_id
+                )
+                siblings = [module for module in siblings if module.id != instance.id]
+
+                reordered = []
+                for s in siblings:
+                    if s.id == target_module.id and drop_position == -1:
+                        reordered.append(instance)
+                        reordered.append(s)
+                    elif s.id == target_module.id and drop_position == 1:
+                        reordered.append(s)
+                        reordered.append(instance)
+                    else:
+                        reordered.append(s)
+
+                # 防御，如果目标模块没在 siblings 里（理论上不可能）
+                if instance not in reordered:
+                    reordered.append(instance)
+
+                self._persist_sibling_order(reordered)
+
+            if old_parent_id != instance.parent_id:
+                self._normalize_sibling_order(instance.project, old_parent_id)
+
+            serializer = self.get_serializer(instance)
+            return Response(serializer.data)
 
 
 class TestSuiteViewSet(viewsets.ModelViewSet):

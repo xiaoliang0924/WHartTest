@@ -3,6 +3,7 @@ import { ref, onMounted, h, watch } from 'vue'
 import { Message, Tag as ATag, Button as AButton } from '@arco-design/web-vue'
 import type { TableColumnData } from '@arco-design/web-vue'
 import { testcaseService } from '../../services/testcaseService'
+import { normalizeListPayload } from '../../services/responseHelpers'
 import type { TestCaseHistoryReport } from '../../types/testcase'
 import type { PaginatedResponse } from '../../types/common'
 import { useProjectStore } from '@/store/projectStore'
@@ -58,24 +59,8 @@ const loading = ref(false)
 const reports = ref<TestCaseHistoryReport[]>([])
 
 const normalizeHistoryReports = (payload?: HistoryReportsPayload) => {
-  if (Array.isArray(payload)) {
-    return {
-      results: payload,
-      total: payload.length
-    }
-  }
-
-  if (payload && Array.isArray(payload.results)) {
-    return {
-      results: payload.results,
-      total: payload.count ?? payload.results.length
-    }
-  }
-
-  return {
-    results: [],
-    total: 0
-  }
+  const { results, count } = normalizeListPayload<TestCaseHistoryReport>(payload)
+  return { results, total: count }
 }
 
 const columns: TableColumnData[] = [

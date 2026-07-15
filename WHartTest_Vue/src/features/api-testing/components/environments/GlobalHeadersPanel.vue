@@ -12,6 +12,7 @@ import {
   type GlobalHeader,
   type CreateGlobalHeaderData
 } from '../../services/globalHeaderService'
+import { toArray } from '../../services/responseHelpers'
 import {
   IconPlus,
   IconEdit,
@@ -221,7 +222,7 @@ const fetchGlobalHeaders = async () => {
   try {
     loading.value = true
     const response = await getGlobalHeaders(Number(projectStore.currentProjectId))
-    globalHeaders.value = response.data.results
+    globalHeaders.value = toArray<GlobalHeader>(response.data?.results ?? response.data)
   } catch (error) {
     console.error('获取全局请求头列表失败:', error)
     Message.error('获取全局请求头列表失败')

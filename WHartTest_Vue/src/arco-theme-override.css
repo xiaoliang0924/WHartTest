@@ -141,6 +141,74 @@
   background-color: rgba(var(--theme-accent-rgb), 0.05) !important;
 }
 
+/* 全局弹层背景兜底
+   Arco 的 select/dropdown/cascader/date-picker 弹层会 teleport 到 body。
+   组件内历史遗留的 :global/.arco-* transparent 覆盖会污染整个项目，
+   这里用更高优先级统一保证弹层和内部选项是不透明的。 */
+body .arco-trigger-popup .arco-select-dropdown.arco-select-dropdown,
+body .arco-trigger-popup .arco-select-dropdown .arco-select-dropdown-list,
+body .arco-trigger-popup .arco-select-dropdown .arco-select-dropdown-list-wrapper,
+body .arco-trigger-popup .arco-select-dropdown .arco-select-dropdown-header,
+body .arco-trigger-popup .arco-select-dropdown .arco-select-dropdown-footer,
+body .arco-trigger-popup .arco-dropdown,
+body .arco-trigger-popup .arco-dropdown-list,
+body .arco-trigger-popup .arco-dropdown-list-wrapper,
+body .arco-trigger-popup .arco-dropdown-menu,
+body .arco-trigger-popup .arco-cascader-panel,
+body .arco-trigger-popup .arco-cascader-menu,
+body .arco-trigger-popup .arco-picker-container,
+body .arco-trigger-popup .arco-picker-panel,
+body .arco-trigger-popup .arco-picker-range-container,
+body .arco-trigger-popup .arco-tree-select-dropdown {
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+}
+
+body .arco-trigger-popup .arco-select-dropdown.arco-select-dropdown,
+body .arco-trigger-popup .arco-dropdown,
+body .arco-trigger-popup .arco-dropdown-list,
+body .arco-trigger-popup .arco-cascader-panel,
+body .arco-trigger-popup .arco-picker-container,
+body .arco-trigger-popup .arco-tree-select-dropdown {
+  border: 1px solid rgba(148, 163, 184, 0.18) !important;
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.14) !important;
+  color: #1d2129 !important;
+}
+
+body .arco-trigger-popup .arco-select-dropdown.arco-select-dropdown .arco-select-option,
+body .arco-trigger-popup .arco-select-dropdown.arco-select-dropdown .arco-select-group-title,
+body .arco-trigger-popup .arco-dropdown .arco-dropdown-option,
+body .arco-trigger-popup .arco-dropdown-list .arco-dropdown-option,
+body .arco-trigger-popup .arco-cascader-panel .arco-cascader-option,
+body .arco-trigger-popup .arco-picker-container .arco-picker-cell {
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  color: #1d2129 !important;
+}
+
+body .arco-trigger-popup .arco-select-dropdown.arco-select-dropdown .arco-select-option:hover,
+body .arco-trigger-popup .arco-dropdown .arco-dropdown-option:hover,
+body .arco-trigger-popup .arco-dropdown-list .arco-dropdown-option:hover,
+body .arco-trigger-popup .arco-cascader-panel .arco-cascader-option:hover,
+body .arco-trigger-popup .arco-picker-container .arco-picker-cell:not(.arco-picker-cell-disabled):hover {
+  background: #f2f3f5 !important;
+  background-color: #f2f3f5 !important;
+}
+
+body .arco-trigger-popup .arco-select-dropdown.arco-select-dropdown .arco-select-option-active,
+body .arco-trigger-popup .arco-select-dropdown.arco-select-dropdown .arco-select-option-selected,
+body .arco-trigger-popup .arco-dropdown .arco-dropdown-option-active,
+body .arco-trigger-popup .arco-dropdown .arco-dropdown-option-selected,
+body .arco-trigger-popup .arco-dropdown-list .arco-dropdown-option-active,
+body .arco-trigger-popup .arco-dropdown-list .arco-dropdown-option-selected,
+body .arco-trigger-popup .arco-cascader-panel .arco-cascader-option-active,
+body .arco-trigger-popup .arco-cascader-panel .arco-cascader-option-selected,
+body .arco-trigger-popup .arco-picker-container .arco-picker-cell-selected .arco-picker-date-value {
+  background: rgba(var(--theme-accent-rgb), 0.12) !important;
+  background-color: rgba(var(--theme-accent-rgb), 0.12) !important;
+  color: var(--theme-accent) !important;
+}
+
 /* 子菜单项选中状态 */
 .arco-menu-light .arco-menu-inline .arco-menu-item-selected,
 .arco-menu-light .arco-menu-inline .arco-menu-selected {

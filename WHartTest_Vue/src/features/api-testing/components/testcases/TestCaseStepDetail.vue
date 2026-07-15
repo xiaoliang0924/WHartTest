@@ -342,8 +342,7 @@ const handleSend = async (requestData: { method: string, url: string, name: stri
               base_url: '',
               variables: {},
               parameters: {},
-              export: [],
-              verify: true
+              export: []
             },
             steps_info: [{
               name: requestData.name,
@@ -814,8 +813,7 @@ const handleStepSave = async (requestData: { method: string, url: string, name: 
           base_url: '',
           variables: {},
           parameters: {},
-          export: [],
-          verify: true
+          export: []
         },
         steps_info: [{
           name: requestData.name,

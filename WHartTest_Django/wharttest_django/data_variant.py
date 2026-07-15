@@ -4,7 +4,7 @@ import os
 import subprocess
 from pathlib import Path
 
-_VALID_VARIANTS = {"github", "pro", "dev"}
+_VALID_VARIANTS = {"ce", "pe", "dev", "github", "pro"}
 _AUTO_VARIANT = "auto"
 
 
@@ -33,6 +33,10 @@ def get_branch_data_variant(base_dir: Path) -> str:
     except Exception:
         branch = ""
 
+    if branch.endswith("-ce"):
+        return "ce"
+    if branch.endswith("-pe"):
+        return "pe"
     if branch.endswith("-github"):
         return "github"
     if branch.endswith("-pro"):
@@ -43,6 +47,8 @@ def get_branch_data_variant(base_dir: Path) -> str:
 def build_postgres_db_name(variant: str) -> str:
     if variant == "dev":
         return "wharttest_dev"
+    if variant in {"ce", "pe"}:
+        return f"wharttest_{variant}"
     return f"wharttest_dev_{variant}"
 
 

@@ -142,6 +142,7 @@ INSTALLED_APPS = [
     'api_testcases',  # API 测试用例应用。
     'api_testtasks',  # API 测试任务应用。
     'api_sync',  # API 接口同步应用。
+    'operation_logs',  # 用户操作日志。
 ]
 
 # ASGI 配置（用于 Channels WebSocket）
@@ -168,6 +169,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",  # 将用户对象绑定到 request。
     "django.contrib.messages.middleware.MessageMiddleware",  # 消息框架中间件。
     "django.middleware.clickjacking.XFrameOptionsMiddleware",  # 防点击劫持响应头。
+    "operation_logs.middleware.OperationLogMiddleware",  # 用户操作日志记录中间件。
 ]
 
 # 指定项目根路由模块。
@@ -526,6 +528,17 @@ LOGGING = {
             "formatter": "verbose",
             "encoding": "utf-8",
         },
+        # API接口/用例执行诊断日志
+        "api_file": {
+            "level": "INFO",
+            "class": "wharttest_django.safe_log_handler.SafeTimedRotatingFileHandler",
+            "filename": str(LOGS_DIR / "api.log"),
+            "when": "midnight",
+            "interval": 1,
+            "backupCount": 30,
+            "formatter": "verbose",
+            "encoding": "utf-8",
+        },
     },
     "loggers": {
         # Django核心日志
@@ -587,6 +600,22 @@ LOGGING = {
         "testcases.serializers": {
             "handlers": ["console", "app_file", "error_file"],
             "level": "DEBUG",
+            "propagate": False,
+        },
+        # API接口/用例执行日志
+        "api_interfaces": {
+            "handlers": ["console", "api_file", "error_file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "api_testcases": {
+            "handlers": ["console", "api_file", "error_file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "testrunner": {
+            "handlers": ["console", "api_file", "error_file"],
+            "level": "INFO",
             "propagate": False,
         },
         # Orchestrator集成应用日志(Agent Loop压缩调试)

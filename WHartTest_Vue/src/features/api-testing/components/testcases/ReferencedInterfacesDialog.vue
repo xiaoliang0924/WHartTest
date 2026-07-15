@@ -2,6 +2,7 @@
 import { ref, watch, computed } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { testcaseService } from '../../services/testcaseService'
+import { toArray } from '../../services/responseHelpers'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
 
@@ -53,7 +54,7 @@ const fetchReferencedInterfaces = async () => {
     const res = await testcaseService.referencedInterfaces(projectStore.currentProjectId, props.testcaseId)
     if (res.success && res.data) {
       interfaces.value = []
-      const data = Array.isArray(res.data) ? res.data : []
+      const data = toArray<any>((res.data as any)?.results ?? res.data)
       data.forEach((item: any) => {
         if (item.steps && Array.isArray(item.steps)) {
           item.steps.forEach((step: {

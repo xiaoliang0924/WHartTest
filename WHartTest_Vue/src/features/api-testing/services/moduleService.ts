@@ -1,6 +1,7 @@
 import { request } from '@/utils/request';
 import { useProjectStore } from '@/store/projectStore';
 import type { ApiModule } from '../types/module';
+import { wrapListResponse, wrapOneResponse } from './responseHelpers';
 
 export interface ApiModuleDeleteResult {
   deleted_interface_ids: number[];
@@ -27,6 +28,9 @@ export const moduleService = {
 
   tree: (projectId: number) =>
     request<ApiModule[]>({ url: `${base(projectId)}/tree/`, method: 'GET' }),
+
+  move: (projectId: number, id: number, data: { target_id: number | null; drop_position: number }) =>
+    request<ApiModule>({ url: `${base(projectId)}/${id}/move/`, method: 'POST', data }),
 };
 
 // ---------------------------------------------------------------------------
@@ -42,22 +46,53 @@ function _pid(params?: Record<string, any>): number {
   return useProjectStore().currentProjectId ?? 0;
 }
 
-function _wrapList(res: any): any {
-  if (!res.success) {
-    const err: any = new Error(res.error || res.message || '操作失败');
-    err.errors = res.errors;
-    throw err;
+function _normalizeListPayload(payload: any, fallbackTotal?: number): { results: any[]; count: number } {
+  let current = payload;
+  let countHint = fallbackTotal;
+
+  for (let i = 0; i < 5; i += 1) {
+    if (Array.isArray(current)) {
+      return { results: current, count: countHint ?? current.length };
+    }
+
+    if (!current || typeof current !== 'object') {
+      break;
+    }
+
+    if (typeof current.count === 'number') {
+      countHint = current.count;
+    }
+
+    if (Array.isArray(current.results)) {
+      return { results: current.results, count: countHint ?? current.results.length };
+    }
+
+    if (Array.isArray(current.data)) {
+      return { results: current.data, count: countHint ?? current.data.length };
+    }
+
+    if (current.data && typeof current.data === 'object' && current.data !== current) {
+      current = current.data;
+      continue;
+    }
+
+    if (current.results && typeof current.results === 'object' && current.results !== current) {
+      current = current.results;
+      continue;
+    }
+
+    break;
   }
-  return { data: { results: res.data ?? [], count: res.total ?? 0 }, status: 'success', message: '' };
+
+  return { results: [], count: countHint ?? 0 };
+}
+
+function _wrapList(res: any): any {
+  return wrapListResponse(res);
 }
 
 function _wrapOne(res: any): any {
-  if (!res.success) {
-    const err: any = new Error(res.error || res.message || '操作失败');
-    err.errors = res.errors;
-    throw err;
-  }
-  return { data: res.data ?? null, status: 'success', message: '' };
+  return wrapOneResponse(res);
 }
 
 export async function getModules(params: Record<string, any> = {}) {
@@ -88,6 +123,10 @@ export async function updateModule(id: number, data: any) {
 
 export async function deleteModule(id: number) {
   return _wrapOne(await moduleService.delete(_pid(), id));
+}
+
+export async function moveModule(id: number, data: { target_id: number | null; drop_position: number }) {
+  return _wrapOne(await moduleService.move(_pid(), id, data));
 }
 
 export type { ApiModule };

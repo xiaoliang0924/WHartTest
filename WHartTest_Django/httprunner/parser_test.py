@@ -129,6 +129,9 @@ class TestParserBasic(unittest.TestCase):
             [("func", "1, $b, c=$x, d=4")],
         )
         self.assertEqual(
+            parser.regex_findall_functions("${func(${b})}"), [("func", "${b}")]
+        )
+        self.assertEqual(
             parser.regex_findall_functions("/api/1000?_t=${get_timestamp()}"),
             [("get_timestamp", "")],
         )
@@ -333,6 +336,23 @@ class TestParserBasic(unittest.TestCase):
             "ABC${ord(a)}DEF${len(abcd)}", variables_mapping, functions_mapping
         )
         self.assertEqual(value, "ABC97DEF4")
+
+    def test_parse_data_function_with_braced_variable_argument(self):
+        variables_mapping = {"jjjj": 152351235125123}
+        functions_mapping = {"aaa": lambda value: f"parsed-{value}"}
+
+        value = parser.parse_data(
+            "${aaa(${jjjj})}", variables_mapping, functions_mapping
+        )
+        self.assertEqual(value, "parsed-152351235125123")
+
+        headers = parser.parse_data(
+            {"aaa": "${aaa(${jjjj})}", "bbb": "ggggggg"},
+            variables_mapping,
+            functions_mapping,
+        )
+        self.assertEqual(headers["aaa"], "parsed-152351235125123")
+        self.assertEqual(headers["bbb"], "ggggggg")
 
     def test_parse_data_func_var_duplicate(self):
         variables_mapping = {

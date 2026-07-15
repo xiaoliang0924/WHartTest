@@ -123,12 +123,6 @@ class UnifiedResponseRenderer(JSONRenderer):
                     unified_response.update(data)
                     unified_response["code"] = original_code
 
-                # DRF 分页信封：包含 count + results 的 dict。
-                elif isinstance(data, dict) and 'count' in data and 'results' in data:
-                    unified_response["data"] = data["results"]
-                    unified_response["total"] = data["count"]
-                    unified_response["message"] = "操作成功"
-
                 # 普通成功数据包装。
                 else:
                     unified_response["data"] = data

@@ -133,5 +133,49 @@ class WhartToolsScreenshotResolutionTests(unittest.TestCase):
         self.assertEqual(payload["notes"], "Source\nReview complete")
 
 
+class WhartToolsAddModuleTests(unittest.TestCase):
+    @patch.object(whart_tools.requests, "post")
+    def test_add_module_success(self, mock_post):
+        class MockResponse:
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {
+                    "code": 201,
+                    "data": {
+                        "id": 42,
+                        "name": "新模块"
+                    }
+                }
+        mock_post.return_value = MockResponse()
+
+        result = whart_tools.add_module(project_id=1, name="新模块", parent_id=10)
+        self.assertEqual(result["message"], "保存成功")
+        self.assertEqual(result["module"]["id"], 42)
+        self.assertEqual(result["module"]["name"], "新模块")
+
+        mock_post.assert_called_once_with(
+            f"{whart_tools.BASE_URL}/api/projects/1/testcase-modules/",
+            headers=whart_tools.HEADERS,
+            json={"name": "新模块", "parent": 10}
+        )
+
+    @patch.object(whart_tools.requests, "post")
+    def test_add_module_failure(self, mock_post):
+        class MockResponse:
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {
+                    "code": 400,
+                    "message": "创建失败"
+                }
+        mock_post.return_value = MockResponse()
+
+        result = whart_tools.add_module(project_id=1, name="新模块")
+        self.assertEqual(result["message"], "保存失败")
+        self.assertEqual(result["response"]["code"], 400)
+
+
 if __name__ == "__main__":
     unittest.main()

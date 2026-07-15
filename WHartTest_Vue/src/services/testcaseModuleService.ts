@@ -39,6 +39,7 @@ export interface TestCaseModule {
   children?: TestCaseModule[];
   key?: number | string; // for a-tree
   title?: string; // for a-tree
+  order?: number;
 }
 
 export interface CreateTestCaseModuleRequest {
@@ -353,11 +354,11 @@ export const deleteTestCaseModule = async (
   }
 };
 
-// 上移/下移模块（同一父级内）
+// 移动模块：兼容按钮上移/下移和拖拽排序。
 export const moveTestCaseModule = async (
   projectId: string | number | undefined | null,
   moduleId: number,
-  direction: 'up' | 'down'
+  movement: 'up' | 'down' | { target_id: number | null; drop_position: number }
 ): Promise<APIResponse<TestCaseModule>> => {
   if (!projectId) return { success: false, error: '项目ID不能为空' };
 
@@ -375,7 +376,7 @@ export const moveTestCaseModule = async (
     const basePath = getApiBasePath(projectId);
     const response = await axios.post<ApiResponse<TestCaseModule>>(
       `${basePath}${moduleId}/move/`,
-      { direction },
+      typeof movement === 'string' ? { direction: movement } : movement,
       {
         headers: {
           'Authorization': `Bearer ${accessToken}`,

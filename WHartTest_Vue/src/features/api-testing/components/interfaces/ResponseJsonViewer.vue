@@ -167,15 +167,7 @@ const applyExpression = () => {
       expression = `body.${expression}`
     }
     
-    // 将结果转换为字符串
-    let valueStr = testResult.value.value
-    if (typeof valueStr === 'object' && valueStr !== null) {
-      valueStr = JSON.stringify(valueStr)
-    } else {
-      valueStr = String(valueStr)
-    }
-    
-    emit('select-path', expression, valueStr)
+    emit('select-path', expression, testResult.value.value)
     
     if (props.fieldType === 'extract') {
       Message.success('已应用提取表达式')

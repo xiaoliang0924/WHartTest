@@ -3,6 +3,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { IconFolder, IconPlus, IconEdit, IconDelete, IconRight, IconDown } from '@arco-design/web-vue/es/icon'
 import { testcaseGroupService } from '../../services/testcaseGroupService'
+import { toArray } from '../../services/responseHelpers'
 import type { ApiTestCaseGroup } from '../../types/testcase'
 import { collapseTreeBranchIds } from '../../utils/treeExpansion'
 
@@ -34,7 +35,7 @@ const loadGroupTree = async () => {
     groupLoading.value = true
     const res = await testcaseGroupService.tree(props.projectId)
     if (res.success && res.data) {
-      const groups = Array.isArray(res.data) ? res.data : (res.data as any).results || []
+      const groups = toArray<ApiTestCaseGroup>((res.data as any)?.results ?? res.data)
       const sortGroups = (items: ApiTestCaseGroup[]): ApiTestCaseGroup[] => {
         items.sort((a, b) => {
           const timeA = new Date(a.created_at).getTime()

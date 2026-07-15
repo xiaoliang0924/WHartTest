@@ -218,6 +218,11 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
         name: 'TaskCenter',
         component: TaskCenterView,
       },
+      {
+        path: 'operation-logs', // 定义操作日志路径。
+        name: 'OperationLogs', // 定义操作日志路由名称。
+        component: () => import('../views/OperationLogView.vue'), // 动态导入操作日志页面。
+      },
       // 其他受保护的子路由可以加在这里
     ]
   },

@@ -2,6 +2,7 @@ import { request } from '@/utils/request';
 import { useProjectStore } from '@/store/projectStore';
 import type { ApiEnvironment, ApiEnvironmentVariable, EnvironmentVariableType } from '../types/environment';
 import { environmentVariableService } from './environmentVariableService';
+import { wrapListResponse, wrapOneResponse } from './responseHelpers';
 
 const base = (projectId: number) => `/projects/${projectId}/api-environments`;
 
@@ -34,21 +35,11 @@ function _pid(): number {
 }
 
 function _wrapList(res: any): any {
-  if (!res.success) {
-    const err: any = new Error(res.error || res.message || '操作失败');
-    err.errors = res.errors;
-    throw err;
-  }
-  return { data: { results: res.data ?? [], count: res.total ?? 0 }, status: 'success', message: '' };
+  return wrapListResponse(res);
 }
 
 function _wrapOne(res: any): any {
-  if (!res.success) {
-    const err: any = new Error(res.error || res.message || '操作失败');
-    err.errors = res.errors;
-    throw err;
-  }
-  return { data: res.data ?? null, status: 'success', message: '' };
+  return wrapOneResponse(res);
 }
 
 // Type aliases

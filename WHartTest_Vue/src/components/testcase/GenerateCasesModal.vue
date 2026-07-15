@@ -254,6 +254,7 @@ import { KnowledgeService } from '@/features/knowledge/services/knowledgeService
 import type { KnowledgeBase } from '@/features/knowledge/types/knowledge';
 import { getTestCaseList, type TestCase } from '@/services/testcaseService';
 import { getTestCaseModules, type TestCaseModule } from '@/services/testcaseModuleService';
+import { toArray } from '@/features/api-testing/services/responseHelpers';
 import { useAppI18n } from '@/composables/useAppI18n';
 import { getLevelColor } from '@/utils/formatters';
 
@@ -582,10 +583,8 @@ const fetchRequirementDocuments = async () => {
   isDocLoading.value = true;
   try {
     const response = await RequirementDocumentService.getDocumentList({ project: String(projectStore.currentProjectId) });
-    if (response.status === 'success' && Array.isArray(response.data)) {
-      requirementDocuments.value = response.data;
-    } else if (response.status === 'success' && 'results' in response.data) {
-       requirementDocuments.value = response.data.results;
+    if (response.status === 'success') {
+      requirementDocuments.value = toArray<RequirementDocument>((response.data as any)?.results ?? response.data);
     } else {
       Message.error(pageText.value.loadRequirementDocumentsFailed);
       requirementDocuments.value = [];
@@ -631,18 +630,7 @@ const fetchPrompts = async () => {
     // 获取 "general" 类型的提示词
     const response = await getUserPrompts({ prompt_type: 'general' });
     if (response.status === 'success') {
-       // 根据您提供的实际返回，data可能直接是数组
-       if (Array.isArray(response.data)) {
-           prompts.value = response.data;
-       }
-       // 兼容旧的或分页的格式
-       else if ((response.data as UserPromptListResponseData)?.results) {
-           prompts.value = (response.data as UserPromptListResponseData).results;
-       }
-       else {
-           // 接口成功但数据格式不符或为空
-           prompts.value = [];
-       }
+       prompts.value = toArray<UserPrompt>((response.data as UserPromptListResponseData)?.results ?? response.data);
     } else {
       Message.error(response.message || pageText.value.loadPromptsFailed);
       prompts.value = [];
@@ -660,11 +648,7 @@ const fetchKnowledgeBases = async () => {
   isKbLoading.value = true;
   try {
     const response = await KnowledgeService.getKnowledgeBases({ project: projectStore.currentProjectId });
-    if (Array.isArray(response)) {
-       knowledgeBases.value = response;
-    } else {
-       knowledgeBases.value = response.results;
-    }
+    knowledgeBases.value = toArray<KnowledgeBase>((response as any)?.results ?? response);
   } catch (error) {
     Message.error(pageText.value.loadKnowledgeBasesFailed);
     knowledgeBases.value = [];

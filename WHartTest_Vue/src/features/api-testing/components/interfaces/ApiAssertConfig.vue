@@ -6,7 +6,7 @@ import ResponseJsonViewer from './ResponseJsonViewer.vue'
 import { Message } from '@arco-design/web-vue'
 
 interface Props {
-  validators?: Array<Record<keyof ApiValidator, [string, string]>>
+  validators?: Array<Record<keyof ApiValidator, [string, any]>>
 }
 
 const props = defineProps<Props>()
@@ -22,8 +22,11 @@ interface AssertRule {
   type: keyof ApiValidator
   expression: string
   expected: string
+  expectedValueType: ExpectedValueType
   enabled: boolean
 }
+
+type ExpectedValueType = 'string' | 'number' | 'boolean' | 'null' | 'json'
 
 // 数据类型选项（用于 type_match 断言）
 const dataTypes = [
@@ -66,24 +69,91 @@ const validatorTypes = [
   { label: '类型匹配', value: 'type_match', category: '其他' }
 ] as const
 
+const expectedValueTypes = [
+  { label: '字符串', value: 'string' },
+  { label: '数字', value: 'number' },
+  { label: '布尔', value: 'boolean' },
+  { label: '空值', value: 'null' },
+  { label: 'JSON', value: 'json' }
+] as const
+
+const inferExpectedValueType = (value: any): ExpectedValueType => {
+  if (value === null) return 'null'
+  if (typeof value === 'number') return 'number'
+  if (typeof value === 'boolean') return 'boolean'
+  if (typeof value === 'object') return 'json'
+  return 'string'
+}
+
+const formatExpectedForInput = (value: any): string => {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value, null, 2)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
+}
+
+const parseExpectedValue = (rule: AssertRule): any => {
+  if (rule.type === 'type_match') {
+    return rule.expected
+  }
+
+  switch (rule.expectedValueType) {
+    case 'number': {
+      const numericValue = Number(rule.expected)
+      return Number.isNaN(numericValue) ? rule.expected : numericValue
+    }
+    case 'boolean':
+      return String(rule.expected).toLowerCase() === 'true'
+    case 'null':
+      return null
+    case 'json':
+      try {
+        return JSON.parse(rule.expected)
+      } catch {
+        return rule.expected
+      }
+    default:
+      return rule.expected
+  }
+}
+
+const hasExpectedValue = (rule: AssertRule) => {
+  if (rule.expectedValueType === 'null') {
+    return true
+  }
+  return String(rule.expected ?? '').trim() !== ''
+}
+
+const buildAssertRule = (
+  type: keyof ApiValidator = 'eq',
+  expression = '',
+  expected: any = ''
+): AssertRule => ({
+  type,
+  expression,
+  expected: formatExpectedForInput(expected),
+  expectedValueType: type === 'type_match' ? 'string' : inferExpectedValueType(expected),
+  enabled: true
+})
+
 const assertRules = ref<AssertRule[]>([
-  { type: 'eq', expression: '', expected: '', enabled: true }
+  buildAssertRule()
 ])
 
 // 初始化断言规则
 const initAssertRules = () => {
   if (props.validators && props.validators.length > 0) {
     assertRules.value = props.validators.map(validator => {
-      const [type, [expression, expected]] = Object.entries(validator)[0] as [keyof ApiValidator, [string, string]]
-      return {
-        type,
-        expression,
-        expected,
-        enabled: true
-      }
+      const [type, [expression, expected]] = Object.entries(validator)[0] as [keyof ApiValidator, [string, any]]
+      return buildAssertRule(type, expression, expected)
     })
   } else {
-    assertRules.value = [{ type: 'eq', expression: '', expected: '', enabled: true }]
+    assertRules.value = [buildAssertRule()]
   }
 }
 
@@ -91,38 +161,41 @@ const initAssertRules = () => {
 watch(() => props.validators, (newValidators) => {
   if (newValidators && newValidators.length > 0) {
     assertRules.value = newValidators.map(validator => {
-      const [type, [expression, expected]] = Object.entries(validator)[0] as [keyof ApiValidator, [string, string]]
-      return {
-        type,
-        expression,
-        expected,
-        enabled: true
-      }
+      const [type, [expression, expected]] = Object.entries(validator)[0] as [keyof ApiValidator, [string, any]]
+      return buildAssertRule(type, expression, expected)
     })
   } else {
-    assertRules.value = [{ type: 'eq', expression: '', expected: '', enabled: true }]
+    assertRules.value = [buildAssertRule()]
   }
 })
 
 // 添加断言规则
 const addRow = () => {
-  assertRules.value.push({ type: 'eq', expression: '', expected: '', enabled: true })
+  assertRules.value.push(buildAssertRule())
 }
 
 // 删除断言规则
 const removeRow = (index: number) => {
   assertRules.value.splice(index, 1)
   if (assertRules.value.length === 0) {
-    assertRules.value.push({ type: 'eq', expression: '', expected: '', enabled: true })
+    assertRules.value.push(buildAssertRule())
+  }
+}
+
+const handleExpectedTypeChange = (rule: AssertRule) => {
+  if (rule.expectedValueType === 'null') {
+    rule.expected = ''
+  } else if (rule.expectedValueType === 'boolean' && !['true', 'false'].includes(String(rule.expected))) {
+    rule.expected = 'true'
   }
 }
 
 // 向父组件暴露断言规则数据
 defineExpose({
   getAssertRules: () => assertRules.value
-    .filter(rule => rule.enabled && rule.expression && rule.expected)
+    .filter(rule => rule.enabled && rule.expression && hasExpectedValue(rule))
     .map(rule => ({
-      [rule.type]: [rule.expression, rule.expected]
+      [rule.type]: [rule.expression, parseExpectedValue(rule)]
     }))
 })
 
@@ -132,15 +205,17 @@ onMounted(() => {
 })
 
 // 处理从响应中选择路径
-const handleSelectPath = (path: string, value: string) => {
+const handleSelectPath = (path: string, value: any) => {
   if (currentEditingIndex.value >= 0 && currentEditingIndex.value < assertRules.value.length) {
     // 设置表达式
     assertRules.value[currentEditingIndex.value].expression = path
     
     // 设置预期结果，如果结果为空
-    if (!assertRules.value[currentEditingIndex.value].expected.trim()) {
+    const currentRule = assertRules.value[currentEditingIndex.value]
+    if (!String(currentRule.expected ?? '').trim() && currentRule.expectedValueType !== 'null') {
       // 使用当前值作为预期结果
-      assertRules.value[currentEditingIndex.value].expected = value
+      currentRule.expectedValueType = currentRule.type === 'type_match' ? 'string' : inferExpectedValueType(value)
+      currentRule.expected = formatExpectedForInput(value)
     }
     
     Message.success('已设置断言表达式')
@@ -186,7 +261,7 @@ const openResponseViewer = (index: number) => {
             <div class="flex gap-2 w-2/5">
               <a-select
                 v-model="rule.type"
-                class="w-2/5"
+                class="w-[30%]"
                 placeholder="断言类型"
               >
                 <a-optgroup
@@ -203,6 +278,22 @@ const openResponseViewer = (index: number) => {
                   </a-option>
                 </a-optgroup>
               </a-select>
+
+              <a-select
+                v-if="rule.type !== 'type_match'"
+                v-model="rule.expectedValueType"
+                placeholder="值类型"
+                class="w-[24%]"
+                @change="handleExpectedTypeChange(rule)"
+              >
+                <a-option
+                  v-for="type in expectedValueTypes"
+                  :key="type.value"
+                  :value="type.value"
+                >
+                  {{ type.label }}
+                </a-option>
+              </a-select>
               
               <!-- 根据断言类型显示不同的输入控件 -->
               <a-select
@@ -210,7 +301,7 @@ const openResponseViewer = (index: number) => {
                 v-model="rule.expected"
                 placeholder="选择类型"
                 allow-clear
-                class="w-3/5"
+                class="w-[70%]"
               >
                 <a-option
                   v-for="type in dataTypes"
@@ -220,13 +311,39 @@ const openResponseViewer = (index: number) => {
                   {{ type.label }}
                 </a-option>
               </a-select>
+
+              <a-select
+                v-else-if="rule.expectedValueType === 'boolean'"
+                v-model="rule.expected"
+                placeholder="布尔值"
+                class="w-[46%]"
+              >
+                <a-option value="true">true</a-option>
+                <a-option value="false">false</a-option>
+              </a-select>
+
+              <a-input
+                v-else-if="rule.expectedValueType === 'null'"
+                :model-value="'null'"
+                disabled
+                class="w-[46%]"
+              />
+
+              <a-textarea
+                v-else-if="rule.expectedValueType === 'json'"
+                v-model="rule.expected"
+                placeholder='JSON，例如 {"code": 0}'
+                allow-clear
+                auto-size
+                class="w-[46%]"
+              />
               
               <a-input
                 v-else
                 v-model="rule.expected"
-                placeholder="预期结果"
+                :placeholder="rule.expectedValueType === 'number' ? '预期数字' : '预期结果'"
                 allow-clear
-                class="w-3/5"
+                class="w-[46%]"
               />
             </div>
           </div>

@@ -2,9 +2,10 @@
 import { ref, watch, onMounted, inject } from 'vue'
 import { IconDelete, IconPlus, IconCode } from '@arco-design/web-vue/es/icon'
 import { Message } from '@arco-design/web-vue'
+import ResponseJsonViewer from '../interfaces/ResponseJsonViewer.vue'
 
 interface Props {
-  validators?: Array<Record<string, [string, string]>>
+  validators?: Array<Record<string, [string, any]>>
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -19,9 +20,12 @@ interface AssertRule {
   type: string
   expression: string
   expected: string
+  expectedValueType: ExpectedValueType
   description: string
   enabled: boolean
 }
+
+type ExpectedValueType = 'string' | 'number' | 'boolean' | 'null' | 'json'
 
 const dataTypes = [
   { label: '整数', value: 'int' },
@@ -56,67 +60,134 @@ const validatorTypes = [
   { label: '类型匹配', value: 'type_match', category: '其他' }
 ] as const
 
+const expectedValueTypes = [
+  { label: '字符串', value: 'string' },
+  { label: '数字', value: 'number' },
+  { label: '布尔', value: 'boolean' },
+  { label: '空值', value: 'null' },
+  { label: 'JSON', value: 'json' }
+] as const
+
+const inferExpectedValueType = (value: any): ExpectedValueType => {
+  if (value === null) return 'null'
+  if (typeof value === 'number') return 'number'
+  if (typeof value === 'boolean') return 'boolean'
+  if (typeof value === 'object') return 'json'
+  return 'string'
+}
+
+const formatExpectedForInput = (value: any): string => {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value, null, 2)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
+}
+
+const parseExpectedValue = (rule: AssertRule): any => {
+  if (rule.type === 'type_match') {
+    return rule.expected
+  }
+
+  switch (rule.expectedValueType) {
+    case 'number': {
+      const numericValue = Number(rule.expected)
+      return Number.isNaN(numericValue) ? rule.expected : numericValue
+    }
+    case 'boolean':
+      return String(rule.expected).toLowerCase() === 'true'
+    case 'null':
+      return null
+    case 'json':
+      try {
+        return JSON.parse(rule.expected)
+      } catch {
+        return rule.expected
+      }
+    default:
+      return rule.expected
+  }
+}
+
+const hasExpectedValue = (rule: AssertRule) => {
+  if (rule.expectedValueType === 'null') {
+    return true
+  }
+  return String(rule.expected ?? '').trim() !== ''
+}
+
+const buildAssertRule = (
+  type = 'eq',
+  expression = '',
+  expected: any = ''
+): AssertRule => ({
+  type,
+  expression,
+  expected: formatExpectedForInput(expected),
+  expectedValueType: type === 'type_match' ? 'string' : inferExpectedValueType(expected),
+  description: '',
+  enabled: true
+})
+
 const assertRules = ref<AssertRule[]>([
-  { type: 'eq', expression: '', expected: '', description: '', enabled: true }
+  buildAssertRule()
 ])
 
 const initAssertRules = () => {
   if (props.validators && props.validators.length > 0) {
     assertRules.value = props.validators.map(validator => {
-      const [type, [expression, expected]] = Object.entries(validator)[0] as [string, [string, string]]
-      return { type, expression, expected, description: '', enabled: true }
+      const [type, [expression, expected]] = Object.entries(validator)[0] as [string, [string, any]]
+      return buildAssertRule(type, expression, expected)
     })
   } else {
-    assertRules.value = [{ type: 'eq', expression: '', expected: '', description: '', enabled: true }]
+    assertRules.value = [buildAssertRule()]
   }
 }
 
 watch(() => props.validators, (newValidators) => {
   if (newValidators && newValidators.length > 0) {
     assertRules.value = newValidators.map(validator => {
-      const [type, [expression, expected]] = Object.entries(validator)[0] as [string, [string, string]]
-      return { type, expression, expected, description: '', enabled: true }
+      const [type, [expression, expected]] = Object.entries(validator)[0] as [string, [string, any]]
+      return buildAssertRule(type, expression, expected)
     })
   } else {
-    assertRules.value = [{ type: 'eq', expression: '', expected: '', description: '', enabled: true }]
+    assertRules.value = [buildAssertRule()]
   }
 })
 
 const addRow = () => {
-  assertRules.value.push({ type: 'eq', expression: '', expected: '', description: '', enabled: true })
+  assertRules.value.push(buildAssertRule())
 }
 
 const removeRow = (index: number) => {
   assertRules.value.splice(index, 1)
   if (assertRules.value.length === 0) {
-    assertRules.value.push({ type: 'eq', expression: '', expected: '', description: '', enabled: true })
+    assertRules.value.push(buildAssertRule())
   }
 }
 
-const getJsonPaths = (obj: any, prefix = ''): { path: string; value: any }[] => {
-  const paths: { path: string; value: any }[] = []
-  if (obj === null || obj === undefined) return paths
-  if (typeof obj === 'object') {
-    for (const key of Object.keys(obj)) {
-      const fullPath = prefix ? `${prefix}.${key}` : key
-      paths.push({ path: fullPath, value: obj[key] })
-      if (typeof obj[key] === 'object' && obj[key] !== null) {
-        paths.push(...getJsonPaths(obj[key], fullPath))
-      }
-    }
+const handleExpectedTypeChange = (rule: AssertRule) => {
+  if (rule.expectedValueType === 'null') {
+    rule.expected = ''
+  } else if (rule.expectedValueType === 'boolean' && !['true', 'false'].includes(String(rule.expected))) {
+    rule.expected = 'true'
   }
-  return paths
 }
 
-const handleSelectPath = (path: string, value: string) => {
+const handleSelectPath = (path: string, value: any) => {
   if (currentEditingIndex.value >= 0 && currentEditingIndex.value < assertRules.value.length) {
-    assertRules.value[currentEditingIndex.value].expression = path
-    if (!assertRules.value[currentEditingIndex.value].expected.trim()) {
-      assertRules.value[currentEditingIndex.value].expected = value
+    const currentRule = assertRules.value[currentEditingIndex.value]
+    currentRule.expression = path
+    if (!String(currentRule.expected ?? '').trim() && currentRule.expectedValueType !== 'null') {
+      currentRule.expectedValueType = currentRule.type === 'type_match' ? 'string' : inferExpectedValueType(value)
+      currentRule.expected = formatExpectedForInput(value)
     }
     Message.success('已设置断言表达式')
   }
-  drawerVisible.value = false
 }
 
 const openResponseViewer = (index: number) => {
@@ -126,8 +197,8 @@ const openResponseViewer = (index: number) => {
 
 const getAssertRules = () => {
   return assertRules.value
-    .filter(rule => rule.enabled && rule.expression && rule.expected)
-    .map(rule => ({ [rule.type]: [rule.expression, rule.expected] }))
+    .filter(rule => rule.enabled && rule.expression && hasExpectedValue(rule))
+    .map(rule => ({ [rule.type]: [rule.expression, parseExpectedValue(rule)] }))
 }
 
 onMounted(() => { initAssertRules() })
@@ -147,22 +218,50 @@ defineExpose({ getAssertRules })
           <div class="flex flex-1 gap-2">
             <div class="flex relative w-3/5">
               <a-input v-model="rule.expression" placeholder="断言表达式 (例如: body.data.code)" allow-clear class="w-full" />
-              <a-button type="text" class="absolute right-0 top-0 bottom-0" @click="openResponseViewer(index)" :disabled="!apiResponse">
+              <a-button type="text" class="assert-code-trigger absolute right-0 top-0 bottom-0 hover:text-blue-500" @click="openResponseViewer(index)" :disabled="!apiResponse">
                 <template #icon><icon-code /></template>
               </a-button>
             </div>
             <div class="flex gap-2 w-2/5">
-              <a-select v-model="rule.type" class="w-2/5" placeholder="断言类型">
+              <a-select v-model="rule.type" class="w-[30%]" placeholder="断言类型">
                 <a-optgroup v-for="category in ['基础比较', '字符串', '长度', '其他']" :key="category" :label="category">
                   <a-option v-for="vtype in validatorTypes.filter(t => t.category === category)" :key="vtype.value" :value="vtype.value">
                     {{ vtype.label }}
                   </a-option>
                 </a-optgroup>
               </a-select>
-              <a-select v-if="rule.type === 'type_match'" v-model="rule.expected" placeholder="选择类型" allow-clear class="w-3/5">
+              <a-select
+                v-if="rule.type !== 'type_match'"
+                v-model="rule.expectedValueType"
+                placeholder="值类型"
+                class="w-[24%]"
+                @change="handleExpectedTypeChange(rule)"
+              >
+                <a-option v-for="dtype in expectedValueTypes" :key="dtype.value" :value="dtype.value">{{ dtype.label }}</a-option>
+              </a-select>
+              <a-select v-if="rule.type === 'type_match'" v-model="rule.expected" placeholder="选择类型" allow-clear class="w-[70%]">
                 <a-option v-for="dtype in dataTypes" :key="dtype.value" :value="dtype.value">{{ dtype.label }}</a-option>
               </a-select>
-              <a-input v-else v-model="rule.expected" placeholder="预期结果" allow-clear class="w-3/5" />
+              <a-select v-else-if="rule.expectedValueType === 'boolean'" v-model="rule.expected" placeholder="布尔值" class="w-[46%]">
+                <a-option value="true">true</a-option>
+                <a-option value="false">false</a-option>
+              </a-select>
+              <a-input v-else-if="rule.expectedValueType === 'null'" :model-value="'null'" disabled class="w-[46%]" />
+              <a-textarea
+                v-else-if="rule.expectedValueType === 'json'"
+                v-model="rule.expected"
+                placeholder='JSON，例如 {"code": 0}'
+                allow-clear
+                auto-size
+                class="w-[46%]"
+              />
+              <a-input
+                v-else
+                v-model="rule.expected"
+                :placeholder="rule.expectedValueType === 'number' ? '预期数字' : '预期结果'"
+                allow-clear
+                class="w-[46%]"
+              />
             </div>
           </div>
           <a-button type="text" status="danger" @click="removeRow(index)" class="flex-shrink-0">
@@ -178,26 +277,22 @@ defineExpose({ getAssertRules })
       </a-button>
     </div>
 
-    <!-- 响应JSON路径选择抽屉 -->
-    <a-drawer v-model:visible="drawerVisible" title="从响应中选择路径" :width="500" unmount-on-close>
-      <div v-if="apiResponse" class="space-y-1">
-        <div
-          v-for="item in getJsonPaths(apiResponse)"
-          :key="item.path"
-          class="json-path-item"
-          @click="handleSelectPath(item.path, typeof item.value === 'object' ? JSON.stringify(item.value) : String(item.value))"
-        >
-          <span class="json-path-key">{{ item.path }}</span>
-          <span class="json-path-value">{{ typeof item.value === 'object' ? JSON.stringify(item.value) : String(item.value) }}</span>
-        </div>
-      </div>
-      <a-empty v-else description="暂无响应数据，请先调试接口" />
-    </a-drawer>
+    <!-- 响应JSON查看器 -->
+    <ResponseJsonViewer
+      v-model:visible="drawerVisible"
+      :response-data="apiResponse"
+      field-type="assert"
+      @select-path="handleSelectPath"
+    />
   </div>
 </template>
 
 <style lang="postcss" scoped>
 @reference "tailwindcss";
+.assert-code-trigger {
+  color: var(--tcf-text-subtle);
+}
+
 :deep(.arco-input-wrapper) {
   background: var(--tcf-control-bg) !important;
   border-color: var(--tcf-control-border) !important;

@@ -8,7 +8,7 @@ class ApiModuleSerializer(serializers.ModelSerializer):
     class Meta:
         model = ApiModule
         fields = '__all__'
-        read_only_fields = ['project', 'created_by', 'created_at', 'updated_at']
+        read_only_fields = ['project', 'created_by', 'created_at', 'updated_at', 'level', 'order']
 
     def get_children(self, obj):
         children = obj.children.all()

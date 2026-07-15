@@ -115,7 +115,24 @@ class SparseBM25Encoder:
 
         self.model_name = model_name or self.DEFAULT_MODEL
 
-        # 检查是否存在本地缓存（Docker 部署时模型已预下载）
+        # 优先使用随仓库/镜像分发的本地平铺模型目录（通过 specific_model_path 直接加载，
+        # 无需 HuggingFace 缓存结构，也不联网）
+        local_model_dir = os.environ.get("BM25_MODEL_PATH") or os.path.join(
+            settings.BASE_DIR, "bm25_model"
+        )
+        if os.path.isfile(os.path.join(local_model_dir, "config.json")) and any(
+            f.endswith(".txt") for f in os.listdir(local_model_dir)
+        ):
+            logger.info(f"📦 发现本地 BM25 模型目录: {local_model_dir}，离线加载")
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            self._encoder = SparseTextEmbedding(
+                model_name=self.model_name,
+                specific_model_path=local_model_dir,
+            )
+            logger.info(f"✅ 初始化 BM25 稀疏编码器: {self.model_name}")
+            return
+
+        # 检查是否存在 HuggingFace 标准缓存（Docker 部署时模型已预下载）
         cache_path = os.environ.get(
             "FASTEMBED_CACHE_PATH", os.path.expanduser("~/.cache/fastembed")
         )

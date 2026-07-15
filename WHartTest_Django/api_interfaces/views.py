@@ -16,6 +16,7 @@ from wharttest_django.pagination import StandardPagination
 
 from .models import ApiInterface, ApiInterfaceResult
 from .serializers import ApiInterfaceSerializer, ApiInterfaceResultSerializer
+from .logging_utils import new_trace_id, summarize_for_log
 from .runner import InterfaceRunner
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,37 @@ class ApiInterfaceViewSet(BaseModelViewSet):
         # Build interface data
         interface_data = interface.get_interface_data()
         interface_data['project_id'] = interface.project_id
+        trace_id = new_trace_id('ifc-run')
+        interface_data['trace_id'] = trace_id
+        interface_data['body_source'] = 'db_interface'
+        override_fields = [
+            field for field in (
+                'method', 'url', 'headers', 'params', 'body',
+                'setup_hooks', 'teardown_hooks', 'extract', 'validators',
+            )
+            if field in request.data
+        ]
+        logger.info(
+            "Interface run request received: trace_id=%s project_id=%s interface_id=%s "
+            "name=%s type=%s method=%s url=%s environment_id=%s body_source=%s "
+            "db_body_summary=%s request_override_fields=%s "
+            "request_body_override_present=%s ignored_by_run_endpoint=%s "
+            "request_body_override_summary=%s",
+            trace_id,
+            interface.project_id,
+            interface.id,
+            interface.name,
+            interface.type,
+            interface_data.get('method'),
+            interface_data.get('url'),
+            environment_id,
+            interface_data['body_source'],
+            summarize_for_log(interface_data.get('body')),
+            override_fields,
+            'body' in request.data,
+            bool(override_fields),
+            summarize_for_log(request.data.get('body')) if 'body' in request.data else None,
+        )
 
         if environment:
             interface_data['base_url'] = getattr(environment, 'base_url', '') or ''
@@ -103,11 +135,11 @@ class ApiInterfaceViewSet(BaseModelViewSet):
             if env_config.get('db_config') and interface_type == 'sql':
                 runner.interface_data['db_config'] = env_config['db_config']
 
-            runner.run_interface()
+            runner.run_interface(env_config)
             response_data = runner.get_response()
 
             # Save result
-            ApiInterfaceResult.objects.create(
+            interface_result = ApiInterfaceResult.objects.create(
                 interface=interface,
                 environment_id=environment_id,
                 success=response_data.get('success', False),
@@ -117,6 +149,20 @@ class ApiInterfaceViewSet(BaseModelViewSet):
                 validation_results=response_data.get('validation_results', []),
                 extracted_variables=response_data.get('extracted_variables', {}),
                 executed_by=request.user,
+            )
+            request_body = response_data.get('request', {}).get('body')
+            status_code = response_data.get('status_code')
+            logger.info(
+                "Interface run result saved: trace_id=%s result_id=%s interface_id=%s "
+                "status_code=%s success=%s recorded_request_body_summary=%s "
+                "transport_failure_record_body_may_be_empty=%s",
+                trace_id,
+                interface_result.id,
+                interface.id,
+                status_code,
+                response_data.get('success', False),
+                summarize_for_log(request_body),
+                status_code == 0 and request_body is None,
             )
 
             return Response(response_data)
@@ -197,6 +243,8 @@ class ApiInterfaceViewSet(BaseModelViewSet):
             'name': request.data.get('name', 'Quick Debug'),
             'type': interface_type,
             'project_id': int(project_pk),
+            'trace_id': new_trace_id('ifc-debug'),
+            'body_source': 'request_payload',
             'setup_hooks': request.data.get('setup_hooks', []),
             'teardown_hooks': request.data.get('teardown_hooks', []),
             'variables': request.data.get('variables', {}),
@@ -220,6 +268,20 @@ class ApiInterfaceViewSet(BaseModelViewSet):
                 'size': request.data.get('sql_size', 10),
             })
 
+        logger.info(
+            "Interface quick_debug request received: trace_id=%s project_id=%s "
+            "type=%s method=%s url=%s environment_id=%s body_source=%s "
+            "request_body_summary=%s",
+            interface_data['trace_id'],
+            project_pk,
+            interface_type,
+            interface_data.get('method'),
+            interface_data.get('url'),
+            environment_id,
+            interface_data['body_source'],
+            summarize_for_log(interface_data.get('body')),
+        )
+
         if environment:
             interface_data['base_url'] = getattr(environment, 'base_url', '') or ''
             interface_data['verify'] = getattr(environment, 'verify_ssl', None)
@@ -234,8 +296,20 @@ class ApiInterfaceViewSet(BaseModelViewSet):
             if env_config.get('db_config') and interface_type == 'sql':
                 runner.interface_data['db_config'] = env_config['db_config']
 
-            runner.run_interface()
+            runner.run_interface(env_config)
             response_data = runner.get_response()
+            request_body = response_data.get('request', {}).get('body')
+            status_code = response_data.get('status_code')
+            logger.info(
+                "Interface quick_debug result generated: trace_id=%s status_code=%s "
+                "success=%s recorded_request_body_summary=%s "
+                "transport_failure_record_body_may_be_empty=%s",
+                interface_data['trace_id'],
+                status_code,
+                response_data.get('success', False),
+                summarize_for_log(request_body),
+                status_code == 0 and request_body is None,
+            )
 
             return Response(response_data)
 

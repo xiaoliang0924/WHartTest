@@ -87,7 +87,7 @@ export type TagStatistics = { tag_id: number; tag_name: string; count: number; [
 export type Group = ApiTestCaseGroup;
 export type Variable = { key: string; value: any; description?: string; [key: string]: any };
 export type TestCaseBasicInfo = { id: number; name: string; description: string; priority: TestCasePriority; group: number | null; tags: number[]; [key: string]: any };
-export type TestCaseConfigData = { export: any[]; verify: boolean; base_url: string; variables: any[]; parameters: any[]; [key: string]: any };
+export type TestCaseConfigData = { export: any[]; verify?: boolean; base_url: string; variables: any[]; parameters: any[]; [key: string]: any };
 export type TestCaseHistoryReport = {
   id: number;
   name: string;

@@ -53,6 +53,31 @@ const completeContent = computed(() => {
   return JSON.stringify(props.response, null, 2)
 })
 
+const inferValueType = (value: any, explicitType?: string) => {
+  if (explicitType) return explicitType
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'list'
+  if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'float'
+  if (typeof value === 'string') return 'str'
+  if (typeof value === 'boolean') return 'bool'
+  if (typeof value === 'object') return 'dict'
+  if (value === undefined) return 'undefined'
+  return typeof value
+}
+
+const formatValidationValue = (value: any) => {
+  if (value === null) return 'null'
+  if (value === undefined) return 'undefined'
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
+}
+
 const responseActiveTab = ref('response')
 </script>
 
@@ -135,12 +160,18 @@ const responseActiveTab = ref('response')
                   <div class="ml-1 flex flex-col gap-2">
                     <div class="flex flex-col gap-1">
                       <div class="response-summary-text text-sm">{{ tl('实际值:') }}
-                        <span class="response-code-text font-mono">{{ result.check_value }}</span>
+                        <span class="response-code-text font-mono">{{ formatValidationValue(result.check_value) }}</span>
+                        <a-tag size="small" color="arcoblue" class="validation-type-tag">
+                          {{ inferValueType(result.check_value, result.check_value_type) }}
+                        </a-tag>
                       </div>
                     </div>
                     <div class="flex flex-col gap-1">
                       <div class="response-summary-text text-sm">{{ tl('期望值:') }}
-                        <span class="response-code-text font-mono">{{ result.expect_value }}</span>
+                        <span class="response-code-text font-mono">{{ formatValidationValue(result.expect_value) }}</span>
+                        <a-tag size="small" color="arcoblue" class="validation-type-tag">
+                          {{ inferValueType(result.expect_value, result.expect_value_type) }}
+                        </a-tag>
                       </div>
                     </div>
                     <div v-if="result.message" class="mt-1 text-red-400 text-sm">{{ result.message }}</div>
@@ -300,6 +331,10 @@ const responseActiveTab = ref('response')
 
 .response-code-text {
   color: var(--tcf-text-muted) !important;
+}
+
+.validation-type-tag {
+  @apply ml-2 align-middle;
 }
 
 .response-var-item {

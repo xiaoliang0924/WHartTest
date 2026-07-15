@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from django.utils import timezone
 from django.db import transaction
+from api_interfaces.logging_utils import summarize_for_log
 from .models import ApiTestCase, ApiTestCaseStep, ApiTestReport, ApiTestReportDetail
 from .runner import TestCaseRunner
 from wharttest_django.notification_service import notify_api_test_report
@@ -90,6 +91,52 @@ class TestExecutionService:
     """Test execution service class."""
 
     @staticmethod
+    def _coerce_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {'true', '1', 'yes', 'on'}:
+                return True
+            if normalized in {'false', '0', 'no', 'off'}:
+                return False
+        return None
+
+    @staticmethod
+    def _resolve_verify(config: Dict, environment: Dict) -> bool:
+        case_verify = TestExecutionService._coerce_bool(config.get('verify'))
+        if case_verify is not None:
+            return case_verify
+
+        env_verify = None
+        if 'verify_ssl' in environment:
+            env_verify = TestExecutionService._coerce_bool(environment.get('verify_ssl'))
+        elif 'verify' in environment:
+            env_verify = TestExecutionService._coerce_bool(environment.get('verify'))
+
+        if env_verify is not None:
+            return env_verify
+
+        return False
+
+    @staticmethod
+    def _resolve_verify_source(config: Dict, environment: Dict) -> str:
+        if TestExecutionService._coerce_bool(config.get('verify')) is not None:
+            return 'testcase'
+
+        if 'verify_ssl' in environment:
+            env_verify = TestExecutionService._coerce_bool(environment.get('verify_ssl'))
+        elif 'verify' in environment:
+            env_verify = TestExecutionService._coerce_bool(environment.get('verify'))
+        else:
+            env_verify = None
+
+        if env_verify is not None:
+            return 'environment'
+
+        return 'default'
+
+    @staticmethod
     def _prepare_config(config: Dict, environment: Optional[Dict] = None) -> Dict:
         if not isinstance(config, dict):
             config = {}
@@ -137,7 +184,7 @@ class TestExecutionService:
 
         return {
             "base_url": config.get('base_url') or environment.get('base_url', ''),
-            "verify": config.get('verify', environment.get('verify_ssl', True)),
+            "verify": TestExecutionService._resolve_verify(config, environment),
             "variables": {**env_variables, **case_variables},
             "export": config.get('export', []),
             "parameters": case_parameters
@@ -150,14 +197,30 @@ class TestExecutionService:
         user=None,
         notify: bool = True,
     ) -> ApiTestReport:
+        source_config = testcase.config if isinstance(testcase.config, dict) else {}
+        source_environment = environment if isinstance(environment, dict) else {}
+        verify_source = TestExecutionService._resolve_verify_source(
+            source_config,
+            source_environment,
+        )
         config = TestExecutionService._prepare_config(testcase.config, environment)
         testcase.config = config
+        testcase._case_verify_explicit = verify_source == 'testcase'
 
         runner = TestCaseRunner(testcase)
         runner.run_testcase(environment)
 
         summary = runner.get_summary()
-        step_results = runner.get_step_results()
+        step_results = summary.get('step_results', [])
+        logger.info(
+            "Testcase execution summary generated: trace_id=%s testcase_id=%s "
+            "testcase_name=%s success=%s step_count=%s",
+            runner.trace_id,
+            testcase.id,
+            testcase.name,
+            summary['success'],
+            len(step_results),
+        )
 
         with transaction.atomic():
             report = ApiTestReport.objects.create(
@@ -171,6 +234,16 @@ class TestExecutionService:
                 testcase=testcase,
                 executed_by=user,
                 environment_id=environment.get('id') if environment else None
+            )
+            logger.info(
+                "Testcase report saved: trace_id=%s report_id=%s testcase_id=%s "
+                "status=%s success_count=%s fail_count=%s",
+                runner.trace_id,
+                report.id,
+                testcase.id,
+                report.status,
+                report.success_count,
+                report.fail_count,
             )
 
             steps_by_order = {step.order: step for step in testcase.steps.all()}
@@ -198,8 +271,31 @@ class TestExecutionService:
                         extracted_variables=step_result['data']['extracted_variables'],
                         attachment=step_result['attachment']
                     )
+                    request_body = step_result['data']['request'].get('body')
+                    status_code = step_result['data']['response'].get('status_code')
+                    logger.info(
+                        "Testcase report detail saved: trace_id=%s report_id=%s "
+                        "testcase_id=%s step_id=%s step_name=%s status_code=%s "
+                        "success=%s recorded_request_body_summary=%s "
+                        "transport_failure_record_body_may_be_empty=%s",
+                        runner.trace_id,
+                        report.id,
+                        testcase.id,
+                        step.id,
+                        step.name,
+                        status_code,
+                        step_success,
+                        summarize_for_log(request_body),
+                        status_code == 0 and request_body is None,
+                    )
                 except Exception as e:
-                    logger.error(f"Failed to create test report detail: {str(e)}")
+                    logger.error(
+                        "Failed to create test report detail: trace_id=%s "
+                        "testcase_id=%s error=%s",
+                        runner.trace_id,
+                        testcase.id,
+                        str(e),
+                    )
                     continue
 
         if notify and not _suppress_testcase_notification.get():

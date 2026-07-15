@@ -268,6 +268,8 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
     def _create_step(self, instance, step_data, order):
         from api_interfaces.models import ApiInterface
 
+        step_data.pop('id', None)
+        step_data.pop('step_id', None)
         interface_id = step_data.pop('interface_id')
         project_pk = self._get_project_pk()
         interface = ApiInterface.objects.get(id=interface_id, project_id=project_pk)
@@ -300,6 +302,43 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
         self._create_sync_config(step, interface)
         return step
 
+    def _update_step(self, step, step_data):
+        from api_interfaces.models import ApiInterface
+
+        update_data = step_data.copy()
+        update_data.pop('id', None)
+        update_data.pop('step_id', None)
+        update_data.pop('order', None)
+
+        interface_id = update_data.pop('interface_id', None)
+        user_interface_data = update_data.pop('interface_data', None)
+
+        if interface_id:
+            project_pk = self._get_project_pk()
+            interface = ApiInterface.objects.get(id=interface_id, project_id=project_pk)
+            interface_data = self._build_interface_data(interface)
+            if isinstance(user_interface_data, dict):
+                interface_data.update(user_interface_data)
+            step.interface_data = interface_data
+            step.origin_interface = interface
+        elif user_interface_data is not None:
+            current_data = step.interface_data or {}
+            if isinstance(current_data, dict) and isinstance(user_interface_data, dict):
+                current_data.update(user_interface_data)
+                step.interface_data = current_data
+            else:
+                step.interface_data = user_interface_data
+
+        if 'name' in update_data:
+            step.name = update_data['name']
+        if 'sync_fields' in update_data:
+            step.sync_fields = update_data['sync_fields']
+        if 'config' in update_data:
+            step.config = update_data['config']
+
+        step.save()
+        return step
+
     def create(self, validated_data):
         steps_info = validated_data.pop('steps_info', [])
         validated_data['created_by'] = self.context['request'].user
@@ -327,13 +366,23 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
         instance = super().update(instance, validated_data)
 
         if steps_info is not None:
-            from api_interfaces.models import ApiInterface
-
             with transaction.atomic():
                 existing_steps = {step.order: step for step in instance.steps.all()}
+                existing_steps_by_id = {step.id: step for step in instance.steps.all()}
                 existing_orders = set(existing_steps.keys())
 
                 for step_data in steps_info:
+                    step_id = step_data.get('id') or step_data.get('step_id')
+                    if step_id:
+                        try:
+                            step_id = int(step_id)
+                        except (TypeError, ValueError):
+                            step_id = None
+
+                    if step_id and step_id in existing_steps_by_id:
+                        self._update_step(existing_steps_by_id[step_id], step_data)
+                        continue
+
                     if 'order' not in step_data:
                         max_order = max(existing_orders) if existing_orders else 0
                         step_data['order'] = max_order + 1
@@ -347,51 +396,9 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
                             and existing_step.origin_interface
                             and existing_step.origin_interface.id == step_data['interface_id']
                         )
-                        is_same_name = step_data.get('name') == existing_step.name
 
-                        if is_same_interface and is_same_name:
-                            continue
-
-                        if update_mode == 'update':
-                            update_data = step_data.copy()
-                            interface_id = update_data.pop('interface_id', None)
-
-                            if interface_id:
-                                project_pk = self._get_project_pk()
-                                interface = ApiInterface.objects.get(id=interface_id, project_id=project_pk)
-                                current_data = existing_step.interface_data or {}
-                                user_interface_data = update_data.pop('interface_data', {})
-
-                                if user_interface_data:
-                                    interface_data = self._build_interface_data(interface)
-                                    interface_data.update({
-                                        'extract': user_interface_data.get('extract', current_data.get('extract', {})),
-                                        'variables': user_interface_data.get('variables', current_data.get('variables', {})),
-                                        'validators': user_interface_data.get('validators', current_data.get('validators', [])),
-                                        'setup_hooks': user_interface_data.get('setup_hooks', current_data.get('setup_hooks', [])),
-                                        'teardown_hooks': user_interface_data.get('teardown_hooks', current_data.get('teardown_hooks', []))
-                                    })
-                                else:
-                                    interface_data = self._build_interface_data(interface)
-                                    interface_data.update({
-                                        'extract': current_data.get('extract', {}),
-                                        'variables': current_data.get('variables', {}),
-                                        'validators': current_data.get('validators', []),
-                                        'setup_hooks': current_data.get('setup_hooks', []),
-                                        'teardown_hooks': current_data.get('teardown_hooks', [])
-                                    })
-
-                                existing_step.interface_data = interface_data
-                                existing_step.origin_interface = interface
-
-                            if 'name' in update_data:
-                                existing_step.name = update_data['name']
-                            if 'sync_fields' in update_data:
-                                existing_step.sync_fields = update_data['sync_fields']
-                            if 'config' in update_data:
-                                existing_step.config = update_data['config']
-
-                            existing_step.save()
+                        if update_mode == 'update' or is_same_interface:
+                            self._update_step(existing_step, step_data)
                             continue
 
                         # Auto mode: adjust ordering for conflict

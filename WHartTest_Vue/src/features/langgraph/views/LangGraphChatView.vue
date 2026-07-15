@@ -9,6 +9,7 @@
       @switch-session="switchSession"
       @delete-session="deleteSession"
       @batch-delete-sessions="batchDeleteSessions"
+      @rename-session="renameSession"
     />
 
     <!-- 右侧聊天区域 -->
@@ -168,6 +169,7 @@ import {
   rollbackChatHistory,
   batchDeleteChatHistory,
   getChatSessions,
+  renameChatSession,
   activeStreams,
   clearStreamState,
   latestContextUsage,
@@ -412,6 +414,7 @@ const buildHtmlPreviewSrcdoc = (html: string): string => {
 const messages = ref<ChatMessage[]>([]);
 const isLoading = ref(false);
 const sessionId = ref<string>('');
+const isNewSessionCreated = ref(false);
 const chatSessions = ref<ChatSession[]>([]);
 const chatMessagesRef = ref<InstanceType<typeof ChatMessages> | null>(null);
 
@@ -854,9 +857,19 @@ const loadSessionsFromServer = async () => {
               }
             } catch { /* 解析失败时 lastTime 保持 null */ }
           }
+
+          // 🔧 优化体验：如果后端返回的是默认的“新对话...”标题，而我们本地已经有了用户发送消息作为临时标题，我们先保留本地的临时标题
+          let finalTitle = detail.title || pageText.value.untitledChat;
+          if (finalTitle.startsWith("新对话")) {
+            const localSession = chatSessions.value.find(s => s.id === detail.id);
+            if (localSession && !localSession.title.startsWith("新对话")) {
+              finalTitle = localSession.title;
+            }
+          }
+
           return {
             id: detail.id,
-            title: detail.title || pageText.value.untitledChat,
+            title: finalTitle,
             lastTime: lastTime ?? new Date(0),
             messageCount: 0
           };
@@ -880,6 +893,33 @@ const loadSessionsFromServer = async () => {
     Message.error(pageText.value.fetchSessionsFailedRetry);
   } finally {
     safeStopLoading();
+  }
+};
+
+// 轮询会话列表，直到获取到非“新对话”开头的已生成标题（最多重试6次，共12秒）
+const pollSessionTitle = async (sessionIdToPoll: string, retryCount = 0) => {
+  if (retryCount >= 6 || !projectStore.currentProjectId) return;
+
+  try {
+    const response = await getChatSessions(projectStore.currentProjectId);
+    if (response.status === 'success' && response.data) {
+      const sessionsDetail = response.data.sessions_detail || [];
+      const targetSession = sessionsDetail.find(s => s.id === sessionIdToPoll);
+
+      if (targetSession) {
+        if (targetSession.title && targetSession.title.startsWith("新对话")) {
+          // 仍然是默认的“新对话...”，说明后台大模型还没生成完标题，2秒后继续轮询
+          setTimeout(async () => {
+            await pollSessionTitle(sessionIdToPoll, retryCount + 1);
+          }, 2000);
+        } else {
+          // 标题已成功改变，更新并渲染侧边栏列表
+          await loadSessionsFromServer();
+        }
+      }
+    }
+  } catch (error) {
+    console.error('轮询会话标题失败:', error);
   }
 };
 
@@ -1577,6 +1617,7 @@ const createNewChat = () => {
 
   // 清除当前会话ID和消息
   sessionId.value = '';
+  isNewSessionCreated.value = false;
   localStorage.removeItem('langgraph_session_id');
   messages.value = [];
 };
@@ -1628,6 +1669,36 @@ const deleteSession = async (id: string) => {
       }
     },
   });
+};
+
+// 修改指定会话标题
+const renameSession = async (id: string, newTitle: string) => {
+  try {
+    if (!projectStore.currentProjectId) {
+      Message.error(pageText.value.noProjectCannotDeleteSession || '项目ID缺失，无法修改标题');
+      return;
+    }
+
+    isLoading.value = true;
+    const response = await renameChatSession(id, projectStore.currentProjectId, newTitle);
+
+    if (response.status === 'success' && response.data) {
+      // 成功，更新本地列表中的标题
+      const targetSession = chatSessions.value.find(s => s.id === id);
+      if (targetSession) {
+        targetSession.title = response.data.title;
+      }
+      saveSessionsToStorage();
+      Message.success(isEnglish.value ? 'Title updated successfully' : '修改会话标题成功');
+    } else {
+      Message.error(isEnglish.value ? 'Failed to update title' : '修改会话标题失败');
+    }
+  } catch (error) {
+    console.error('修改会话标题失败:', error);
+    Message.error(isEnglish.value ? 'Failed to update title, please try again' : '修改会话标题失败，请稍后重试');
+  } finally {
+    safeStopLoading();
+  }
 };
 
 // 批量删除会话
@@ -1810,6 +1881,11 @@ const handleSendMessage = async (data: {
     return;
   }
 
+  const isNew = !sessionId.value;
+  if (isNew) {
+    isNewSessionCreated.value = true;
+  }
+
   if (isStreamMode.value) {
     // 流式模式（传递用户消息用于立即创建会话标题）
     await handleStreamMessage(requestData, message);
@@ -1968,7 +2044,13 @@ const handleNormalMessage = async (requestData: ChatRequest, originalMessage: st
       // 保存会话ID
       if (data.session_id) {
         saveSessionId(data.session_id);
-        updateSessionInList(data.session_id, originalMessage, true);
+        updateSessionInList(data.session_id, data.session_title || originalMessage, true);
+        
+        // 🔧 异步延迟拉取：如果是新创建的会话，启动轮询直到标题总结完成
+        if (isNewSessionCreated.value) {
+          isNewSessionCreated.value = false;
+          pollSessionTitle(data.session_id);
+        }
       }
 
       // 更新 Token 使用信息
@@ -2256,15 +2338,14 @@ watch(
       // 🔧 流完成后立即固化内容到messages.value，避免清理后内容丢失
       solidifyStreamContent();
 
-      // 更新会话列表
+      // 更新会话列表并获取最新的 AI 总结标题
       if (currentSessionId) {
-        const existingSession = chatSessions.value.find(s => s.id === currentSessionId);
-        if (!existingSession) {
-          // 获取用户第一条消息作为标题
-          const firstUserMsg = messages.value.find(m => m.isUser);
-          if (firstUserMsg) {
-            updateSessionInList(currentSessionId, firstUserMsg.content, true);
-          }
+        await loadSessionsFromServer();
+        
+        // 🔧 异步延迟拉取：如果是新创建的会话，启动轮询直到标题总结完成
+        if (isNewSessionCreated.value) {
+          isNewSessionCreated.value = false;
+          pollSessionTitle(currentSessionId);
         }
       }
 

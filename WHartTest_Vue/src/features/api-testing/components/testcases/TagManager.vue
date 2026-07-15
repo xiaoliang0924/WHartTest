@@ -3,6 +3,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { IconTag, IconPlus, IconEdit, IconDelete } from '@arco-design/web-vue/es/icon'
 import { testcaseTagService } from '../../services/testcaseTagService'
+import { toArray } from '../../services/responseHelpers'
 import type { ApiTestCaseTag } from '../../types/testcase'
 
 interface Props {
@@ -106,7 +107,7 @@ const loadTags = async (search?: string) => {
     if (search) params.search = search
     const res = await testcaseTagService.list(props.projectId, params)
     if (res.success && res.data) {
-      tagList.value = Array.isArray(res.data) ? res.data : (res.data as any).results || []
+      tagList.value = toArray<ApiTestCaseTag>((res.data as any)?.results ?? res.data)
     }
   } catch (error) {
     console.error('Failed to load tags:', error)
@@ -120,7 +121,7 @@ const loadTagStats = async () => {
   try {
     const res = await testcaseTagService.statistics(props.projectId)
     if (res.success && res.data) {
-      tagStats.value = Array.isArray(res.data) ? res.data : []
+      tagStats.value = toArray((res.data as any)?.results ?? res.data)
     }
   } catch (error) {
     console.error('Failed to load tag statistics:', error)

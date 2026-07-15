@@ -5,6 +5,7 @@ import { Message } from '@arco-design/web-vue'
 import { useThemeStore } from '@/store/themeStore'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { getTestTaskExecutions, cancelTestTaskExecution, type TestTaskExecution } from '../../services/testTaskService'
+import { toArray } from '../../services/responseHelpers'
 
 const route = useRoute()
 const router = useRouter()
@@ -89,7 +90,7 @@ const fetchExecutionHistory = async () => {
       ordering: '-created_at'
     })
 
-    executions.value = response.data.results || []
+    executions.value = toArray<TestTaskExecution>(response.data?.results ?? response.data)
     pagination.value.total = response.data.count || 0
 
     // 如果有执行记录，获取任务名称
@@ -120,7 +121,7 @@ const updateExecutionStatus = async () => {
       ordering: '-created_at'
     })
     
-    const newExecutions = response.data.results || []
+    const newExecutions = toArray<TestTaskExecution>(response.data?.results ?? response.data)
     
     // 只更新现有记录的特定字段
     executions.value.forEach((execution, index) => {

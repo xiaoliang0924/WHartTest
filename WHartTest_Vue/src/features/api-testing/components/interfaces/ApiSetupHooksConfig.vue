@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
 import { getFunctions, type Function } from '../../services/functionService'
+import { toArray } from '../../services/responseHelpers'
 import { useProjectStore } from '@/store/projectStore'
 
 interface Props {
@@ -35,7 +36,7 @@ const loadFunctions = async () => {
       page: 1,
       page_size: 100
     })
-    state.value.functions = response.data.results
+    state.value.functions = toArray<Function>(response.data?.results ?? response.data)
     
     // 如果有初始 hooks，设置选中状态
     if (props.hooks && props.hooks.length > 0) {

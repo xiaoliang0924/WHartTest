@@ -116,6 +116,8 @@ export interface UiPageStepsDetailed {
   step_type: StepType
   element?: number | null
   element_name?: string
+  page_name?: string
+  module_name?: string
   step_sort: number
   ope_key?: string
   ope_value?: Record<string, unknown>
@@ -164,6 +166,8 @@ export interface UiCaseStepsDetailed {
   test_case: number
   page_step: number
   page_step_name?: string
+  page_name?: string
+  module_name?: string
   case_sort: number
   case_data?: Record<string, unknown>
   case_cache_data?: Record<string, unknown>
@@ -352,7 +356,9 @@ export interface UiEnvironmentConfig extends TimeStampFields {
   timeout: number
   db_c_status: boolean
   db_rud_status: boolean
+  db_type: 'mysql' | 'db2'
   mysql_config?: Record<string, unknown>
+  db2_config?: Record<string, unknown>
   extra_config?: Record<string, unknown>
   is_default: boolean
   creator: number | null

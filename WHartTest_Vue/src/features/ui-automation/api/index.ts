@@ -47,6 +47,9 @@ export const moduleApi = {
     request.patch<UiModule>(`${BASE_URL}/modules/${id}/`, data),
 
   delete: (id: number) => request.delete(`${BASE_URL}/modules/${id}/`),
+
+  move: (id: number, data: { target_id: number | null; drop_position: number }) =>
+    request.post<UiModule>(`${BASE_URL}/modules/${id}/move/`, data),
 }
 
 // ==================== 页面管理 ====================

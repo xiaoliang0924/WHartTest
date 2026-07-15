@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed, onBeforeUnmount } from 'vue'
 import { getFunctions, type Function } from '../../services/functionService'
+import { toArray } from '../../services/responseHelpers'
 import { useProjectStore } from '@/store/projectStore'
 import ApiSqlHookEditor from './ApiSqlHookEditor.vue'
 import { onClickOutside } from '@vueuse/core'
@@ -85,7 +86,7 @@ const loadFunctions = async () => {
       page: 1,
       page_size: 100
     })
-    state.value.functions = response.data.results
+    state.value.functions = toArray<FunctionItem>(response.data?.results ?? response.data)
 
     // 如果有初始 hooks，设置选中状态
     if (props.hooks && props.hooks.length > 0) {
@@ -335,14 +336,7 @@ const addSqlHook = async () => {
     const { getDatabaseConfigs } = await import('../../services/databaseConfigService');
     const response = await getDatabaseConfigs(projectId);
 
-    let dbConfigs = [];
-    if (response.data && Array.isArray(response.data.results)) {
-      dbConfigs = response.data.results;
-    } else if (response.data && Array.isArray(response.data.data)) {
-      dbConfigs = response.data.data;
-    } else if (Array.isArray(response.data)) {
-      dbConfigs = response.data;
-    }
+    const dbConfigs = toArray(response.data?.results ?? response.data);
 
     if (dbConfigs.length === 0) {
       Message.warning('未找到可用的数据库配置，请先在环境管理中添加');
