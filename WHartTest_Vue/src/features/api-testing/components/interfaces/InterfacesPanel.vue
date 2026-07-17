@@ -3,9 +3,9 @@ import { ref, onMounted, watch, computed, nextTick, provide } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
 import type { FormInstance } from '@arco-design/web-vue'
 import { useProjectStore } from '@/store/projectStore'
-import { IconPlus, IconSearch, IconFolder, IconEdit, IconDelete, IconList, IconApps, IconInfoCircle, IconSend } from '@arco-design/web-vue/es/icon'
+import { IconPlus, IconSearch, IconFolder, IconEdit, IconDelete, IconList, IconApps, IconInfoCircle, IconSend, IconCopy } from '@arco-design/web-vue/es/icon'
 import type { ApiModule, PaginatedData, ApiInterface } from '../../services/interfaceService'
-import { getInterfaces, getInterfaceById, deleteInterface } from '../../services/interfaceService'
+import { getInterfaces, getInterfaceById, deleteInterface, duplicateInterface } from '../../services/interfaceService'
 import { getModules, createModule, updateModule, deleteModule, moveModule } from '../../services/moduleService'
 import { toArray } from '../../services/responseHelpers'
 import ApiDetail from './ApiDetail.vue'
@@ -16,10 +16,12 @@ import ApiInterfaceList from './ApiInterfaceList.vue'
 import ApiInterfacePagination from './ApiInterfacePagination.vue'
 import { useApiTabsStore } from '../../stores/apiTabsStore'
 import { useThemeStore } from '@/store/themeStore'
+import { useAppI18n } from '@/composables/useAppI18n'
 
 const projectStore = useProjectStore()
 const tabsStore = useApiTabsStore()
 const themeStore = useThemeStore()
+const { isEnglish, tl } = useAppI18n()
 const loading = ref(false)
 const formLoading = ref(false)
 const apis = ref<ApiModule[]>([])
@@ -35,6 +37,45 @@ const hasNoModuleInterfaces = ref(false)
 // 自动调试标志
 const autoDebug = ref(false)
 const isDarkTheme = computed(() => themeStore.isBlack)
+const containsChinese = (value: string) => /[\u4e00-\u9fff]/.test(value)
+const translateErrorMessage = (message: unknown) => {
+  if (typeof message !== 'string' || !message.trim()) {
+    return null
+  }
+  const translated = tl(message)
+  if (isEnglish.value && translated === message && containsChinese(message)) {
+    return null
+  }
+  return translated
+}
+const moduleText = computed(() => isEnglish.value
+  ? {
+      createSuccess: 'Module created successfully',
+      updateSuccess: 'Module updated successfully',
+      createFailed: 'Failed to create module',
+      updateFailed: 'Failed to update module',
+      deleteSuccess: 'Module deleted successfully',
+      deleteFailed: 'Failed to delete module',
+      deleteConfirmTitle: 'Confirm deletion',
+      deleteConfirmContent: (name: string) => `Delete module "${name}"? All interfaces in this module will also be deleted, and this action cannot be undone.`,
+      confirm: 'Confirm',
+      cancel: 'Cancel',
+      selectProjectFirst: 'Select a project first',
+    }
+  : {
+      createSuccess: '创建模块成功',
+      updateSuccess: '更新模块成功',
+      createFailed: '创建模块失败',
+      updateFailed: '更新模块失败',
+      deleteSuccess: '删除模块成功',
+      deleteFailed: '删除模块失败',
+      deleteConfirmTitle: '确认删除',
+      deleteConfirmContent: (name: string) => `确定要删除模块"${name}"吗？删除后将同时删除该模块下的所有接口，且不可恢复。`,
+      confirm: '确定',
+      cancel: '取消',
+      selectProjectFirst: '请先选择项目',
+    }
+)
 
 // 视图模式控制
 // 模块树显示模式: 'list' - 列表模式（不显示接口）, 'detail' - 详情模式（显示接口）
@@ -363,7 +404,7 @@ const handleOpenEditForm = (module: ApiModule) => {
 // 处理表单提交
 const handleFormSubmit = async (formData: any) => {
   if (!projectStore.currentProjectId) {
-    Message.warning('请先选择项目')
+    Message.warning(moduleText.value.selectProjectFirst)
     return
   }
 
@@ -375,15 +416,18 @@ const handleFormSubmit = async (formData: any) => {
         project: Number(projectStore.currentProjectId)
       }
       await createModule(data)
-      Message.success('创建模块成功')
+      Message.success(moduleText.value.createSuccess)
     } else {
       await updateModule(currentModule.value!.id, formData)
-      Message.success('更新模块成功')
+      Message.success(moduleText.value.updateSuccess)
     }
     formVisible.value = false
     fetchApiModules()
   } catch (error: any) {
-    Message.error(error.message || `${formType.value === 'create' ? '创建' : '更新'}模块失败`)
+    Message.error(
+      translateErrorMessage(error.message)
+      || (formType.value === 'create' ? moduleText.value.createFailed : moduleText.value.updateFailed)
+    )
   } finally {
     formLoading.value = false
   }
@@ -392,11 +436,11 @@ const handleFormSubmit = async (formData: any) => {
 // 删除模块
 const handleDelete = async (module: ApiModule) => {
   Modal.error({
-    title: '确认删除',
-    content: `确定要删除模块"${module.name}"吗？删除后将同时删除该模块下的所有接口，且不可恢复。`,
+    title: moduleText.value.deleteConfirmTitle,
+    content: moduleText.value.deleteConfirmContent(module.name),
     hideCancel: false,
-    okText: '确定',
-    cancelText: '取消',
+    okText: moduleText.value.confirm,
+    cancelText: moduleText.value.cancel,
     okButtonProps: {
       status: 'danger'
     },
@@ -408,7 +452,7 @@ const handleDelete = async (module: ApiModule) => {
         const deletedInterfaceIds = Array.isArray(response.data?.deleted_interface_ids)
           ? response.data.deleted_interface_ids.filter((id): id is number => Number.isInteger(id))
           : []
-        Message.success('删除模块成功')
+        Message.success(moduleText.value.deleteSuccess)
 
         removeInterfacesFromLocalLists(deletedInterfaceIds)
 
@@ -449,7 +493,7 @@ const handleDelete = async (module: ApiModule) => {
           fetchInterfaceListForDisplay()
         ])
       } catch (error: any) {
-        Message.error(error.message || '删除模块失败')
+        Message.error(translateErrorMessage(error.message) || moduleText.value.deleteFailed)
       } finally {
         formLoading.value = false
       }
@@ -525,6 +569,52 @@ const removeInterfacesFromLocalLists = (interfaceIds: number[]) => {
 }
 
 // 删除接口
+
+// 复制接口
+const handleCopyInterface = async (api: ApiInterface) => {
+  if (!api.id) return
+
+  try {
+    loading.value = true
+    const response = await duplicateInterface(api.id)
+    const copiedInterface = response.data
+    Message.success('复制接口成功')
+
+    // 复制后同步刷新模块树、当前模块接口列表、无模块分组数量和右侧分页列表
+    await fetchApiModules()
+
+    if (copiedInterface?.module) {
+      if (!expandedIds.value.includes(copiedInterface.module)) {
+        expandedIds.value.push(copiedInterface.module)
+      }
+      await fetchInterfaces(copiedInterface.module)
+
+      // ModuleTree 子组件内部也有接口列表缓存，通过重置展开状态触发子组件重新拉取
+      const expandedIndex = expandedIds.value.indexOf(copiedInterface.module)
+      if (expandedIndex > -1) {
+        expandedIds.value.splice(expandedIndex, 1)
+        nextTick(() => {
+          expandedIds.value.push(copiedInterface.module)
+        })
+      }
+    } else {
+      await fetchNoModuleInterfaces()
+    }
+
+    await fetchInterfaceListForDisplay()
+
+    if (copiedInterface) {
+      selectedInterface.value = copiedInterface
+      tabsStore.openOrActivateInterface(copiedInterface)
+      viewMode.value = 'detail'
+    }
+  } catch (error: any) {
+    Message.error(error.message || '复制接口失败')
+  } finally {
+    loading.value = false
+  }
+}
+
 const handleDeleteInterface = (api: ApiInterface) => {
   const modalLoading = ref(false)
 
@@ -818,8 +908,7 @@ watch(
     noModuleInterfaces.value = []
     hasNoModuleInterfaces.value = false
     expandedIds.value = []
-    // 根据treeDisplayMode决定viewMode的默认值
-    viewMode.value = treeDisplayMode.value === 'detail' ? 'detail' : 'list'
+    viewMode.value = 'detail'
     pagination.value.page = 1
     fetchInterfaceListForDisplay()
   }
@@ -923,13 +1012,35 @@ onMounted(async () => {
       const activeTab = tabsStore.tabs.find(t => t.id === tabsStore.activeTabId)
       if (activeTab?.interfaceId) {
         try {
-          const response = await getInterfaceById(activeTab.interfaceId)
-          if (response.data) {
-            selectedInterface.value = response.data
+          const { data } = await getInterfaces({
+            project_id: Number(projectStore.currentProjectId),
+            page_size: 1000
+          })
+          const restoredInterface = (data?.results || [])
+            .find(api => api.id === activeTab.interfaceId)
+          if (restoredInterface) {
+            selectedInterface.value = {
+              ...restoredInterface,
+              params: activeTab.params || restoredInterface.params,
+              headers: activeTab.headers || restoredInterface.headers,
+              body: activeTab.body || restoredInterface.body,
+              setup_hooks: activeTab.setupHooks || restoredInterface.setup_hooks,
+              teardown_hooks: activeTab.teardownHooks || restoredInterface.teardown_hooks,
+              extract: activeTab.extractRules || restoredInterface.extract,
+              extract_meta: activeTab.extractMeta || restoredInterface.extract_meta,
+              validators: activeTab.assertRules || restoredInterface.validators
+            }
             viewMode.value = 'detail'
+          } else {
+            tabsStore.removeTab(activeTab.id)
+            selectedInterface.value = undefined
+            viewMode.value = 'list'
           }
         } catch {
           // 接口可能已删除，忽略
+          tabsStore.removeTab(activeTab.id)
+          selectedInterface.value = undefined
+          viewMode.value = 'list'
         }
       }
     }
@@ -949,28 +1060,6 @@ watch(() => tabsStore.tabs, () => {
       <div class="flex-1 bg-gray-800 rounded-lg shadow-lg overflow-hidden flex flex-col">
         <!-- 顶部标题和搜索栏 -->
         <div class="p-4 border-b border-gray-700/50 flex-shrink-0">
-          <!-- 模式切换按钮 -->
-          <div class="flex justify-center items-center gap-2 mb-4">
-            <span class="text-xs text-gray-400">列表</span>
-            <a-switch
-              v-model="treeDisplayMode"
-              checked-value="detail"
-              unchecked-value="list"
-              @change="(val: string | number | boolean) => { viewMode = val === 'detail' ? 'detail' : 'list' }"
-            >
-              <template #checked>
-                <icon-apps :size="14" />
-              </template>
-              <template #unchecked>
-                <icon-list :size="14" />
-              </template>
-            </a-switch>
-            <span class="text-xs text-gray-400">详情</span>
-            <a-tooltip content="列表模式：点击模块显示接口列表；详情模式：展开显示模块下的接口" position="right">
-              <icon-info-circle class="text-gray-400 cursor-help" :size="14" />
-            </a-tooltip>
-          </div>
-
           <div class="flex justify-between items-center mb-4">
             <h2 class="text-lg font-medium text-gray-100">模块列表</h2>
             <div class="flex items-center gap-2">
@@ -1067,6 +1156,15 @@ watch(() => tabsStore.tabs, () => {
                                     type="text"
                                     size="mini"
                                     class="!p-0 !text-[#6b7785] hover:!text-[#86909c]"
+                                    @click.stop="handleCopyInterface(api)"
+                                    title="复制接口"
+                                  >
+                                    <template #icon><icon-copy /></template>
+                                  </a-button>
+                                  <a-button
+                                    type="text"
+                                    size="mini"
+                                    class="!p-0 !text-[#6b7785] hover:!text-[#86909c]"
                                     @click.stop="handleDeleteInterface(api)"
                                   >
                                     <template #icon><icon-delete /></template>
@@ -1087,7 +1185,7 @@ watch(() => tabsStore.tabs, () => {
                       :expanded-ids="expandedIds"
                       :selected-id="selectedApi?.id"
                       :form-loading="formLoading"
-                      :display-mode="treeDisplayMode"
+                      display-mode="detail"
                       @select="handleSelectModule"
                       @toggle-expand="handleToggleExpand"
                       @edit="handleOpenEditForm"
@@ -1095,6 +1193,7 @@ watch(() => tabsStore.tabs, () => {
                       @delete="handleDelete"
                       @edit-interface="handleEditInterface"
                       @delete-interface="handleDeleteInterface"
+                      @copy-interface="handleCopyInterface"
                       @run-interface="handleRunInterface"
                       @select-interface="handleSelectInterface"
                     />
@@ -1131,6 +1230,7 @@ watch(() => tabsStore.tabs, () => {
             @interface-select="handleSelectInterface"
             @interface-edit="handleEditInterface"
             @interface-delete="handleDeleteInterface"
+            @interface-copy="handleCopyInterface"
             @interface-run="handleInterfaceRun"
           />
         </div>

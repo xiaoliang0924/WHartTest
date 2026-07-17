@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { TableColumnData } from '@arco-design/web-vue'
 import type { ApiTestCase } from '../../types/testcase'
-import { IconEdit, IconDelete, IconMore } from '@arco-design/web-vue/es/icon'
+import { IconEdit, IconDelete, IconMore, IconCopy } from '@arco-design/web-vue/es/icon'
 
 interface Props {
   data: ApiTestCase[]
@@ -9,7 +9,7 @@ interface Props {
 }
 
 defineProps<Props>()
-const emit = defineEmits(['sort', 'run', 'link', 'report', 'edit', 'delete'])
+const emit = defineEmits(['sort', 'run', 'link', 'report', 'edit', 'copy', 'delete'])
 
 const priorityColors = {
   'P0': 'red',
@@ -125,6 +125,10 @@ const handleEdit = (record: ApiTestCase) => {
   emit('edit', record)
 }
 
+const handleCopy = (record: ApiTestCase) => {
+  emit('copy', record)
+}
+
 const handleDelete = (record: ApiTestCase) => {
   emit('delete', record)
 }
@@ -209,6 +213,10 @@ const handleDelete = (record: ApiTestCase) => {
               <a-doption class="testcase-action-option flex items-center gap-2" @click="handleEdit(record)">
                 <icon-edit />
                 编辑
+              </a-doption>
+              <a-doption class="testcase-action-option flex items-center gap-2" @click="handleCopy(record)">
+                <icon-copy />
+                复制
               </a-doption>
               <a-doption class="testcase-action-option testcase-action-option--danger flex items-center gap-2" @click="handleDelete(record)">
                 <icon-delete />

@@ -104,6 +104,18 @@ If you use the built-in deployment script, it now asks you to choose between **r
 > ⚠️ **Production note**: Log in to the admin panel, delete the default API Key, and create a new secure key.
 
 
+## Common Environment Variables
+
+After copying `.env.example` to `.env`, you can adjust file-management settings as needed:
+
+```env
+# File management: single-file upload size limit in bytes, default 100MB
+FILE_MANAGEMENT_MAX_FILE_SIZE=104857600
+
+# LLM attachments: per-file parsed text character limit; 0 means unlimited. Over-limit files fail with an error and are not truncated.
+FILE_MANAGEMENT_LLM_MAX_CHARS_PER_FILE=0
+```
+
 ## Contact
 
 For questions or suggestions:

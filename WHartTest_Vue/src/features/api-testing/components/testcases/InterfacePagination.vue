@@ -28,6 +28,7 @@ defineEmits(['change', 'page-size-change'])
 .interface-pagination {
   background: var(--asd-panel-bg);
   border-color: var(--asd-panel-border);
+  flex-shrink: 0;
 }
 
 :deep(.arco-pagination) {

@@ -114,6 +114,7 @@ export interface PaginationParams {
   test_type?: string; // 单个测试类型筛选
   test_type_in?: string[]; // 多个测试类型筛选
   include_steps?: boolean; // 是否返回步骤详情，默认列表不返回；思维导图需要传 true
+  ordering?: string; // 排序字段，支持 id/-id/created_at/-created_at/updated_at/-updated_at
 }
 
 // 测试用例列表响应接口
@@ -194,6 +195,7 @@ export const getTestCaseList = async (projectId: number, params?: PaginationPara
         // 多个测试类型筛选，用逗号连接
         test_type_in: params.test_type_in?.join(','),
         include_steps: params.include_steps ? 'true' : undefined,
+        ordering: params.ordering,
       } : undefined,
       headers: {
         'Authorization': `Bearer ${accessToken}`,
@@ -417,6 +419,60 @@ export const updateTestCase = async (
  * @param testCaseId 测试用例ID
  * @returns 返回一个Promise，解析为删除结果
  */
+/**
+ * 复制测试用例
+ * @param projectId 项目ID
+ * @param testCaseId 测试用例ID
+ * @param data 可选复制参数：name 自定义副本名称，target_module_id 目标模块ID
+ */
+export const copyTestCase = async (
+  projectId: number,
+  testCaseId: number,
+  data?: { name?: string; target_module_id?: number | null; module_id?: number | null }
+): Promise<TestCaseResponse> => {
+  const authStore = useAuthStore();
+  const accessToken = authStore.getAccessToken;
+
+  if (!accessToken) {
+    return {
+      success: false,
+      error: '未登录或会话已过期',
+    };
+  }
+
+  try {
+    const response = await axios.post(`${API_BASE_URL}/projects/${projectId}/testcases/${testCaseId}/copy/`, data || {}, {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+    });
+
+    if (response.data && response.data.status === 'success' && response.data.data) {
+      return {
+        success: true,
+        data: response.data.data,
+        message: response.data.message || '测试用例复制成功',
+        statusCode: response.data.code,
+      };
+    }
+
+    return {
+      success: false,
+      error: response.data?.message || '复制测试用例失败：响应数据格式不正确',
+      statusCode: response.data?.code,
+    };
+  } catch (error: any) {
+    console.error('复制测试用例出错:', error);
+    return {
+      success: false,
+      error: error.response?.data?.message || error.message || '复制测试用例时发生错误',
+      statusCode: error.response?.status,
+    };
+  }
+};
+
 export const deleteTestCase = async (projectId: number, testCaseId: number): Promise<OperationResponse> => {
   const authStore = useAuthStore();
   const accessToken = authStore.getAccessToken;

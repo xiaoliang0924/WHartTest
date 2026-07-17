@@ -26,6 +26,7 @@ import UiAutomationView from '@/features/ui-automation/views/UiAutomationView.vu
 import ApiTestingView from '@/features/api-testing/views/ApiTestingView.vue'; // 导入接口自动化页面组件。
 import TraceDetailView from '@/features/ui-automation/views/TraceDetail.vue'; // 导入 UI 自动化 Trace 详情页面组件。
 import TaskCenterView from '@/features/task-center/views/TaskCenterView.vue'; // 导入任务中心视图
+import FileManagementView from '@/features/file-management/views/FileManagementView.vue'; // 导入文件管理页面组件。
 
 const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束为 RouteRecordRaw。
   {
@@ -150,6 +151,23 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
         component: () => import('@/features/api-testing/views/TestCaseCreateView.vue'),
       },
       {
+        path: 'api-testing/interface-cases/create',
+        name: 'ApiInterfaceCaseCreate',
+        component: () => import('@/features/api-testing/views/InterfaceCaseCreateView.vue'),
+      },
+      {
+        path: 'api-testing/interface-cases/:id/edit',
+        name: 'ApiInterfaceCaseEdit',
+        component: () => import('@/features/api-testing/views/InterfaceCaseEditView.vue'),
+        props: true,
+      },
+      {
+        path: 'api-testing/interface-cases/reports/:id',
+        name: 'ApiInterfaceCaseReportDetail',
+        component: () => import('@/features/api-testing/views/InterfaceCaseReportDetailView.vue'),
+        props: true,
+      },
+      {
         path: 'api-testing/testcases/:id/edit',
         name: 'ApiTestCaseEdit',
         component: () => import('@/features/api-testing/views/TestCaseEditView.vue'),
@@ -211,6 +229,11 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
         path: 'task-center', // 任务中心
         name: 'TaskCenter',
         component: TaskCenterView,
+      },
+      {
+        path: 'file-management', // 文件管理
+        name: 'FileManagement',
+        component: FileManagementView,
       },
       {
         path: 'operation-logs', // 定义操作日志路径。

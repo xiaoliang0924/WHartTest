@@ -17,13 +17,36 @@ class ApiTestTaskService:
     """Service class for test task suite operations."""
 
     @staticmethod
-    def add_testcases(task_suite, testcase_ids, project_pk=None):
-        from api_testcases.models import ApiTestCase
+    def add_cases(task_suite, testcase_ids=None, interface_case_ids=None, project_pk=None):
+        from api_testcases.models import ApiInterfaceCase, ApiTestCase
+
+        def unique_ids(ids):
+            seen = set()
+            result = []
+            for item_id in ids or []:
+                if item_id in seen:
+                    continue
+                seen.add(item_id)
+                result.append(item_id)
+            return result
+
+        testcase_ids = unique_ids(testcase_ids)
+        interface_case_ids = unique_ids(interface_case_ids)
 
         existing_ids = set(
-            task_suite.api_task_cases.values_list('testcase_id', flat=True)
+            task_suite.api_task_cases.filter(
+                case_type=ApiTestTaskCase.CASE_TYPE_SCENARIO
+            ).values_list('testcase_id', flat=True)
         )
         new_ids = [tid for tid in testcase_ids if tid not in existing_ids]
+        existing_interface_ids = set(
+            task_suite.api_task_cases.filter(
+                case_type=ApiTestTaskCase.CASE_TYPE_INTERFACE
+            ).values_list('interface_case_id', flat=True)
+        )
+        new_interface_ids = [
+            tid for tid in interface_case_ids if tid not in existing_interface_ids
+        ]
         max_order = (
             task_suite.api_task_cases.aggregate(
                 max_order=models.Max('order')
@@ -32,6 +55,7 @@ class ApiTestTaskService:
 
         task_cases = []
         with transaction.atomic():
+            next_order = max_order
             for i, testcase_id in enumerate(new_ids, 1):
                 try:
                     lookup = {'id': testcase_id}
@@ -40,21 +64,58 @@ class ApiTestTaskService:
                     testcase = ApiTestCase.objects.get(**lookup)
                     task_case = ApiTestTaskCase.objects.create(
                         task_suite=task_suite,
+                        case_type=ApiTestTaskCase.CASE_TYPE_SCENARIO,
                         testcase=testcase,
                         order=max_order + i,
                     )
+                    next_order = max(next_order, task_case.order)
                     task_cases.append(task_case)
                 except ApiTestCase.DoesNotExist:
                     logger.warning(f"Test case [ID={testcase_id}] does not exist, skipping")
                     continue
+
+            for i, interface_case_id in enumerate(new_interface_ids, 1):
+                try:
+                    lookup = {'id': interface_case_id}
+                    if project_pk:
+                        lookup['project_id'] = project_pk
+                    interface_case = ApiInterfaceCase.objects.get(**lookup)
+                    task_case = ApiTestTaskCase.objects.create(
+                        task_suite=task_suite,
+                        case_type=ApiTestTaskCase.CASE_TYPE_INTERFACE,
+                        interface_case=interface_case,
+                        order=next_order + i,
+                    )
+                    task_cases.append(task_case)
+                except ApiInterfaceCase.DoesNotExist:
+                    logger.warning(
+                        f"Interface case [ID={interface_case_id}] does not exist, skipping"
+                    )
+                    continue
         return task_cases
 
     @staticmethod
-    def remove_testcase(task_suite, testcase_id):
+    def add_testcases(task_suite, testcase_ids, project_pk=None):
+        return ApiTestTaskService.add_cases(
+            task_suite,
+            testcase_ids=testcase_ids,
+            interface_case_ids=[],
+            project_pk=project_pk,
+        )
+
+    @staticmethod
+    def remove_case(task_suite, case_type, case_id):
+        filters = {
+            'task_suite': task_suite,
+            'case_type': case_type,
+        }
+        if case_type == ApiTestTaskCase.CASE_TYPE_INTERFACE:
+            filters['interface_case_id'] = case_id
+        else:
+            filters['testcase_id'] = case_id
+
         try:
-            task_case = ApiTestTaskCase.objects.get(
-                task_suite=task_suite, testcase_id=testcase_id
-            )
+            task_case = ApiTestTaskCase.objects.get(**filters)
             task_case.delete()
             for i, tc in enumerate(
                 task_suite.api_task_cases.all().order_by('order'), 1
@@ -64,6 +125,14 @@ class ApiTestTaskService:
             return True
         except ApiTestTaskCase.DoesNotExist:
             return False
+
+    @staticmethod
+    def remove_testcase(task_suite, testcase_id):
+        return ApiTestTaskService.remove_case(
+            task_suite,
+            ApiTestTaskCase.CASE_TYPE_SCENARIO,
+            testcase_id,
+        )
 
 
 class ApiTestTaskExecutionService:
@@ -79,16 +148,21 @@ class ApiTestTaskExecutionService:
                 total_count=task_suite.api_task_cases.count(),
             )
             for task_case in task_suite.api_task_cases.all().order_by('order'):
-                ApiTestTaskCaseResult.objects.create(
-                    execution=execution,
-                    testcase=task_case.testcase,
-                )
+                result_kwargs = {
+                    'execution': execution,
+                    'case_type': task_case.case_type,
+                }
+                if task_case.case_type == ApiTestTaskCase.CASE_TYPE_INTERFACE:
+                    result_kwargs['interface_case'] = task_case.interface_case
+                else:
+                    result_kwargs['testcase'] = task_case.testcase
+                ApiTestTaskCaseResult.objects.create(**result_kwargs)
         return execution
 
     @staticmethod
     def execute_task(execution):
         """Execute a test task synchronously."""
-        from api_testcases.services import TestExecutionService
+        from api_testcases.services import InterfaceCaseExecutionService, TestExecutionService
 
         execution.start()
 
@@ -131,12 +205,18 @@ class ApiTestTaskExecutionService:
             case_result.save()
 
             try:
-                testcase = case_result.testcase
-                report = TestExecutionService.run_testcase(
-                    testcase, environment, execution.executed_by
-                )
+                case_obj = case_result.case_object
+                if case_result.case_type == ApiTestTaskCase.CASE_TYPE_INTERFACE:
+                    report = InterfaceCaseExecutionService.run_interface_case(
+                        case_obj, environment, execution.executed_by
+                    )
+                    case_result.interface_report = report
+                else:
+                    report = TestExecutionService.run_testcase(
+                        case_obj, environment, execution.executed_by
+                    )
+                    case_result.report = report
 
-                case_result.report = report
                 case_result.end_time = timezone.now()
                 case_result.duration = (
                     case_result.end_time - case_result.start_time
@@ -154,7 +234,7 @@ class ApiTestTaskExecutionService:
                 if task_suite.fail_fast and report.status != 'success':
                     logger.info(
                         f"Task suite [{task_suite.name}] fail_fast enabled, "
-                        f"case [{testcase.name}] failed, stopping"
+                        f"case [{case_obj.name}] failed, stopping"
                     )
                     for remaining in case_results.filter(status='pending'):
                         remaining.status = 'skipped'
@@ -162,8 +242,9 @@ class ApiTestTaskExecutionService:
                     break
 
             except Exception as e:
+                case_name = case_result.case_name or f"ID={case_result.id}"
                 logger.error(
-                    f"Error executing case [{case_result.testcase.name}]: {str(e)}"
+                    f"Error executing case [{case_name}]: {str(e)}"
                 )
                 case_result.status = 'error'
                 case_result.end_time = timezone.now()

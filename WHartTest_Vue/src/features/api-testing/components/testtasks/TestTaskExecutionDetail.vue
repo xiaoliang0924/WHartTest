@@ -38,7 +38,7 @@ const fetchExecutionDetail = async (isAutoRefresh = false) => {
       executionData.value = response.data
       
       if (isAutoRefresh && oldStatus !== response.data.status) {
-        if (['completed', 'canceled', 'error'].includes(response.data.status)) {
+        if (['completed', 'canceled', 'failed', 'error'].includes(response.data.status)) {
           stopAutoRefresh()
 
           if (response.data.status === 'completed') {
@@ -157,6 +157,7 @@ const statusColorMap: Record<string, string> = {
   'pending': 'blue',
   'running': 'orange',
   'completed': 'green',
+  'failed': 'red',
   'canceled': 'gray',
   'error': 'red'
 }
@@ -171,6 +172,7 @@ const statusTextMap: Record<string, string> = {
   'pending': '等待中',
   'running': '执行中',
   'completed': '已完成',
+  'failed': '失败',
   'canceled': '已取消',
   'error': '错误'
 }

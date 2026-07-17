@@ -26,7 +26,7 @@ const filteredModules = computed(() => {
 </script>
 
 <template>
-  <div class="module-list-panel w-[280px] rounded-lg border overflow-hidden">
+  <div class="module-list-panel w-[280px] rounded-lg border overflow-hidden flex flex-col min-h-0">
     <div class="module-list-header p-4 border-b">
       <div class="flex items-center justify-between mb-2">
         <span class="module-list-title">模块列表</span>
@@ -43,7 +43,7 @@ const filteredModules = computed(() => {
         </a-input-search>
       </div>
     </div>
-    <div class="overflow-y-auto hide-scrollbar" style="height: 480px">
+    <div class="module-list-body flex-1 min-h-0 overflow-y-auto hide-scrollbar">
       <div class="p-2 space-y-1">
         <ModuleTreeSelect
           v-for="module in filteredModules"
@@ -66,8 +66,13 @@ const filteredModules = computed(() => {
   border-color: var(--asd-panel-border);
 }
 
+.module-list-body {
+  min-height: 0;
+}
+
 .module-list-header {
   border-color: var(--asd-panel-border);
+  flex-shrink: 0;
 }
 
 .module-list-title {

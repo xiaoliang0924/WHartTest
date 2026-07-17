@@ -13,6 +13,9 @@
       <template #interfaces>
         <InterfacesPanel />
       </template>
+      <template #interface-cases>
+        <InterfaceCasesPanel />
+      </template>
       <template #testcases>
         <TestCasesPanel />
       </template>
@@ -44,6 +47,7 @@ import { useThemeStore } from '@/store/themeStore'
 import '../styles/arco-overrides.css'
 
 import InterfacesPanel from '../components/interfaces/InterfacesPanel.vue'
+import InterfaceCasesPanel from '../components/interface-cases/InterfaceCasesPanel.vue'
 import TestCasesPanel from '../components/testcases/TestCasesPanel.vue'
 import TestTasksPanel from '../components/testtasks/TestTasksPanel.vue'
 import TestReportsPanel from '../components/test-reports/TestReportsPanel.vue'
@@ -92,7 +96,8 @@ watch(() => route.query.tab, (newTab) => {
 
 const tabItems = computed(() => isEnglish.value ? [
   { key: 'interfaces', title: 'Interfaces' },
-  { key: 'testcases', title: 'Test Cases' },
+  { key: 'interface-cases', title: 'Interface Cases' },
+  { key: 'testcases', title: 'Scenario Cases' },
   { key: 'testtasks', title: 'Test Tasks' },
   { key: 'reports', title: 'Reports' },
   { key: 'environments', title: 'Environments' },
@@ -100,7 +105,8 @@ const tabItems = computed(() => isEnglish.value ? [
   { key: 'sync', title: 'Sync Config' },
 ] : [
   { key: 'interfaces', title: '接口管理' },
-  { key: 'testcases', title: '测试用例' },
+  { key: 'interface-cases', title: '接口用例' },
+  { key: 'testcases', title: '场景用例' },
   { key: 'testtasks', title: '测试任务' },
   { key: 'reports', title: '测试报告' },
   { key: 'environments', title: '环境管理' },

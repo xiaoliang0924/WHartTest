@@ -208,18 +208,23 @@ const handleVisibleChange = (value: boolean) => {
 <template>
   <a-modal
     :visible="visible"
-    :width="1000"
+    width="min(1000px, calc(100vw - 64px))"
     :mask-closable="false"
     :footer="false"
+    hide-title
+    :closable="false"
+    class="api-select-dialog-container"
+    modal-class="api-select-dialog-modal"
+    body-class="api-select-dialog-body"
     unmount-on-close
     @update:visible="handleVisibleChange"
     @cancel="handleClose"
   >
     <div class="api-select-dialog" :class="isDarkTheme ? 'api-select-dialog--dark' : 'api-select-dialog--light'">
-      <div class="flex flex-col gap-4">
+      <div class="api-select-dialog-layout">
         <ApiSelectDialogHeader @close="handleClose" />
 
-        <div class="flex gap-4">
+        <div class="api-select-dialog-content">
           <ModuleList
             :modules="modules"
             :expanded-ids="expandedModuleIds"
@@ -229,7 +234,7 @@ const handleVisibleChange = (value: boolean) => {
             @toggle-expand="handleToggleExpand"
           />
 
-          <div class="flex-1 flex flex-col gap-4">
+          <div class="api-select-dialog-main">
             <InterfaceList
               :interfaces="interfaces"
               :selected-keys="selectedKeys"
@@ -258,20 +263,46 @@ const handleVisibleChange = (value: boolean) => {
 @reference "tailwindcss";
 .api-select-dialog {
   @apply bg-transparent p-6;
+  box-sizing: border-box;
+  height: min(640px, calc(100vh - 96px));
   color: var(--asd-text-muted);
-  --asd-panel-bg: rgba(255, 255, 255, 0.88);
+  --asd-panel-bg: #ffffff;
   --asd-panel-border: rgba(148, 163, 184, 0.16);
   --asd-panel-hover: rgba(148, 163, 184, 0.08);
   --asd-control-bg: #ffffff;
-  --asd-control-border: rgba(148, 163, 184, 0.18);
+  --asd-control-border: rgba(148, 163, 184, 0.28);
   --asd-control-hover: #f8fafc;
   --asd-text: var(--theme-text);
   --asd-text-muted: var(--theme-text-secondary);
   --asd-text-subtle: var(--theme-text-tertiary);
 }
 
+.api-select-dialog-layout {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.api-select-dialog-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 16px;
+}
+
+.api-select-dialog-main {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 16px;
+}
+
 .api-select-dialog--dark {
-  --asd-panel-bg: rgba(31, 41, 55, 0.88);
+  --asd-panel-bg: rgb(31, 41, 55);
   --asd-panel-border: rgba(75, 85, 99, 0.4);
   --asd-panel-hover: rgba(51, 65, 85, 0.5);
   --asd-control-bg: rgba(15, 23, 42, 0.7);
@@ -282,20 +313,25 @@ const handleVisibleChange = (value: boolean) => {
   --asd-text-subtle: rgb(148, 163, 184);
 }
 
-:global(.arco-modal) {
-  background: #ffffff !important;
-  border-radius: 12px !important;
-  border: 1px solid rgba(148, 163, 184, 0.16) !important;
-  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16) !important;
-}
-
-:global(.arco-modal-body) {
+:global(.api-select-dialog-modal.arco-modal) {
   background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
 }
 
-:global(body.api-testing-theme .arco-modal) {
-  background: rgb(17, 24, 39) !important;
-  border-color: rgba(75, 85, 99, 0.4) !important;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 0 40px rgba(0, 0, 0, 0.55) !important;
+:global(.api-select-dialog-container .arco-modal-wrapper) {
+  overflow: hidden !important;
+}
+
+:global(.api-select-dialog-body.arco-modal-body) {
+  background: transparent !important;
+  padding: 0 !important;
+  overflow: visible !important;
+}
+
+:global(body.api-testing-theme .api-select-dialog-modal.arco-modal) {
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
 }
 </style>

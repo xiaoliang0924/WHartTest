@@ -16,8 +16,8 @@ class ApiTestTaskSuiteAdmin(admin.ModelAdmin):
 
 @admin.register(ApiTestTaskCase)
 class ApiTestTaskCaseAdmin(admin.ModelAdmin):
-    list_display = ['id', 'task_suite', 'testcase', 'order']
-    list_filter = ['task_suite']
+    list_display = ['id', 'task_suite', 'case_type', 'testcase', 'interface_case', 'order']
+    list_filter = ['task_suite', 'case_type']
 
 
 @admin.register(ApiTestTaskExecution)
@@ -33,5 +33,8 @@ class ApiTestTaskExecutionAdmin(admin.ModelAdmin):
 
 @admin.register(ApiTestTaskCaseResult)
 class ApiTestTaskCaseResultAdmin(admin.ModelAdmin):
-    list_display = ['id', 'execution', 'testcase', 'status', 'start_time', 'end_time', 'duration']
-    list_filter = ['status']
+    list_display = [
+        'id', 'execution', 'case_type', 'testcase', 'interface_case',
+        'status', 'start_time', 'end_time', 'duration'
+    ]
+    list_filter = ['status', 'case_type']

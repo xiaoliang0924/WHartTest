@@ -303,7 +303,7 @@ class RunThriftRequest(IStep):
         return StepThriftRequestValidation(self.__step)
 
     def with_jmespath(
-        self, jmes_path: Text, var_name: Text
+        self, jmes_path: Text, var_name: Text, source: Text = "response"
     ) -> "StepThriftRequestExtraction":
         self.__step.extract[var_name] = jmes_path
         return StepThriftRequestExtraction(self.__step)

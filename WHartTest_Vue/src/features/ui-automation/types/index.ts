@@ -102,6 +102,7 @@ export interface UiPageSteps extends TimeStampFields {
   step_count?: number
   creator: number | null
   creator_name?: string
+  file_ids?: number[]
 }
 
 /** 页面步骤详情（含步骤列表） */
@@ -153,6 +154,7 @@ export interface UiTestCase extends TimeStampFields {
   step_count?: number
   creator: number | null
   creator_name?: string
+  file_ids?: number[]
 }
 
 /** 测试用例详情（含步骤列表） */
@@ -356,9 +358,8 @@ export interface UiEnvironmentConfig extends TimeStampFields {
   timeout: number
   db_c_status: boolean
   db_rud_status: boolean
-  db_type: 'mysql' | 'db2'
+  db_type: 'mysql'
   mysql_config?: Record<string, unknown>
-  db2_config?: Record<string, unknown>
   extra_config?: Record<string, unknown>
   is_default: boolean
   creator: number | null

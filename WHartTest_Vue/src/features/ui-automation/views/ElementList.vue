@@ -323,8 +323,9 @@ const deleteElement = async (record: UiElement) => {
     await elementApi.delete(record.id)
     Message.success('删除成功')
     fetchElements()
-  } catch {
-    Message.error('删除失败')
+  } catch (error: unknown) {
+    const err = error as { error?: string }
+    Message.error(err?.error || '删除失败')
   }
 }
 

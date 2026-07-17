@@ -65,6 +65,9 @@ export const pageApi = {
     request.patch<UiPage>(`${BASE_URL}/pages/${id}/`, data),
 
   delete: (id: number) => request.delete(`${BASE_URL}/pages/${id}/`),
+
+  copy: (id: number, data?: { name?: string; target_module_id?: number; module?: number }) =>
+    request.post<UiPage>(`${BASE_URL}/pages/${id}/copy/`, data || {}),
 }
 
 // ==================== 元素管理 ====================
@@ -95,6 +98,9 @@ export const pageStepsApi = {
     request.patch<UiPageSteps>(`${BASE_URL}/page-steps/${id}/`, data),
 
   delete: (id: number) => request.delete(`${BASE_URL}/page-steps/${id}/`),
+
+  copy: (id: number, data?: { name?: string; target_page_id?: number; page?: number }) =>
+    request.post<UiPageSteps>(`${BASE_URL}/page-steps/${id}/copy/`, data || {}),
 }
 
 // ==================== 步骤详情管理 ====================
@@ -131,6 +137,9 @@ export const testCaseApi = {
   delete: (id: number) => request.delete(`${BASE_URL}/testcases/${id}/`),
 
   batchDelete: (ids: number[]) => request.post(`${BASE_URL}/testcases/batch-delete/`, { ids }),
+
+  copy: (id: number, data?: { name?: string; target_module_id?: number; module?: number }) =>
+    request.post<UiTestCase>(`${BASE_URL}/testcases/${id}/copy/`, data || {}),
 }
 
 // ==================== 用例步骤管理 ====================
@@ -235,3 +244,6 @@ export const actuatorApi = {
 
   status: () => request.get<ActuatorStatus>(`${BASE_URL}/actuators/status/`),
 }
+
+
+export { fileService as uiFileService } from '@/features/file-management/services/fileService'

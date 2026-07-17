@@ -3,7 +3,10 @@ import logging
 from django.utils import timezone
 from django.db import transaction
 from api_interfaces.logging_utils import summarize_for_log
-from .models import ApiTestCase, ApiTestCaseStep, ApiTestReport, ApiTestReportDetail
+from .models import (
+    ApiTestCase, ApiTestCaseStep, ApiTestReport, ApiTestReportDetail,
+    ApiInterfaceCase, ApiInterfaceCaseReport, ApiInterfaceCaseReportDetail,
+)
 from .runner import TestCaseRunner
 
 logger = logging.getLogger('testrunner')
@@ -318,3 +321,129 @@ class TestExecutionService:
             'error': error,
             'success_rate': f"{(success / total * 100):.2f}%"
         }
+
+
+class InterfaceCaseExecutionService:
+    """Execution service for single-interface cases."""
+
+    @staticmethod
+    def run_interface_case(
+        interface_case: ApiInterfaceCase,
+        environment: Optional[Dict] = None,
+        user=None,
+    ) -> ApiInterfaceCaseReport:
+        source_config = interface_case.config if isinstance(interface_case.config, dict) else {}
+        source_environment = environment if isinstance(environment, dict) else {}
+        verify_source = TestExecutionService._resolve_verify_source(
+            source_config,
+            source_environment,
+        )
+        config = TestExecutionService._prepare_config(interface_case.config, environment)
+        interface_case.config = config
+        interface_case._case_verify_explicit = verify_source == 'testcase'
+
+        runner = TestCaseRunner(interface_case, environment=environment)
+        runner.run_testcase(environment)
+
+        summary = runner.get_summary()
+        step_results = runner.get_step_results()
+        logger.info(
+            "Interface case execution summary generated: trace_id=%s interface_case_id=%s "
+            "interface_case_name=%s success=%s step_count=%s",
+            runner.trace_id,
+            interface_case.id,
+            interface_case.name,
+            summary['success'],
+            len(step_results),
+        )
+
+        extract_persistence = {
+            'matched_count': 0,
+            'created_count': 0,
+            'updated_count': 0,
+            'skipped_no_environment': False,
+        }
+
+        environment_id = environment.get('id') if environment else None
+        ordered_steps = list(interface_case.steps.all().order_by('order'))
+
+        for index, step_result in enumerate(step_results):
+            if index >= len(ordered_steps):
+                continue
+
+            step = ordered_steps[index]
+            step_data = step.interface_data if isinstance(step.interface_data, dict) else {}
+            persistence_result = persist_project_extract_variables(
+                project_id=interface_case.project_id,
+                environment_id=environment_id,
+                extracted_variables=step_result.get('data', {}).get('extracted_variables', {}),
+                extract_meta=step_data.get('extract_meta', {}),
+            )
+            extract_persistence['matched_count'] += persistence_result.get('matched_count', 0)
+            extract_persistence['created_count'] += persistence_result.get('created_count', 0)
+            extract_persistence['updated_count'] += persistence_result.get('updated_count', 0)
+            extract_persistence['skipped_no_environment'] = (
+                extract_persistence['skipped_no_environment']
+                or persistence_result.get('skipped_no_environment', False)
+            )
+
+        summary['extract_persistence'] = extract_persistence
+
+        with transaction.atomic():
+            report = ApiInterfaceCaseReport.objects.create(
+                name=f"{interface_case.name}-{timezone.now().strftime('%Y%m%d%H%M%S')}",
+                status='success' if summary['success'] else 'failure',
+                success_count=len([r for r in step_results if r['success']]),
+                fail_count=len([r for r in step_results if not r['success']]),
+                error_count=0,
+                duration=summary['time']['duration'],
+                summary=summary,
+                interface_case=interface_case,
+                executed_by=user,
+                environment_id=environment_id,
+            )
+            logger.info(
+                "Interface case report saved: trace_id=%s report_id=%s interface_case_id=%s "
+                "status=%s success_count=%s fail_count=%s",
+                runner.trace_id,
+                report.id,
+                interface_case.id,
+                report.status,
+                report.success_count,
+                report.fail_count,
+            )
+
+            steps_by_order = {step.order: step for step in interface_case.steps.all()}
+
+            for i, step_result in enumerate(step_results):
+                try:
+                    step = steps_by_order.get(i + 1)
+                    if step is None:
+                        ordered_steps = list(interface_case.steps.all().order_by('order'))
+                        if i < len(ordered_steps):
+                            step = ordered_steps[i]
+                        else:
+                            continue
+
+                    ApiInterfaceCaseReportDetail.objects.create(
+                        report=report,
+                        step=step,
+                        success=step_result['success'],
+                        elapsed=step_result['elapsed'],
+                        request=step_result['data'].get('request', {}),
+                        response=step_result['data'].get('response', {}),
+                        validators=step_result['data'].get('validators', []),
+                        extracted_variables=step_result['data'].get('extracted_variables', {}),
+                        attachment=step_result['attachment'],
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to create interface case report detail: trace_id=%s "
+                        "interface_case_id=%s error=%s",
+                        runner.trace_id,
+                        interface_case.id,
+                        str(e),
+                    )
+                    continue
+
+        return report

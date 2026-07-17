@@ -1,5 +1,8 @@
+import hashlib
 import json
+import re
 import time
+from urllib.parse import unquote
 
 import requests
 import urllib3
@@ -19,11 +22,216 @@ from httprunner.utils import lower_dict_keys, omit_long_data
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
+BINARY_PREVIEW_BYTES = 64
+BINARY_BODY_MESSAGE = "Binary response body omitted from execution report."
+
+TEXT_CONTENT_TYPES = {
+    "application/javascript",
+    "application/x-javascript",
+    "application/xml",
+    "application/xhtml+xml",
+    "application/x-www-form-urlencoded",
+    "application/problem+json",
+}
+
+BINARY_CONTENT_TYPES = {
+    "application/gzip",
+    "application/msword",
+    "application/octet-stream",
+    "application/pdf",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/x-7z-compressed",
+    "application/x-gzip",
+    "application/x-rar-compressed",
+    "application/x-tar",
+    "application/x-zip-compressed",
+    "application/zip",
+}
+
+
 class ApiResponse(Response):
     def raise_for_status(self):
         if hasattr(self, "error") and self.error:
             raise self.error
         Response.raise_for_status(self)
+
+
+def _media_type(content_type: str) -> str:
+    return (content_type or "").split(";", 1)[0].strip().lower()
+
+
+def _get_header(headers, name: str) -> str:
+    target = name.lower()
+    for key, value in dict(headers or {}).items():
+        if str(key).lower() == target:
+            return str(value)
+    return ""
+
+
+def _is_json_content_type(content_type: str) -> bool:
+    media_type = _media_type(content_type)
+    return media_type == "application/json" or media_type.endswith("+json")
+
+
+def _is_text_content_type(content_type: str) -> bool:
+    media_type = _media_type(content_type)
+    return (
+        media_type.startswith("text/")
+        or media_type in TEXT_CONTENT_TYPES
+        or media_type.endswith("+xml")
+    )
+
+
+def _extract_filename(content_disposition: str) -> str:
+    if not content_disposition:
+        return ""
+
+    filename_star = re.search(
+        r"""filename\*\s*=\s*(?:[^']*'')?("?)([^";]+)\1""",
+        content_disposition,
+        flags=re.IGNORECASE,
+    )
+    if filename_star:
+        return unquote(filename_star.group(2).strip())
+
+    filename = re.search(
+        r"""filename\s*=\s*("?)([^";]+)\1""",
+        content_disposition,
+        flags=re.IGNORECASE,
+    )
+    if filename:
+        return filename.group(2).strip()
+
+    return ""
+
+
+def _looks_like_binary(content: bytes, headers, content_type: str) -> bool:
+    content = content or b""
+    media_type = _media_type(content_type)
+    content_disposition = _get_header(headers, "content-disposition").lower()
+
+    if "attachment" in content_disposition:
+        return True
+
+    if media_type in BINARY_CONTENT_TYPES:
+        return True
+
+    if media_type.startswith(("audio/", "font/", "image/", "video/")):
+        return True
+
+    if not content:
+        return False
+
+    if b"\x00" in content[:1024]:
+        return True
+
+    if _is_json_content_type(content_type) or _is_text_content_type(content_type):
+        return False
+
+    return media_type.startswith("application/")
+
+
+def _binary_body_summary(
+    content: bytes,
+    content_type: str = "",
+    headers=None,
+    message: str = BINARY_BODY_MESSAGE,
+) -> dict:
+    content = content or b""
+    summary = {
+        "type": "binary",
+        "binary": True,
+        "omitted": True,
+        "message": message,
+        "content_type": content_type or "",
+        "content_length": len(content),
+        "sha256": hashlib.sha256(content).hexdigest() if content else "",
+        "preview_hex": content[:BINARY_PREVIEW_BYTES].hex(),
+    }
+
+    filename = _extract_filename(_get_header(headers, "content-disposition"))
+    if filename:
+        summary["filename"] = filename
+
+    return summary
+
+
+def _sanitize_text(value: str) -> str:
+    return value.replace("\x00", "\\u0000")
+
+
+def sanitize_json_record(value):
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    if isinstance(value, str):
+        return _sanitize_text(value)
+
+    if isinstance(value, bytes):
+        return _binary_body_summary(
+            value,
+            message="Binary data omitted from execution report.",
+        )
+
+    if isinstance(value, dict):
+        return {
+            _sanitize_text(str(key)): sanitize_json_record(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple, set)):
+        return [sanitize_json_record(item) for item in value]
+
+    return repr(value)
+
+
+def _record_request_body(request_body, request_headers):
+    if request_body is None:
+        return None
+
+    request_content_type = lower_dict_keys(request_headers).get("content-type", "")
+    if (
+        request_content_type
+        and "multipart/form-data" in request_content_type.lower()
+    ):
+        return "upload file stream (OMITTED)"
+
+    try:
+        return sanitize_json_record(json.loads(request_body))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    except TypeError:
+        return sanitize_json_record(request_body)
+
+    if isinstance(request_body, bytes):
+        if _looks_like_binary(request_body, request_headers, request_content_type):
+            return _binary_body_summary(
+                request_body,
+                request_content_type,
+                request_headers,
+                message="Binary request body omitted from execution report.",
+            )
+
+        return omit_long_data(_sanitize_text(request_body.decode("utf-8", "replace")))
+
+    return sanitize_json_record(omit_long_data(request_body))
+
+
+def _record_response_body(resp_obj: Response, content_type: str, headers: dict):
+    content = resp_obj.content or b""
+
+    if not _looks_like_binary(content, headers, content_type):
+        try:
+            return sanitize_json_record(resp_obj.json())
+        except ValueError:
+            resp_text = _sanitize_text(resp_obj.text)
+            return sanitize_json_record(omit_long_data(resp_text))
+
+    return _binary_body_summary(content, content_type, headers)
 
 
 def get_req_resp_record(resp_obj: Response) -> ReqRespData:
@@ -42,24 +250,7 @@ def get_req_resp_record(resp_obj: Response) -> ReqRespData:
     request_headers = dict(resp_obj.request.headers)
     request_cookies = resp_obj.request._cookies.get_dict()
 
-    request_body = resp_obj.request.body
-    if request_body is not None:
-        try:
-            request_body = json.loads(request_body)
-        except json.JSONDecodeError:
-            # str: a=1&b=2
-            pass
-        except UnicodeDecodeError:
-            # bytes/bytearray: request body in protobuf
-            pass
-        except TypeError:
-            # neither str nor bytes/bytearray, e.g. <MultipartEncoder>
-            pass
-
-        request_content_type = lower_dict_keys(request_headers).get("content-type")
-        if request_content_type and "multipart/form-data" in request_content_type:
-            # upload file type
-            request_body = "upload file stream (OMITTED)"
+    request_body = _record_request_body(resp_obj.request.body, request_headers)
 
     request_data = RequestData(
         method=resp_obj.request.method,
@@ -77,17 +268,7 @@ def get_req_resp_record(resp_obj: Response) -> ReqRespData:
     lower_resp_headers = lower_dict_keys(resp_headers)
     content_type = lower_resp_headers.get("content-type", "")
 
-    if "image" in content_type:
-        # response is image type, record bytes content only
-        response_body = resp_obj.content
-    else:
-        try:
-            # try to record json data
-            response_body = resp_obj.json()
-        except ValueError:
-            # only record at most 512 text charactors
-            resp_text = resp_obj.text
-            response_body = omit_long_data(resp_text)
+    response_body = _record_response_body(resp_obj, content_type, resp_headers)
 
     transport_error = getattr(resp_obj, "error", None)
     transport_error_type = None

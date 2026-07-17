@@ -58,6 +58,19 @@
           :class="{ 'message-image-multi': messageImageSrcList.length > 1 }"
         />
       </div>
+
+      <div v-if="messageAttachmentList.length > 0" class="message-attachment-list">
+        <div
+          v-for="file in messageAttachmentList"
+          :key="getAttachmentId(file)"
+          class="message-attachment-item"
+        >
+          <icon-file class="message-attachment-icon" />
+          <div class="message-attachment-main">
+            <div class="message-attachment-name">{{ getAttachmentName(file) }}</div>
+          </div>
+        </div>
+      </div>
       
       <div ref="messageBubbleRef" class="message-bubble">
         <div v-if="message.isLoading" class="typing-indicator">
@@ -182,7 +195,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, onUpdated, ref, watch } from 'vue';
 import { Button as AButton, Tooltip as ATooltip, Message } from '@arco-design/web-vue';
-import { IconCopy, IconReply, IconRefresh, IconDelete, IconEye, IconTool } from '@arco-design/web-vue/es/icon';
+import { IconCopy, IconReply, IconRefresh, IconDelete, IconEye, IconTool, IconFile } from '@arco-design/web-vue/es/icon';
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import { useAppI18n } from '@/composables/useAppI18n';
@@ -191,6 +204,7 @@ import { extractDiagramToolPayload } from '../utils/diagramToolParser';
 import { extractHtmlPreviewContent } from '../utils/htmlPreviewParser';
 import type { ToolFileAttachment } from '../utils/toolResultParser';
 import { parseToolResultDisplayPayload } from '../utils/toolResultParser';
+import type { FileAsset } from '@/features/file-management/types';
 
 // 配置marked以确保代码块正确渲染
 // marked v5+ API发生了变化，许多选项被移除或更改。
@@ -218,6 +232,7 @@ interface ChatMessage {
   imageBase64?: string; // 消息携带的图片(Base64)
   imageDataUrl?: string; // 完整的图片Data URL
   fileAttachments?: ToolFileAttachment[]; // 工具返回的可下载文件
+  attachments?: FileAsset[]; // 用户消息携带的项目文件附件
   imageBase64List?: string[]; // 多张图片(Base64)
   imageDataUrls?: string[]; // 多张图片Data URL
   isThinkingProcess?: boolean; // 是否是思考过程
@@ -343,6 +358,14 @@ const messageImageSrcList = computed(() => {
   const singleImage = props.message.imageDataUrl || toImageDataUrl(props.message.imageBase64);
   return singleImage ? [singleImage] : [];
 });
+
+const messageAttachmentList = computed(() => {
+  return Array.isArray(props.message.attachments) ? props.message.attachments : [];
+});
+
+const getAttachmentId = (file: FileAsset) => Number(file.file_id || file.id);
+
+const getAttachmentName = (file: FileAsset) => file.name || file.original_name || `file-${file.id || file.file_id || ''}`;
 
 // 工具图片被检测到时通知父组件
 onMounted(() => {
@@ -1177,6 +1200,55 @@ const formatToolMessage = (content: string) => {
 
 .message-image:hover {
   transform: scale(1.02);
+}
+
+.message-attachment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+  max-width: 360px;
+}
+
+.user-message .message-attachment-list {
+  align-self: flex-end;
+}
+
+.message-attachment-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 220px;
+  max-width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #d7e3ff;
+  border-radius: 8px;
+  background: #f7faff;
+}
+
+.user-message .message-attachment-item {
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(22, 93, 255, 0.08);
+}
+
+.message-attachment-icon {
+  flex-shrink: 0;
+  color: #165dff;
+  font-size: 18px;
+}
+
+.message-attachment-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.message-attachment-name {
+  font-size: 13px;
+  color: #1d2129;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .message-bubble {

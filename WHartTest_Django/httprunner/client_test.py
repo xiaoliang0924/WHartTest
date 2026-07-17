@@ -1,15 +1,25 @@
+import json
 import unittest
 from unittest.mock import patch
 
+from requests import Request, Response
 from requests.exceptions import ConnectionError
 
-from httprunner.client import HttpSession
+from httprunner.client import HttpSession, get_req_resp_record
 from httprunner.utils import HTTP_BIN_URL
 
 
 class TestHttpSession(unittest.TestCase):
     def setUp(self):
         self.session = HttpSession()
+
+    def _make_response(self, body, headers=None):
+        response = Response()
+        response.status_code = 200
+        response._content = body
+        response.headers.update(headers or {})
+        response.request = Request("GET", "http://example.com/export").prepare()
+        return response
 
     def test_request_http(self):
         self.session.request("get", f"{HTTP_BIN_URL}/get")
@@ -96,3 +106,36 @@ class TestHttpSession(unittest.TestCase):
                 }
             },
         )
+
+    def test_binary_response_body_is_omitted_from_record(self):
+        xlsx_body = b"PK\x03\x04\x14\x00\x00\x00\x08\x00fake-xlsx-content"
+        response = self._make_response(
+            xlsx_body,
+            {
+                "Content-Type": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                "Content-Disposition": "attachment; filename=report.xlsx",
+            },
+        )
+
+        req_resp = get_req_resp_record(response)
+        body = req_resp.response.body
+
+        self.assertTrue(body["binary"])
+        self.assertTrue(body["omitted"])
+        self.assertEqual(body["content_length"], len(xlsx_body))
+        self.assertEqual(body["filename"], "report.xlsx")
+        self.assertNotIn("\x00", json.dumps(req_resp.dict(), ensure_ascii=False))
+
+    def test_json_response_null_character_is_sanitized(self):
+        response = self._make_response(
+            b'{"value": "a\\u0000b"}',
+            {"Content-Type": "application/json"},
+        )
+
+        req_resp = get_req_resp_record(response)
+
+        self.assertEqual(req_resp.response.body["value"], "a\\u0000b")
+        self.assertNotIn("\x00", json.dumps(req_resp.dict(), ensure_ascii=False))

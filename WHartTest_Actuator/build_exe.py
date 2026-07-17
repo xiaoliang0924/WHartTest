@@ -8,7 +8,7 @@ WHartTest Actuator 打包脚本
     pip install pyinstaller
 
 生成文件:
-    dist/WHartTest_Actuator/WHartTest_Actuator.exe
+    dist/WHartTest_Actuator.exe
 """
 
 import os
@@ -62,35 +62,22 @@ def build():
         print("打包失败!")
         sys.exit(1)
     
-    # 复制配置文件
-    print("\n[3/3] 复制配置文件...")
-    dist_dir = Path('dist/WHartTest_Actuator')
-    
-    # 复制示例配置文件
-    if Path('config.example.toml').exists():
-        shutil.copy('config.example.toml', dist_dir / 'config.toml')
-        print(f"  复制: config.example.toml -> config.toml")
-    
-    # 创建数据目录
-    (dist_dir / 'data').mkdir(exist_ok=True)
-    (dist_dir / 'data' / 'browser').mkdir(exist_ok=True)
-    (dist_dir / 'data' / 'screenshots').mkdir(exist_ok=True)
-    (dist_dir / 'data' / 'traces').mkdir(exist_ok=True)
-    print("  创建: data/ 目录结构")
-    
-    # 创建启动脚本
-    create_launcher(dist_dir)
+    print("\n[3/3] 检查输出文件...")
+    exe_path = Path('dist/WHartTest_Actuator.exe')
+    if not exe_path.exists():
+        print("打包失败: 未找到 dist/WHartTest_Actuator.exe")
+        sys.exit(1)
     
     print("\n" + "=" * 50)
     print("打包完成!")
-    print(f"输出目录: {dist_dir.absolute()}")
+    print(f"输出文件: {exe_path.absolute()}")
     print("\n使用说明:")
-    print("  1. 进入 dist/WHartTest_Actuator/ 目录")
-    print("  2. 编辑 config.toml 配置文件")
-    print("  3. 运行 WHartTest_Actuator.exe 或 start.bat")
+    print("  1. 将 dist/WHartTest_Actuator.exe 发给客户")
+    print("  2. 客户双击运行 exe")
+    print("  3. 首次启动会在 exe 同级目录生成 config.toml、data/、browsers/")
     print("\n首次运行说明:")
-    print("  - 首次运行会自动下载 Chromium 浏览器（约 150MB）")
-    print("  - 浏览器会下载到 browsers/ 目录")
+    print("  - 首次运行会自动下载 Chromium 浏览器")
+    print("  - 浏览器会下载到 exe 同级 browsers/ 目录")
     print("  - 后续运行无需重复下载")
     print("=" * 50)
 

@@ -51,17 +51,40 @@ class ApiTestTaskSuite(models.Model):
 
 
 class ApiTestTaskCase(models.Model):
+    CASE_TYPE_SCENARIO = 'scenario'
+    CASE_TYPE_INTERFACE = 'interface'
+    CASE_TYPE_CHOICES = [
+        (CASE_TYPE_SCENARIO, 'Scenario Case'),
+        (CASE_TYPE_INTERFACE, 'Interface Case'),
+    ]
+
     task_suite = models.ForeignKey(
         ApiTestTaskSuite,
         on_delete=models.CASCADE,
         related_name='api_task_cases',
         verbose_name='Task Suite',
     )
+    case_type = models.CharField(
+        max_length=20,
+        choices=CASE_TYPE_CHOICES,
+        default=CASE_TYPE_SCENARIO,
+        verbose_name='Case Type',
+    )
     testcase = models.ForeignKey(
         'api_testcases.ApiTestCase',
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name='api_task_cases',
         verbose_name='Test Case',
+    )
+    interface_case = models.ForeignKey(
+        'api_testcases.ApiInterfaceCase',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='api_task_cases',
+        verbose_name='Interface Case',
     )
     order = models.IntegerField(default=0, verbose_name='Execution Order')
 
@@ -69,10 +92,52 @@ class ApiTestTaskCase(models.Model):
         verbose_name = 'API Test Task Case'
         verbose_name_plural = 'API Test Task Cases'
         ordering = ['order']
-        unique_together = ['task_suite', 'testcase']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['task_suite', 'testcase'],
+                condition=models.Q(testcase__isnull=False),
+                name='uniq_api_task_suite_case',
+            ),
+            models.UniqueConstraint(
+                fields=['task_suite', 'interface_case'],
+                condition=models.Q(interface_case__isnull=False),
+                name='uniq_api_task_suite_iface_case',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        case_type='scenario',
+                        testcase__isnull=False,
+                        interface_case__isnull=True,
+                    )
+                    | models.Q(
+                        case_type='interface',
+                        testcase__isnull=True,
+                        interface_case__isnull=False,
+                    )
+                ),
+                name='valid_api_task_case_target',
+            ),
+        ]
+
+    @property
+    def case_object(self):
+        if self.case_type == self.CASE_TYPE_INTERFACE:
+            return self.interface_case
+        return self.testcase
+
+    @property
+    def case_id(self):
+        case = self.case_object
+        return case.id if case else None
+
+    @property
+    def case_name(self):
+        case = self.case_object
+        return case.name if case else ''
 
     def __str__(self):
-        return f"{self.task_suite.name}-{self.testcase.name}"
+        return f"{self.task_suite.name}-{self.case_name}"
 
 
 class ApiTestTaskExecution(models.Model):
@@ -188,11 +253,27 @@ class ApiTestTaskCaseResult(models.Model):
         related_name='api_case_results',
         verbose_name='Execution',
     )
+    case_type = models.CharField(
+        max_length=20,
+        choices=ApiTestTaskCase.CASE_TYPE_CHOICES,
+        default=ApiTestTaskCase.CASE_TYPE_SCENARIO,
+        verbose_name='Case Type',
+    )
     testcase = models.ForeignKey(
         'api_testcases.ApiTestCase',
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name='api_task_results',
         verbose_name='Test Case',
+    )
+    interface_case = models.ForeignKey(
+        'api_testcases.ApiInterfaceCase',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='api_task_results',
+        verbose_name='Interface Case',
     )
     report = models.ForeignKey(
         'api_testcases.ApiTestReport',
@@ -201,6 +282,14 @@ class ApiTestTaskCaseResult(models.Model):
         blank=True,
         related_name='api_task_results',
         verbose_name='Test Report',
+    )
+    interface_report = models.ForeignKey(
+        'api_testcases.ApiInterfaceCaseReport',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='api_task_results',
+        verbose_name='Interface Case Report',
     )
 
     status = models.CharField(
@@ -219,6 +308,40 @@ class ApiTestTaskCaseResult(models.Model):
         verbose_name = 'API Test Task Case Result'
         verbose_name_plural = 'API Test Task Case Results'
         ordering = ['id']
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        case_type='scenario',
+                        testcase__isnull=False,
+                        interface_case__isnull=True,
+                    )
+                    | models.Q(
+                        case_type='interface',
+                        testcase__isnull=True,
+                        interface_case__isnull=False,
+                    )
+                ),
+                name='valid_api_task_result_target',
+            ),
+        ]
+
+    @property
+    def case_object(self):
+        if self.case_type == ApiTestTaskCase.CASE_TYPE_INTERFACE:
+            return self.interface_case
+        return self.testcase
+
+    @property
+    def report_object(self):
+        if self.case_type == ApiTestTaskCase.CASE_TYPE_INTERFACE:
+            return self.interface_report
+        return self.report
+
+    @property
+    def case_name(self):
+        case = self.case_object
+        return case.name if case else ''
 
     def __str__(self):
-        return f"{self.execution}-{self.testcase.name}"
+        return f"{self.execution}-{self.case_name}"

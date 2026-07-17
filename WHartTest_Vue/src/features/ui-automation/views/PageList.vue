@@ -64,6 +64,10 @@
             <template #icon><icon-edit /></template>
             编辑
           </a-button>
+          <a-button type="text" size="mini" @click="copyPage(record)">
+            <template #icon><icon-copy /></template>
+            复制
+          </a-button>
           <a-popconfirm
             content="确定删除该页面？关联的元素也会被删除。"
             @ok="deletePage(record)"
@@ -120,7 +124,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
-import { IconPlus, IconEdit, IconDelete, IconEye } from '@arco-design/web-vue/es/icon'
+import { IconPlus, IconEdit, IconDelete, IconEye, IconCopy } from '@arco-design/web-vue/es/icon'
 import { useProjectStore } from '@/store/projectStore'
 import { pageApi, moduleApi } from '../api'
 import type { UiPage, UiPageForm, UiModule } from '../types'
@@ -168,7 +172,7 @@ const columns = [
   { title: '元素数', slotName: 'element_count', width: 80, align: 'center' as const },
   { title: '创建者', dataIndex: 'creator_name', width: 100, align: 'center' as const },
   { title: '创建时间', slotName: 'created_at', width: 160, align: 'center' as const },
-  { title: '操作', slotName: 'operations', width: 220, fixed: 'right' as const, align: 'center' as const },
+  { title: '操作', slotName: 'operations', width: 270, fixed: 'right' as const, align: 'center' as const },
 ]
 
 const formatDate = (dateStr: string) => {
@@ -308,6 +312,20 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
 
 const handleCancel = () => {
   modalVisible.value = false
+}
+
+const copyPage = async (record: UiPage) => {
+  try {
+    loading.value = true
+    await pageApi.copy(record.id)
+    Message.success('复制成功')
+    fetchPages()
+  } catch (error: unknown) {
+    const err = error as { error?: string }
+    Message.error(err?.error || '复制失败')
+  } finally {
+    loading.value = false
+  }
 }
 
 const deletePage = async (record: UiPage) => {

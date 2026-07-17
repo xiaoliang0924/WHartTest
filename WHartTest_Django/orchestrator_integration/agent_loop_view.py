@@ -61,6 +61,8 @@ from projects.models import Project
 from prompts.models import UserPrompt
 from mcp_tools.models import RemoteMCPConfig
 from mcp_tools.persistent_client import mcp_session_manager
+from file_management.services import validate_file_ids, build_llm_attachment_context, sync_file_references
+from file_management.models import FileReference
 from requirements.context_limits import (
     MODEL_CONTEXT_LIMITS,
     context_checker,
@@ -850,6 +852,7 @@ class AgentLoopStreamAPIView(View):
         generate_playwright_script: bool = False,
         test_case_id: Optional[int] = None,
         use_pytest: bool = True,
+        file_ids: Optional[List[int]] = None,
     ):
         """
         创建 SSE 流式生成器（LangChain v1 重构版）
@@ -858,6 +861,15 @@ class AgentLoopStreamAPIView(View):
         通过检测 updates 流中的工具调用来生成 step_start/step_complete 事件。
         """
         thread_id = f"{request.user.id}_{project_id}_{session_id}"
+        file_ids = file_ids or []
+        try:
+            attached_files = await sync_to_async(validate_file_ids)(file_ids, project, request.user)
+            llm_attachment_context = await sync_to_async(build_llm_attachment_context)(attached_files)
+            if file_ids:
+                await sync_to_async(sync_file_references)(file_ids, project, FileReference.REF_LLM_CHAT, session_id, request.user)
+        except Exception as exc:
+            yield create_sse_data({"type": "error", "message": f"附件校验失败: {exc}"})
+            return
 
         # 1. 获取 LLM 配置
         try:
@@ -991,6 +1003,9 @@ class AgentLoopStreamAPIView(View):
                     "project": project,
                     "prompt": prompt_obj,
                     "title": f"新对话 - {user_message[:30]}",
+                    "resolved_module_key": "llm_chat",
+                    "resolved_source": "legacy",
+                    "resolved_runtime_mode": "auto",
                 },
             )
             if created:
@@ -1011,12 +1026,15 @@ class AgentLoopStreamAPIView(View):
                 logger.info(f"AgentLoopStreamAPI: 已追加脚本生成指令")
 
             # 9. 构建用户消息（支持多模态：上传图片 + HTTP(S) 图片 + 需求文档图片）
+            user_message_for_llm = user_message
+            if llm_attachment_context:
+                user_message_for_llm = user_message + "\n\n以下是用户附加文件内容，请作为本轮对话上下文使用:" + llm_attachment_context
             (
                 human_message_content,
                 human_message_kwargs,
                 display_user_message,
             ) = await _prepare_agent_loop_human_message(
-                user_message,
+                user_message_for_llm,
                 project=project,
                 supports_vision=active_config.supports_vision,
                 uploaded_images_base64=uploaded_images_base64,
@@ -1507,6 +1525,7 @@ class AgentLoopStreamAPIView(View):
         knowledge_base_id = body_data.get("knowledge_base_id")
         use_knowledge_base = body_data.get("use_knowledge_base", True)
         prompt_id = body_data.get("prompt_id")
+        file_ids = body_data.get("file_ids", [])
 
         # 调试日志：知识库参数
         logger.info(
@@ -1585,6 +1604,7 @@ class AgentLoopStreamAPIView(View):
                     generate_playwright_script,
                     test_case_id,
                     use_pytest,
+                    file_ids,
                 ):
                     yield chunk
 
@@ -1609,6 +1629,7 @@ class AgentLoopStreamAPIView(View):
                 generate_playwright_script,
                 test_case_id,
                 use_pytest,
+                file_ids,
             )
 
     async def _handle_non_stream_request(
@@ -1625,6 +1646,7 @@ class AgentLoopStreamAPIView(View):
         generate_playwright_script: bool = False,
         test_case_id: Optional[int] = None,
         use_pytest: bool = True,
+        file_ids: Optional[List[int]] = None,
     ) -> JsonResponse:
         """
         处理非流式请求，收集所有流式事件后返回统一 JSON 响应
@@ -1655,6 +1677,7 @@ class AgentLoopStreamAPIView(View):
                 generate_playwright_script,
                 test_case_id,
                 use_pytest,
+                file_ids,
             ):
                 # 解析 SSE 数据
                 if isinstance(chunk, str) and chunk.startswith("data: "):

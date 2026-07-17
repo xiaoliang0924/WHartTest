@@ -1,6 +1,13 @@
 from rest_framework import serializers
 from .models import ApiInterface, ApiInterfaceResult
 from .payloads import normalize_key_value_pairs, normalize_request_body
+from .validators import SUPPORTED_COMPARATORS, is_validator_meta_key
+from file_management.services import validate_file_ids, sync_file_references
+from file_management.models import FileReference
+
+
+EXTRACT_VARIABLE_TYPES = {'temporary', 'project'}
+EXTRACT_SOURCES = {'response', 'request'}
 
 
 class ApiInterfaceModuleInfoSerializer(serializers.Serializer):
@@ -67,6 +74,16 @@ class ApiInterfaceSerializer(serializers.ModelSerializer):
                 {"module": "Module must belong to the same project."}
             )
 
+        if 'file_ids' in attrs:
+            if project_id is None:
+                raise serializers.ValidationError({"file_ids": "project is required to validate file_ids."})
+            from projects.models import Project
+            try:
+                project_obj = Project.objects.get(id=project_id)
+            except Project.DoesNotExist as exc:
+                raise serializers.ValidationError({"project": "Project does not exist."}) from exc
+            validate_file_ids(attrs.get('file_ids'), project_obj, self.context.get('request').user if self.context.get('request') else None)
+
         if 'headers' in attrs:
             try:
                 attrs['headers'] = normalize_key_value_pairs(attrs.get('headers'), 'headers')
@@ -107,39 +124,81 @@ class ApiInterfaceSerializer(serializers.ModelSerializer):
         if not isinstance(validators, list):
             raise serializers.ValidationError({"validators": "Must be a list."})
 
-        supported_comparators = [
-            'eq', 'ne', 'gt', 'ge', 'gte', 'lt', 'le', 'lte',
-            'contains', 'contained_by', 'type_match', 'regex_match',
-            'startswith', 'endswith', 'str_eq',
-            'length_equal', 'length_greater_than', 'length_less_than',
-            'length_greater_or_equals', 'length_less_or_equals',
-        ]
-
         for validator in validators:
             if not isinstance(validator, dict):
                 raise serializers.ValidationError({"validators": "Each validator must be a dict."})
             if "check" in validator and "expect" in validator:
                 continue
-            valid_format = False
-            for key in validator.keys():
-                if key in supported_comparators:
-                    if not isinstance(validator[key], list) or len(validator[key]) != 2:
-                        raise serializers.ValidationError({
-                            "validators": f"Validator '{key}' must be a list of [field, expected_value]."
-                        })
-                    valid_format = True
-                    break
-            if not valid_format:
+            comparator_keys = [
+                key for key in validator.keys()
+                if not is_validator_meta_key(key)
+            ]
+            supported_keys = [
+                key for key in comparator_keys
+                if key in SUPPORTED_COMPARATORS
+            ]
+            unsupported_keys = [
+                key for key in comparator_keys
+                if key not in SUPPORTED_COMPARATORS
+            ]
+            if unsupported_keys or len(supported_keys) != 1:
                 raise serializers.ValidationError({
                     "validators": (
                         f"Validator must use a supported comparator: "
-                        f"{', '.join(supported_comparators)}, or use check/expect format."
+                        f"{', '.join(sorted(SUPPORTED_COMPARATORS))}, or use check/expect format."
                     )
+                })
+            comparator = supported_keys[0]
+            if not isinstance(validator[comparator], list) or len(validator[comparator]) != 2:
+                raise serializers.ValidationError({
+                    "validators": f"Validator '{comparator}' must be a list of [field, expected_value]."
                 })
 
         extract = attrs.get('extract', {})
         if not isinstance(extract, dict):
             raise serializers.ValidationError({"extract": "Must be a dict."})
+
+        extract_meta = attrs.get(
+            'extract_meta',
+            instance.extract_meta if instance else {},
+        )
+        if not isinstance(extract_meta, dict):
+            raise serializers.ValidationError({"extract_meta": "Must be a dict."})
+
+        normalized_extract_meta = {}
+        for variable_name, meta in extract_meta.items():
+            if not isinstance(meta, dict):
+                raise serializers.ValidationError({
+                    "extract_meta": f"Meta for variable '{variable_name}' must be a dict."
+                })
+
+            variable_type = meta.get('variable_type', 'temporary')
+            if variable_type not in EXTRACT_VARIABLE_TYPES:
+                raise serializers.ValidationError({
+                    "extract_meta": (
+                        f"Variable '{variable_name}' uses unsupported variable_type '{variable_type}'."
+                    )
+                })
+
+            normalized_extract_meta[variable_name] = {
+                'variable_type': variable_type,
+            }
+            if 'source' in meta:
+                source = meta.get('source', 'response')
+                if source not in EXTRACT_SOURCES:
+                    raise serializers.ValidationError({
+                        "extract_meta": (
+                            f"Variable '{variable_name}' uses unsupported source '{source}'."
+                        )
+                    })
+                normalized_extract_meta[variable_name]['source'] = source
+
+        extract_keys = set(extract.keys())
+        attrs['extract_meta'] = {
+            variable_name: meta
+            for variable_name, meta in normalized_extract_meta.items()
+            if variable_name in extract_keys
+        }
 
         return attrs
 
@@ -149,3 +208,22 @@ class ApiInterfaceResultSerializer(serializers.ModelSerializer):
         model = ApiInterfaceResult
         fields = '__all__'
         read_only_fields = ['executed_by', 'executed_at']
+
+
+# 附件引用关系维护
+_original_api_interface_create = ApiInterfaceSerializer.create if hasattr(ApiInterfaceSerializer, 'create') else None
+_original_api_interface_update = ApiInterfaceSerializer.update if hasattr(ApiInterfaceSerializer, 'update') else None
+
+def _api_interface_serializer_create(self, validated_data):
+    instance = super(ApiInterfaceSerializer, self).create(validated_data)
+    sync_file_references(instance.file_ids or [], instance.project, FileReference.REF_API_INTERFACE, instance.id, self.context.get('request').user if self.context.get('request') else None)
+    return instance
+
+def _api_interface_serializer_update(self, instance, validated_data):
+    instance = super(ApiInterfaceSerializer, self).update(instance, validated_data)
+    if 'file_ids' in validated_data:
+        sync_file_references(instance.file_ids or [], instance.project, FileReference.REF_API_INTERFACE, instance.id, self.context.get('request').user if self.context.get('request') else None)
+    return instance
+
+ApiInterfaceSerializer.create = _api_interface_serializer_create
+ApiInterfaceSerializer.update = _api_interface_serializer_update

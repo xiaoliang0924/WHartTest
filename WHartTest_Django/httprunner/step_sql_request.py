@@ -311,7 +311,7 @@ class RunSqlRequest(IStep):
         return StepSqlRequestValidation(self.__step)
 
     def with_jmespath(
-        self, jmes_path: Text, var_name: Text
+        self, jmes_path: Text, var_name: Text, source: Text = "response"
     ) -> "StepSqlRequestExtraction":
         self.__step.extract[var_name] = jmes_path
         return StepSqlRequestExtraction(self.__step)

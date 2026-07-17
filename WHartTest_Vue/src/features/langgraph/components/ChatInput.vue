@@ -37,6 +37,35 @@
       </div>
     </div>
 
+    <div v-if="attachmentFiles.length > 0" class="attachment-preview-wrapper">
+      <div class="attachment-preview-header">
+        <span class="attachment-preview-count">{{ text.selectedAttachments(attachmentFiles.length) }}</span>
+        <a-button type="text" size="mini" class="clear-attachments-btn" @click="clearAttachments">
+          {{ text.clear }}
+        </a-button>
+      </div>
+      <div class="attachment-preview-list">
+        <div
+          v-for="file in attachmentFiles"
+          :key="getFileId(file)"
+          class="attachment-preview-item"
+        >
+          <icon-file class="attachment-file-icon" />
+          <div class="attachment-file-main">
+            <div class="attachment-file-name">{{ getFileName(file) }}</div>
+          </div>
+          <a-button
+            class="remove-attachment-btn"
+            type="text"
+            size="mini"
+            @click="removeAttachment(getFileId(file))"
+          >
+            <template #icon><icon-close /></template>
+          </a-button>
+        </div>
+      </div>
+    </div>
+
     <div
       class="input-wrapper"
       :class="{ 'drag-over': isDragOver }"
@@ -76,6 +105,13 @@
           class="hidden-file-input"
           @change="handleFileInputChange"
         />
+        <input
+          ref="attachmentInputRef"
+          type="file"
+          multiple
+          class="hidden-file-input"
+          @change="handleAttachmentInputChange"
+        />
 
         <a-button
           v-if="supportsVision && !isLoading"
@@ -86,6 +122,20 @@
           <template #icon><icon-image /></template>
           <span>{{ text.image }}</span>
         </a-button>
+        <a-dropdown v-if="!isLoading" trigger="click">
+          <a-button
+            type="secondary"
+            class="upload-button"
+            :loading="isUploadingAttachments"
+          >
+            <template #icon><icon-upload /></template>
+            <span>{{ text.attachment }}</span>
+          </a-button>
+          <template #content>
+            <a-doption @click="openManagedFileChoose">{{ text.chooseManagedFile }}</a-doption>
+            <a-doption @click="openAttachmentPicker">{{ text.uploadLocalFile }}</a-doption>
+          </template>
+        </a-dropdown>
 
         <a-button
           v-if="!isLoading"
@@ -108,6 +158,44 @@
         </a-button>
       </div>
     </div>
+
+    <a-modal
+      v-model:visible="fileChooseVisible"
+      :title="text.chooseManagedFile"
+      :footer="false"
+      width="720px"
+    >
+      <a-input-search
+        v-model="fileChooseKeyword"
+        :placeholder="text.fileSearchPlaceholder"
+        allow-clear
+        class="attachment-search"
+        @search="loadManagedFilesForChoose"
+        @clear="loadManagedFilesForChoose"
+      />
+      <a-table
+        :loading="fileChooseLoading"
+        :data="fileChooseFiles"
+        row-key="id"
+        :pagination="false"
+        size="small"
+      >
+        <template #columns>
+          <a-table-column :title="text.fileName" data-index="name">
+            <template #cell="{ record }">{{ getFileName(record) }}</template>
+          </a-table-column>
+          <a-table-column :title="text.fileType" data-index="mime_type" :width="160" />
+          <a-table-column :title="text.fileSize" data-index="size" :width="110">
+            <template #cell="{ record }">{{ formatFileSize(record.size) }}</template>
+          </a-table-column>
+          <a-table-column :title="text.action" :width="90">
+            <template #cell="{ record }">
+              <a-button size="mini" type="primary" @click="chooseManagedFile(record)">{{ text.choose }}</a-button>
+            </template>
+          </a-table-column>
+        </template>
+      </a-table>
+    </a-modal>
   </div>
 </template>
 
@@ -118,9 +206,12 @@ import {
   Button as AButton,
   Message
 } from '@arco-design/web-vue';
-import { IconImage, IconClose, IconReply, IconSend, IconRecordStop } from '@arco-design/web-vue/es/icon';
+import { IconImage, IconClose, IconReply, IconSend, IconRecordStop, IconUpload, IconFile } from '@arco-design/web-vue/es/icon';
 import TokenUsageIndicator from './TokenUsageIndicator.vue';
 import { useAppI18n } from '@/composables/useAppI18n';
+import { useProjectStore } from '@/store/projectStore';
+import { fileService } from '@/features/file-management/services/fileService';
+import type { FileAsset } from '@/features/file-management/types';
 
 interface ChatMessage {
   content: string;
@@ -148,22 +239,34 @@ const props = withDefaults(defineProps<Props>(), {
   quotedMessage: null
 });
 const { isEnglish } = useAppI18n();
+const projectStore = useProjectStore();
 const text = computed(() => (
   isEnglish.value
     ? {
         selectedImages: (count: number) => `${count} image(s) selected`,
+        selectedAttachments: (count: number) => `${count} attachment(s) selected`,
         clear: 'Clear',
         previewImageAlt: (index: number) => `Preview image ${index}`,
         visionPlaceholder: 'Type a message, drag, paste, or select images... (Shift+Enter newline, Enter send)',
         textPlaceholder: 'Type your message... (Shift+Enter newline, Enter send)',
         dropToUpload: 'Release to upload images',
         image: 'Image',
+        attachment: 'Attachment',
+        chooseManagedFile: 'Choose from files',
+        uploadLocalFile: 'Upload local file',
+        fileSearchPlaceholder: 'Search file name/type',
+        fileName: 'File name',
+        fileType: 'Type',
+        fileSize: 'Size',
+        action: 'Action',
+        choose: 'Choose',
         send: 'Send',
         stop: 'Stop',
         emptyMessageOrImage: 'Enter a message or upload images',
         modelNoVision: 'Current AI model does not support image input.\nRemove images or switch to a multimodal model.\n(Recommended: GPT-4V, Claude 3, Gemini Vision, Qwen-VL)',
         imageProcessFailed: 'Image processing failed, please retry',
         viewImagePrompt: 'Please check the image',
+        viewAttachmentPrompt: 'Please check the attachment',
         onlyImageAllowed: 'Only image files are allowed',
         imageTooLarge: 'Image size cannot exceed 10MB',
         imageFormatInvalid: 'Only JPG, PNG, and GIF images are supported',
@@ -172,21 +275,39 @@ const text = computed(() => (
         modelNoVisionShort: 'Current AI model does not support image input.\nSelect a multimodal model in model management (such as GPT-4V, Claude 3, Qwen-VL).',
         modelNoVisionPaste: 'Current AI model does not support image input.\nSelect a multimodal model in model management.\n(Recommended: GPT-4V, Claude 3, Gemini Vision, Qwen-VL)',
         imagePasted: (count: number) => (count === 1 ? 'Image pasted' : `${count} images pasted`),
+        selectProjectFirst: 'Please select a project first',
+        attachmentUploadSuccess: (count: number) => `${count} attachment(s) uploaded`,
+        attachmentUploadFailed: 'Attachment upload failed',
+        attachmentLoadFailed: 'Failed to load files',
+        attachmentLimitExceeded: (limit: number) => `Up to ${limit} attachments can be selected`,
+        attachmentAlreadySelected: 'This file is already selected',
+        attachmentTooLarge: 'File size cannot exceed 100MB',
       }
     : {
         selectedImages: (count: number) => `已选择 ${count} 张图片`,
+        selectedAttachments: (count: number) => `已选择 ${count} 个附件`,
         clear: '清空',
         previewImageAlt: (index: number) => `预览图片 ${index}`,
         visionPlaceholder: '输入消息、拖拽、粘贴或选择图片... (Shift+Enter换行，Enter发送)',
         textPlaceholder: '请输入你的消息... (Shift+Enter换行，Enter发送)',
         dropToUpload: '释放以上传图片',
         image: '图片',
+        attachment: '附件',
+        chooseManagedFile: '文件管理选择',
+        uploadLocalFile: '上传本地文件',
+        fileSearchPlaceholder: '搜索文件名/类型',
+        fileName: '文件名',
+        fileType: '类型',
+        fileSize: '大小',
+        action: '操作',
+        choose: '选择',
         send: '发送',
         stop: '停止',
         emptyMessageOrImage: '请输入消息或上传图片！',
         modelNoVision: '❌ 当前AI模型不支持图片输入\n请先移除图片或切换到支持多模态的模型\n（推荐：GPT-4V、Claude 3、Gemini Vision、Qwen-VL）',
         imageProcessFailed: '图片处理失败，请重试',
         viewImagePrompt: '请查看图片',
+        viewAttachmentPrompt: '请查看附件',
         onlyImageAllowed: '只能上传图片文件',
         imageTooLarge: '图片大小不能超过10MB',
         imageFormatInvalid: '仅支持JPG、PNG、GIF格式的图片',
@@ -195,6 +316,13 @@ const text = computed(() => (
         modelNoVisionShort: '💡 当前AI模型不支持图片输入\n请在模型管理中选择支持多模态的模型（如GPT-4V、Claude 3、Qwen-VL等）',
         modelNoVisionPaste: '💡 当前AI模型不支持图片输入\n请在模型管理中选择支持多模态的模型\n（推荐：GPT-4V、Claude 3、Gemini Vision、Qwen-VL）',
         imagePasted: (count: number) => (count === 1 ? '图片已粘贴' : `已粘贴 ${count} 张图片`),
+        selectProjectFirst: '请先选择项目',
+        attachmentUploadSuccess: (count: number) => `已上传 ${count} 个附件`,
+        attachmentUploadFailed: '附件上传失败',
+        attachmentLoadFailed: '加载文件失败',
+        attachmentLimitExceeded: (limit: number) => `单次最多选择 ${limit} 个附件`,
+        attachmentAlreadySelected: '该文件已选择',
+        attachmentTooLarge: '文件大小不能超过 100MB',
       }
 ));
 
@@ -206,6 +334,8 @@ const emit = defineEmits<{
     images?: string[];
     imageDataUrls?: string[];
     quotedMessage?: ChatMessage | null;
+    file_ids?: number[];
+    files?: FileAsset[];
   }];
   'clear-quote': [];
   'stop-generation': [];
@@ -220,8 +350,18 @@ const truncateQuote = (text: string): string => {
 const inputMessage = ref('');
 const imageFiles = ref<File[]>([]);
 const imagePreviews = ref<string[]>([]);
+const attachmentFileIds = ref<number[]>([]);
+const attachmentFiles = ref<FileAsset[]>([]);
+const isUploadingAttachments = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
+const attachmentInputRef = ref<HTMLInputElement | null>(null);
 const isDragOver = ref(false);
+const fileChooseVisible = ref(false);
+const fileChooseLoading = ref(false);
+const fileChooseKeyword = ref('');
+const fileChooseFiles = ref<FileAsset[]>([]);
+const maxAttachmentCount = 5;
+const maxAttachmentSize = 100 * 1024 * 1024;
 
 const handleStopGeneration = () => {
   emit('stop-generation');
@@ -240,10 +380,65 @@ const clearImages = () => {
   }
 };
 
+const getFileId = (file: FileAsset) => Number(file.file_id || file.id);
+
+const getFileName = (file: Partial<FileAsset>) => file.name || file.original_name || `file-${file.id || file.file_id || ''}`;
+
+const formatFileSize = (size?: number) => {
+  if (!Number.isFinite(size || 0) || !size) return '0 B';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`;
+};
+
+const normalizeUploadedFiles = (payload: any): FileAsset[] => {
+  const list = Array.isArray(payload) ? payload : [payload];
+  return list.filter((item): item is FileAsset => Boolean(item && (item.id || item.file_id)));
+};
+
+const canAddAttachmentCount = (count: number) => {
+  if (attachmentFiles.value.length + count > maxAttachmentCount) {
+    Message.warning(text.value.attachmentLimitExceeded(maxAttachmentCount));
+    return false;
+  }
+  return true;
+};
+
+const addAttachmentFiles = (files: FileAsset[]) => {
+  const incoming = files.filter((file) => Boolean(getFileId(file)));
+  if (!incoming.length) return;
+
+  const existingIds = new Set(attachmentFiles.value.map(getFileId));
+  const uniqueIncoming = incoming.filter((file) => !existingIds.has(getFileId(file)));
+
+  if (uniqueIncoming.length === 0) {
+    Message.warning(text.value.attachmentAlreadySelected);
+    return;
+  }
+
+  if (!canAddAttachmentCount(uniqueIncoming.length)) {
+    return;
+  }
+
+  attachmentFiles.value = [...attachmentFiles.value, ...uniqueIncoming];
+  attachmentFileIds.value = attachmentFiles.value.map(getFileId);
+};
+
+const removeAttachment = (fileId: number) => {
+  attachmentFiles.value = attachmentFiles.value.filter((file) => getFileId(file) !== fileId);
+  attachmentFileIds.value = attachmentFiles.value.map(getFileId);
+};
+
+const clearAttachments = () => {
+  attachmentFiles.value = [];
+  attachmentFileIds.value = [];
+};
+
 const handleSendMessage = async () => {
   const message = inputMessage.value.trim();
 
-  if (!message && imageFiles.value.length === 0) {
+  if (!message && imageFiles.value.length === 0 && attachmentFileIds.value.length === 0) {
     Message.warning(text.value.emptyMessageOrImage);
     return;
   }
@@ -271,16 +466,19 @@ const handleSendMessage = async () => {
   }
 
   emit('send-message', {
-    message: message || text.value.viewImagePrompt,
+    message: message || (imageFiles.value.length > 0 ? text.value.viewImagePrompt : text.value.viewAttachmentPrompt),
     image: imageBase64List[0],
     imageDataUrl: imageDataUrlList[0],
     images: imageBase64List,
     imageDataUrls: imageDataUrlList,
-    quotedMessage: props.quotedMessage
+    quotedMessage: props.quotedMessage,
+    file_ids: attachmentFileIds.value,
+    files: attachmentFiles.value
   });
 
   inputMessage.value = '';
   clearImages();
+  clearAttachments();
 };
 
 const fileToBase64WithDataUrl = (file: File): Promise<{ base64: string; dataUrl: string }> => {
@@ -363,6 +561,84 @@ const appendImageFiles = async (files: File[]) => {
 
 const openFilePicker = () => {
   fileInputRef.value?.click();
+};
+
+const openAttachmentPicker = () => {
+  attachmentInputRef.value?.click();
+};
+
+const openManagedFileChoose = async () => {
+  if (!projectStore.currentProjectId) {
+    Message.warning(text.value.selectProjectFirst);
+    return;
+  }
+  fileChooseVisible.value = true;
+  await loadManagedFilesForChoose();
+};
+
+const loadManagedFilesForChoose = async () => {
+  if (!projectStore.currentProjectId) return;
+  fileChooseLoading.value = true;
+  try {
+    const res: any = await fileService.list(projectStore.currentProjectId, {
+      page: 1,
+      page_size: 50,
+      search: fileChooseKeyword.value || undefined,
+      ordering: '-created_at',
+    });
+    const payload = res?.data?.data || res?.data || res;
+    fileChooseFiles.value = Array.isArray(payload) ? payload : (payload.results || payload.data || []);
+  } catch (error: any) {
+    Message.error(error?.message || text.value.attachmentLoadFailed);
+  } finally {
+    fileChooseLoading.value = false;
+  }
+};
+
+const chooseManagedFile = (file: FileAsset) => {
+  addAttachmentFiles([file]);
+  fileChooseVisible.value = false;
+};
+
+const validateAttachmentFile = (file: File) => {
+  if (file.size > maxAttachmentSize) {
+    Message.warning(text.value.attachmentTooLarge);
+    return false;
+  }
+  return true;
+};
+
+const handleAttachmentInputChange = async (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const files = input.files ? Array.from(input.files) : [];
+  if (!files.length) return;
+  if (!projectStore.currentProjectId) {
+    Message.warning(text.value.selectProjectFirst);
+    input.value = '';
+    return;
+  }
+  const validFiles = files.filter(validateAttachmentFile);
+  if (!validFiles.length) {
+    input.value = '';
+    return;
+  }
+  if (!canAddAttachmentCount(validFiles.length)) {
+    input.value = '';
+    return;
+  }
+  isUploadingAttachments.value = true;
+  try {
+    const res: any = await fileService.upload(projectStore.currentProjectId, validFiles);
+    const payload = res?.data?.data || res?.data || res;
+    const uploaded = normalizeUploadedFiles(payload);
+    addAttachmentFiles(uploaded);
+    Message.success(text.value.attachmentUploadSuccess(uploaded.length));
+  } catch (error: any) {
+    Message.error(error?.message || text.value.attachmentUploadFailed);
+  } finally {
+    isUploadingAttachments.value = false;
+    input.value = '';
+  }
 };
 
 const handleFileInputChange = async (event: Event) => {
@@ -492,6 +768,78 @@ const handlePaste = (e: ClipboardEvent) => {
 }
 
 .image-preview-wrapper {
+  margin-bottom: 12px;
+}
+
+.attachment-preview-wrapper {
+  margin-bottom: 12px;
+}
+
+.attachment-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.attachment-preview-count {
+  font-size: 12px;
+  color: #4e5969;
+  font-weight: 500;
+}
+
+.clear-attachments-btn {
+  color: #86909c !important;
+}
+
+.attachment-preview-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attachment-preview-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(100%, 320px);
+  min-width: 220px;
+  padding: 8px 10px;
+  border: 1px solid #e5e6eb;
+  border-radius: 8px;
+  background: #f7f8fa;
+}
+
+.attachment-file-icon {
+  flex-shrink: 0;
+  color: #165dff;
+  font-size: 18px;
+}
+
+.attachment-file-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.attachment-file-name {
+  font-size: 13px;
+  color: #1d2129;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remove-attachment-btn {
+  flex-shrink: 0;
+  color: #86909c !important;
+}
+
+.remove-attachment-btn:hover {
+  color: #f53f3f !important;
+}
+
+.attachment-search {
   margin-bottom: 12px;
 }
 

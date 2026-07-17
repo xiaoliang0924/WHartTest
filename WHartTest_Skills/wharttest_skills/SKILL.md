@@ -1,6 +1,6 @@
 ---
 name: whart-test
-description: WHartTest测试管理平台工具集。用于管理项目、模块、测试用例的增删改查，以及测试截图上传。当用户需要操作测试用例、查询项目信息或上传截图时使用。
+description: WHartTest测试管理平台工具集。用于管理项目、模块、测试用例、测试截图和项目文件附件的增删改查。当用户需要操作测试用例、查询项目信息、上传截图、上传/下载/预览/删除项目文件、校验 file_ids 或管理文件清理设置时使用。
 ---
 
 # WHartTest 测试管理平台
@@ -24,7 +24,7 @@ python whart_tools.py --action <action_name> [--参数名 参数值]
 |--------|------|------|
 | `get_projects` | 获取所有项目列表 | 无 |
 | `get_modules` | 获取项目下的模块列表 | `--project_id` |
-| `add_module` | 新增功能用例模块 | `--project_id`, `--name`, `--parent_id` (可选) |
+| `add_module` | 新增用例模块 | `--project_id`, `--name`, `--parent_id` (可选) |
 
 ### 用例管理
 
@@ -47,6 +47,27 @@ python whart_tools.py --action <action_name> [--参数名 参数值]
 
 **单张上传**：`--file_path "case_11_step1.png"`
 **批量上传**：`--file_paths "step1.png,step2.png,step3.png"`（最多10张，逗号分隔）
+
+### 文件管理
+
+| Action | 描述 | 参数 |
+|--------|------|------|
+| `list_files` | 获取项目文件列表 | `--project_id`, `--page`, `--page_size`, `--search`, `--status`, `--extension`, `--mime_type`, `--ordering` |
+| `get_file_detail` | 获取文件详情 | `--project_id`, `--file_id` |
+| `upload_file` | 上传单个项目文件 | `--project_id`, `--file_path` |
+| `upload_files` | 批量上传项目文件 | `--project_id`, `--file_paths`(逗号分隔) |
+| `validate_files` | 校验 file_ids 是否存在、属于项目且状态可用 | `--project_id`, `--file_ids`(JSON数组或逗号分隔) |
+| `get_file_references` | 获取文件引用详情 | `--project_id`, `--file_id` |
+| `delete_file` | 删除项目文件；被引用文件由后端软删除 | `--project_id`, `--file_id` |
+| `get_file_settings` | 获取项目文件管理设置 | `--project_id` |
+| `update_file_settings` | 更新自动清理设置 | `--project_id`, `--auto_delete_on_unbind`, `--auto_delete_zero_refs` |
+| `cleanup_unreferenced_files` | 立即清理无引用项目文件 | `--project_id` |
+| `download_file` | 下载文件到本地 | `--project_id`, `--file_id`, `--output_path` 或 `--output_dir` |
+| `preview_file` | 预览文件；文本直接返回，二进制可保存 | `--project_id`, `--file_id`, `--output_path`(可选) |
+
+**文件 ID 约定**：上传文件后返回的 `id` / `file_id` 可传给接口自动化、UI 自动化或智能体对话中的 `file_ids` 字段。使用前可通过 `validate_files` 校验。
+
+**设置布尔值**：`--auto_delete_on_unbind` 与 `--auto_delete_zero_refs` 使用 `true` / `false`。
 
 ### 审核状态
 
@@ -114,6 +135,34 @@ python whart_tools.py --action upload_screenshots \
   --case_id 10 \
   --file_paths "step1.png,step2.png,step3.png" \
   --title "登录测试截图"
+
+# 上传项目文件
+python whart_tools.py --action upload_file \
+  --project_id 1 \
+  --file_path "./需求说明.docx"
+
+# 查询项目文件
+python whart_tools.py --action list_files \
+  --project_id 1 \
+  --search "需求" \
+  --page_size 20
+
+# 校验附件 file_ids
+python whart_tools.py --action validate_files \
+  --project_id 1 \
+  --file_ids "12,13"
+
+# 下载项目文件
+python whart_tools.py --action download_file \
+  --project_id 1 \
+  --file_id 12 \
+  --output_dir "./downloads"
+
+# 更新文件清理设置
+python whart_tools.py --action update_file_settings \
+  --project_id 1 \
+  --auto_delete_on_unbind true \
+  --auto_delete_zero_refs false
 ```
 
 ## 输出格式

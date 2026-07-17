@@ -26,11 +26,19 @@ def get_exe_dir() -> Path:
 
 def get_browser_path() -> Path:
     """获取浏览器存储路径（相对于 exe 目录）"""
+    env_browser_path = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '').strip()
+    if env_browser_path:
+        return Path(env_browser_path)
     return get_exe_dir() / "browsers"
 
 
 def setup_playwright_env() -> None:
     """设置 Playwright 环境变量，使其使用相对路径存储浏览器"""
+    existing_browser_path = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '').strip()
+    if existing_browser_path:
+        logger.info(f"Playwright 浏览器路径(环境变量): {existing_browser_path}")
+        return
+
     browser_path = get_browser_path()
     # 设置 Playwright 浏览器存储路径
     os.environ['PLAYWRIGHT_BROWSERS_PATH'] = str(browser_path)

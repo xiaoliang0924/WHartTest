@@ -4,11 +4,19 @@ import json
 import logging
 import types
 from httprunner import HttpRunner, Config, Step, RunRequest, RunSqlRequest
+from httprunner.client import sanitize_json_record
 from api_interfaces.logging_utils import new_trace_id, summarize_for_log
+from file_management.services import validate_file_ids, serialize_file_for_runtime
 from api_interfaces.payloads import (
     flatten_key_value_pairs,
     normalize_request_body,
     prepare_request_body_for_runner,
+)
+from api_interfaces.validators import prepare_validator_for_runtime
+from api_interfaces.runner_uploads import (
+    apply_upload_files_to_step,
+    collect_file_ids_from_body,
+    merge_file_ids,
 )
 from .models import ApiTestCase, ApiTestCaseStep
 
@@ -68,6 +76,18 @@ def load_custom_functions(project_id):
         logger.error(f"Error loading custom functions for project [{project_id}]: {str(e)}")
 
     return functions
+
+
+
+def _resolve_runtime_files(project_id, file_ids):
+    if not project_id or not file_ids:
+        return []
+    try:
+        from projects.models import Project
+        project = Project.objects.get(id=project_id)
+        return [serialize_file_for_runtime(asset) for asset in validate_file_ids(file_ids, project)]
+    except Exception as exc:
+        raise ValueError(f'附件校验失败: {exc}') from exc
 
 
 class TestCaseRunner(HttpRunner):
@@ -252,6 +272,18 @@ class TestCaseRunner(HttpRunner):
         steps = []
         for step in self.testcase.steps.all().order_by('order'):
             interface_data = step.interface_data
+            step_file_ids = merge_file_ids(
+                step.file_ids,
+                interface_data.get('file_ids') if isinstance(interface_data, dict) else [],
+                collect_file_ids_from_body(interface_data.get('body') if isinstance(interface_data, dict) else None),
+            )
+            if isinstance(interface_data, dict):
+                interface_data['file_ids'] = step_file_ids
+            step_runtime_files = _resolve_runtime_files(self.testcase.project_id, step_file_ids)
+            if step_runtime_files:
+                self.variables = self.variables or {}
+                self.variables['file_ids'] = [item['id'] for item in step_runtime_files]
+                self.variables['files'] = step_runtime_files
             step_type = interface_data.get('type', 'http').lower()
 
             if step_type == 'sql':
@@ -386,8 +418,18 @@ class TestCaseRunner(HttpRunner):
                         })
                     if request_snapshot is not None:
                         request_snapshot['body'] = copy.deepcopy(body)
+                    step_obj, upload_applied = apply_upload_files_to_step(
+                        step_obj,
+                        normalized_body,
+                        step_runtime_files,
+                    )
+                    if request_snapshot is not None:
+                        request_snapshot['headers'] = copy.deepcopy(
+                            step_obj.struct().request.headers,
+                        )
                     if normalized_body['type'] in {'form-data', 'x-www-form-urlencoded', 'binary'}:
-                        step_obj = step_obj.with_data(body)
+                        if not upload_applied:
+                            step_obj = step_obj.with_data(body)
                     else:
                         step_obj = step_obj.with_json(body)
                 else:
@@ -434,8 +476,12 @@ class TestCaseRunner(HttpRunner):
             # Add variable extractors
             if interface_data.get('extract'):
                 step_obj = step_obj.extract()
+                extract_meta = interface_data.get('extract_meta')
+                extract_meta = extract_meta if isinstance(extract_meta, dict) else {}
                 for var_name, expr in interface_data['extract'].items():
-                    step_obj = step_obj.with_jmespath(expr, var_name)
+                    meta = extract_meta.get(var_name, {})
+                    source = meta.get('source') if isinstance(meta, dict) else 'response'
+                    step_obj = step_obj.with_jmespath(expr, var_name, source=source)
 
             # Create Step object
             step = Step(step_obj)
@@ -444,34 +490,11 @@ class TestCaseRunner(HttpRunner):
             if interface_data.get('validators'):
                 step_obj = step_obj.validate()
                 for validator in interface_data['validators']:
-                    if isinstance(validator, dict):
-                        if "check" in validator and "expect" in validator:
-                            step_obj = step_obj.assert_equal(validator["check"], validator["expect"])
-                        elif "eq" in validator:
-                            check_value = validator["eq"][0]
-                            expect_value = validator["eq"][1]
-                            step_obj = step_obj.assert_equal(check_value, expect_value)
-                        elif len(validator) == 1:
-                            comparator = list(validator.keys())[0]
-                            check_item, expected_value = validator[comparator]
-                            comparator_map = {
-                                "eq": "assert_equal",
-                                "lt": "assert_less_than",
-                                "le": "assert_less_or_equals",
-                                "gt": "assert_greater_than",
-                                "ge": "assert_greater_or_equals",
-                                "ne": "assert_not_equal",
-                                "str_eq": "assert_string_equals",
-                                "contains": "assert_contains",
-                                "contained_by": "assert_contained_by",
-                                "type_match": "assert_type_match",
-                                "regex_match": "assert_regex_match",
-                            }
-                            method_name = comparator_map.get(comparator)
-                            if method_name:
-                                step_obj = getattr(step_obj, method_name)(check_item, expected_value)
-                            else:
-                                logger.warning(f"Unsupported comparator: {comparator}")
+                    runtime_validator = prepare_validator_for_runtime(validator)
+                    if not runtime_validator:
+                        logger.warning(f"Unsupported validator format: {validator}")
+                        continue
+                    step_obj.struct().validators.append(runtime_validator)
 
             self.teststeps.append(step)
             if body_diagnostic is not None:
@@ -634,7 +657,7 @@ class TestCaseRunner(HttpRunner):
 
         for index, step_result in enumerate(summary.step_results):
             step_type = step_result.step_type
-            validators = getattr(step_result.data, 'validators', {})
+            validators = sanitize_json_record(getattr(step_result.data, 'validators', {}))
             success = step_result.success and not self._validators_indicate_failure(validators)
 
             result = {
@@ -643,10 +666,10 @@ class TestCaseRunner(HttpRunner):
                 'elapsed': step_result.elapsed,
                 'step_type': step_type,
                 'data': {
-                    'extracted_variables': step_result.export_vars,
+                    'extracted_variables': sanitize_json_record(step_result.export_vars),
                     'validators': validators
                 },
-                'attachment': step_result.attachment
+                'attachment': sanitize_json_record(step_result.attachment)
             }
 
             if step_type == 'request':
@@ -658,12 +681,12 @@ class TestCaseRunner(HttpRunner):
                 if request_result_index < len(step_request_snapshots):
                     request_snapshot = step_request_snapshots[request_result_index]
                 request_result_index += 1
-                request_data = {
+                request_data = sanitize_json_record({
                     'method': req_resp.request.method if req_resp else None,
                     'url': req_resp.request.url if req_resp else None,
                     'headers': req_resp.request.headers if req_resp else {},
                     'body': req_resp.request.body if req_resp else None
-                }
+                })
                 status_code = req_resp.response.status_code if req_resp else None
                 response_error = (
                     getattr(req_resp.response, 'error', None)
@@ -686,9 +709,10 @@ class TestCaseRunner(HttpRunner):
                     status_code,
                     request_snapshot,
                 )
+                request_data = sanitize_json_record(request_data)
                 result['data'].update({
                     'request': request_data,
-                    'response': {
+                    'response': sanitize_json_record({
                         'status_code': status_code,
                         'headers': req_resp.response.headers if req_resp else {},
                         'body': req_resp.response.body if req_resp else None,
@@ -697,7 +721,7 @@ class TestCaseRunner(HttpRunner):
                         'error': response_error,
                         'error_type': response_error_type,
                         'is_transport_error': is_transport_error,
-                    }
+                    })
                 })
                 logger.info(
                     "Testcase step result assembled: trace_id=%s testcase_id=%s "
@@ -753,14 +777,14 @@ class TestCaseRunner(HttpRunner):
                 sql_result = None
                 if hasattr(step_result.data, 'sql_response'):
                     sql_result = step_result.data.sql_response
-                result['data'].update({
+                result['data'].update(sanitize_json_record({
                     'sql_request': {
                         'sql': getattr(step_result.data, 'sql', None),
                         'method': getattr(step_result.data, 'method', None),
                         'db_config': getattr(step_result.data, 'db_config', {})
                     },
                     'sql_response': sql_result
-                })
+                }))
 
             results.append(result)
 

@@ -129,7 +129,7 @@ service.interceptors.response.use(
     const res = response.data;
 
     // 检查后端返回的标准格式 { status, code, message, data, errors }
-    if (res && 'status' in res && 'data' in res) {
+    if (res && typeof res === 'object' && 'status' in res && 'data' in res) {
       return {
         ...response,
         data: {

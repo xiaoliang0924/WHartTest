@@ -8,12 +8,15 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.db.models.deletion import ProtectedError
 from django.db import transaction
+from copy import deepcopy
+from file_management.services import maybe_cleanup_unreferenced_files, sync_file_references
 
 from .models import (
     UiModule, UiPage, UiElement, UiPageSteps, UiPageStepsDetailed,
     UiTestCase, UiCaseStepsDetailed, UiExecutionRecord, UiPublicData, UiEnvironmentConfig,
     UiBatchExecutionRecord
 )
+from file_management.models import FileReference
 from .serializers import (
     UiModuleSerializer, UiPageSerializer, UiPageDetailSerializer,
     UiElementSerializer, UiPageStepsSerializer, UiPageStepsListSerializer, UiPageStepsDetailSerializer,
@@ -22,6 +25,60 @@ from .serializers import (
     UiPublicDataSerializer, UiEnvironmentConfigSerializer, UiTestCaseExecuteSerializer,
     UiPageStepsExecuteSerializer, UiBatchExecutionRecordSerializer, UiBatchExecutionRecordDetailSerializer
 )
+
+
+
+def _ui_step_detail_ref_id(step_or_id):
+    step_id = getattr(step_or_id, 'id', step_or_id)
+    return f'detail:{step_id}'
+
+
+def _extract_upload_file_id_from_step(step):
+    if not step or step.ope_key != 'upload' or not isinstance(step.ope_value, dict):
+        return None
+    file_id = step.ope_value.get('file_id')
+    if file_id in (None, ''):
+        value = step.ope_value.get('value')
+        if isinstance(value, str) and value.startswith('file_id:'):
+            file_id = value.split(':', 1)[1]
+    try:
+        return int(file_id) if file_id not in (None, '') else None
+    except (TypeError, ValueError):
+        return None
+
+
+
+
+def _sync_upload_step_file_reference(step, user=None):
+    if not step or not step.id:
+        return []
+    project = step.page_step.project if step.page_step_id and step.page_step else None
+    if not project:
+        return []
+    file_id = _extract_upload_file_id_from_step(step)
+    file_ids = [file_id] if file_id else []
+    return sync_file_references(
+        file_ids,
+        project,
+        FileReference.REF_UI_PAGE_STEPS,
+        _ui_step_detail_ref_id(step),
+        user,
+    )
+
+
+def _remove_upload_step_file_reference(step, user=None):
+    if not step or not step.id:
+        return []
+    project = step.page_step.project if step.page_step_id and step.page_step else None
+    if not project:
+        return []
+    old_file_ids = list(FileReference.objects.filter(
+        project=project,
+        ref_type=FileReference.REF_UI_PAGE_STEPS,
+        ref_id=_ui_step_detail_ref_id(step),
+    ).values_list('file_id', flat=True))
+    sync_file_references([], project, FileReference.REF_UI_PAGE_STEPS, _ui_step_detail_ref_id(step), user)
+    return old_file_ids
 
 
 class UiModuleViewSet(viewsets.ModelViewSet):
@@ -234,6 +291,57 @@ class UiPageViewSet(viewsets.ModelViewSet):
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    @action(detail=True, methods=['post'], url_path='copy')
+    def copy(self, request, pk=None):
+        """复制页面，并复制页面下的元素。"""
+        source = self.get_object()
+        target_module_id = request.data.get('target_module_id') or request.data.get('module')
+
+        if target_module_id:
+            target_module = UiModule.objects.get(pk=target_module_id, project=source.project)
+        else:
+            target_module = source.module
+
+        with transaction.atomic():
+            base_name = request.data.get('name') or f'{source.name} - 副本'
+            candidate_name = base_name
+            suffix = 2
+            while UiPage.objects.filter(project=source.project, module=target_module, name=candidate_name).exists():
+                candidate_name = f'{base_name} {suffix}'
+                suffix += 1
+
+            copied_page = UiPage.objects.create(
+                project=source.project,
+                module=target_module,
+                name=candidate_name,
+                url=source.url,
+                description=source.description,
+                creator=request.user,
+            )
+
+            for element in source.elements.all():
+                UiElement.objects.create(
+                    page=copied_page,
+                    name=element.name,
+                    locator_type=element.locator_type,
+                    locator_value=element.locator_value,
+                    locator_index=element.locator_index,
+                    locator_type_2=element.locator_type_2,
+                    locator_value_2=element.locator_value_2,
+                    locator_index_2=element.locator_index_2,
+                    locator_type_3=element.locator_type_3,
+                    locator_value_3=element.locator_value_3,
+                    locator_index_3=element.locator_index_3,
+                    wait_time=element.wait_time,
+                    is_iframe=element.is_iframe,
+                    iframe_locator=element.iframe_locator,
+                    description=element.description,
+                    creator=request.user,
+                )
+
+        serializer = self.get_serializer(copied_page)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
 
 class UiElementViewSet(viewsets.ModelViewSet):
     """元素管理视图"""
@@ -247,6 +355,16 @@ class UiElementViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(creator=self.request.user)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        usage_count = instance.step_details.count()
+        if usage_count:
+            return Response(
+                {'error': f'元素已被 {usage_count} 个页面步骤引用，无法删除。请先移除相关步骤中的元素引用'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return super().destroy(request, *args, **kwargs)
 
 
 class UiPageStepsViewSet(viewsets.ModelViewSet):
@@ -289,6 +407,67 @@ class UiPageStepsViewSet(viewsets.ModelViewSet):
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    @action(detail=True, methods=['post'], url_path='copy')
+    def copy(self, request, pk=None):
+        """复制页面步骤，并复制其步骤详情。"""
+        source = self.get_object()
+        target_page_id = request.data.get('target_page_id') or request.data.get('page')
+
+        if target_page_id:
+            target_page = UiPage.objects.get(pk=target_page_id, project=source.project)
+            target_module = target_page.module
+        else:
+            target_page = source.page
+            target_module = source.module
+
+        with transaction.atomic():
+            base_name = request.data.get('name') or f'{source.name} - 副本'
+            candidate_name = base_name
+            suffix = 2
+            while UiPageSteps.objects.filter(project=source.project, page=target_page, name=candidate_name).exists():
+                candidate_name = f'{base_name} {suffix}'
+                suffix += 1
+
+            copied_step = UiPageSteps.objects.create(
+                project=source.project,
+                page=target_page,
+                module=target_module,
+                name=candidate_name,
+                description=source.description,
+                run_flow=source.run_flow,
+                flow_data=deepcopy(source.flow_data or {}),
+                file_ids=deepcopy(source.file_ids or []),
+                status=0,
+                result_data=None,
+                creator=request.user,
+            )
+            sync_file_references(
+                copied_step.file_ids or [],
+                copied_step.project,
+                FileReference.REF_UI_PAGE_STEPS,
+                copied_step.id,
+                request.user,
+            )
+
+            for detail in source.step_details.all().order_by('step_sort'):
+                copied_detail = UiPageStepsDetailed.objects.create(
+                    page_step=copied_step,
+                    step_type=detail.step_type,
+                    element=detail.element,
+                    step_sort=detail.step_sort,
+                    ope_key=detail.ope_key,
+                    ope_value=deepcopy(detail.ope_value),
+                    sql_execute=deepcopy(detail.sql_execute),
+                    custom=deepcopy(detail.custom),
+                    condition_value=deepcopy(detail.condition_value),
+                    func=detail.func,
+                    description=detail.description,
+                )
+                _sync_upload_step_file_reference(copied_detail, request.user)
+
+        serializer = self.get_serializer(copied_step)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
     @action(detail=True, methods=['get'], url_path='execute-data')
     def execute_data(self, request, pk=None):
         """获取页面步骤执行数据（包含元素定位信息）"""
@@ -299,12 +478,27 @@ class UiPageStepsViewSet(viewsets.ModelViewSet):
 
 class UiPageStepsDetailedViewSet(viewsets.ModelViewSet):
     """步骤详情管理视图"""
-    queryset = UiPageStepsDetailed.objects.select_related('page_step', 'element')
+    queryset = UiPageStepsDetailed.objects.select_related('page_step', 'page_step__project', 'element')
     serializer_class = UiPageStepsDetailedSerializer
     filter_backends = [DjangoFilterBackend, OrderingFilter]
     filterset_fields = ['page_step', 'step_type']
     ordering_fields = ['step_sort', 'created_at']
     ordering = ['page_step', 'step_sort']
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        _sync_upload_step_file_reference(instance, self.request.user)
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        _sync_upload_step_file_reference(instance, self.request.user)
+
+    def perform_destroy(self, instance):
+        project = instance.page_step.project if instance.page_step_id and instance.page_step else None
+        old_file_ids = _remove_upload_step_file_reference(instance, self.request.user)
+        instance.delete()
+        if old_file_ids and project:
+            maybe_cleanup_unreferenced_files(project, candidate_file_ids=old_file_ids, reason='unbind')
 
     @action(detail=False, methods=['post'])
     def batch_update(self, request):
@@ -313,17 +507,47 @@ class UiPageStepsDetailedViewSet(viewsets.ModelViewSet):
         steps = request.data.get('steps', [])
         if not page_step_id:
             return Response({'error': 'page_step 参数必填'}, status=status.HTTP_400_BAD_REQUEST)
-        # 删除旧步骤，创建新步骤
-        UiPageStepsDetailed.objects.filter(page_step_id=page_step_id).delete()
-        for idx, step_data in enumerate(steps):
-            step_data['page_step'] = page_step_id
-            step_data['step_sort'] = idx
-            # 兼容 element_id 和 element 两种参数名
-            if 'element_id' in step_data and 'element' not in step_data:
-                step_data['element'] = step_data.pop('element_id')
-            serializer = self.get_serializer(data=step_data)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
+        with transaction.atomic():
+            qs = self.get_queryset().select_related('page_step', 'page_step__project').filter(page_step_id=page_step_id)
+            submitted_ids = [s.get('id') for s in steps if s.get('id')]
+            old_file_ids = []
+            project = None
+
+            # 仅删除被移除的步骤详情，对已提交的进行原地更新，
+            # 避免重建改变主键 id 导致引用该步骤详情的用例 case_data 全部失效；
+            # 同时同步维护上传文件引用，避免删除/更新步骤后遗留无效引用。
+            removed_steps = list(qs.exclude(id__in=submitted_ids)) if submitted_ids else list(qs)
+            for old_step in removed_steps:
+                old_file_ids.extend(_remove_upload_step_file_reference(old_step, request.user))
+                if project is None and old_step.page_step_id and old_step.page_step:
+                    project = old_step.page_step.project
+            if submitted_ids:
+                qs.exclude(id__in=submitted_ids).delete()
+            else:
+                qs.delete()
+
+            for idx, step_data in enumerate(steps):
+                step_data['page_step'] = page_step_id
+                step_data['step_sort'] = idx
+                # 兼容 element_id 和 element 两种参数名
+                if 'element_id' in step_data and 'element' not in step_data:
+                    step_data['element'] = step_data.pop('element_id')
+                sid = step_data.pop('id', None)
+                instance = qs.filter(id=sid).first() if sid else None
+                if instance:
+                    if project is None and instance.page_step_id and instance.page_step:
+                        project = instance.page_step.project
+                    serializer = self.get_serializer(instance, data=step_data, partial=True)
+                else:
+                    serializer = self.get_serializer(data=step_data)
+                serializer.is_valid(raise_exception=True)
+                instance = serializer.save()
+                _sync_upload_step_file_reference(instance, request.user)
+                if project is None and instance.page_step_id and instance.page_step:
+                    project = instance.page_step.project
+
+            if old_file_ids and project:
+                maybe_cleanup_unreferenced_files(project, candidate_file_ids=old_file_ids, reason='unbind')
         return Response({'message': '批量更新成功'})
 
 
@@ -365,6 +589,68 @@ class UiTestCaseViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='copy')
+    def copy(self, request, pk=None):
+        """复制 UI 自动化测试用例，并复制用例步骤。"""
+        source = self.get_object()
+        target_module_id = request.data.get('target_module_id') or request.data.get('module')
+
+        if target_module_id:
+            target_module = UiModule.objects.get(pk=target_module_id, project=source.project)
+        else:
+            target_module = source.module
+
+        with transaction.atomic():
+            base_name = request.data.get('name') or f'{source.name} - 副本'
+            candidate_name = base_name
+            suffix = 2
+            while UiTestCase.objects.filter(project=source.project, module=target_module, name=candidate_name).exists():
+                candidate_name = f'{base_name} {suffix}'
+                suffix += 1
+
+            copied_case = UiTestCase.objects.create(
+                project=source.project,
+                module=target_module,
+                name=candidate_name,
+                description=source.description,
+                level=source.level,
+                status=0,
+                front_custom=deepcopy(source.front_custom or []),
+                front_sql=deepcopy(source.front_sql or []),
+                posterior_sql=deepcopy(source.posterior_sql or []),
+                parametrize=deepcopy(source.parametrize or []),
+                case_flow=source.case_flow,
+                file_ids=deepcopy(source.file_ids or []),
+                result_data=None,
+                error_message=None,
+                creator=request.user,
+            )
+            sync_file_references(
+                copied_case.file_ids or [],
+                copied_case.project,
+                FileReference.REF_UI_TESTCASE,
+                copied_case.id,
+                request.user,
+            )
+
+            for case_step in source.case_steps.all().order_by('case_sort'):
+                UiCaseStepsDetailed.objects.create(
+                    test_case=copied_case,
+                    page_step=case_step.page_step,
+                    case_sort=case_step.case_sort,
+                    case_data=deepcopy(case_step.case_data),
+                    case_cache_data=deepcopy(case_step.case_cache_data),
+                    case_cache_ass=deepcopy(case_step.case_cache_ass),
+                    switch_step_open_url=case_step.switch_step_open_url,
+                    error_retry=case_step.error_retry,
+                    status=0,
+                    error_message=None,
+                    result_data=None,
+                )
+
+        serializer = self.get_serializer(copied_case)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['post'], url_path='batch-delete')
     def batch_delete(self, request, **kwargs):
@@ -460,14 +746,26 @@ class UiCaseStepsDetailedViewSet(viewsets.ModelViewSet):
         steps = request.data.get('steps', [])
         if not test_case_id:
             return Response({'error': 'test_case 参数必填'}, status=status.HTTP_400_BAD_REQUEST)
-        # 删除旧步骤，创建新步骤
-        UiCaseStepsDetailed.objects.filter(test_case_id=test_case_id).delete()
-        for idx, step_data in enumerate(steps):
-            step_data['test_case'] = test_case_id
-            step_data['case_sort'] = idx
-            serializer = self.get_serializer(data=step_data)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
+        with transaction.atomic():
+            qs = self.get_queryset().filter(test_case_id=test_case_id)
+            submitted_ids = [s.get('id') for s in steps if s.get('id')]
+            # 仅删除被移除的步骤，对已提交的进行原地更新，
+            # 避免重建丢失 case_data 等未提交字段（数据填充被清空）
+            if submitted_ids:
+                qs.exclude(id__in=submitted_ids).delete()
+            else:
+                qs.delete()
+            for idx, step_data in enumerate(steps):
+                step_data['test_case'] = test_case_id
+                step_data['case_sort'] = idx
+                sid = step_data.pop('id', None)
+                instance = qs.filter(id=sid).first() if sid else None
+                if instance:
+                    serializer = self.get_serializer(instance, data=step_data, partial=True)
+                else:
+                    serializer = self.get_serializer(data=step_data)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
         return Response({'message': '批量更新成功'})
 
 

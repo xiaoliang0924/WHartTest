@@ -111,6 +111,11 @@ const inferValueType = (value: any, explicitType?: string) => {
   return typeof value
 }
 
+const inferExpectedValueType = (result: any) => (
+  result.expect_declared_value_type ||
+  inferValueType(result.expect_value, result.expect_value_type)
+)
+
 const formatValidationValue = (value: any) => {
   if (value === null) return 'null'
   if (value === undefined) return 'undefined'
@@ -236,7 +241,7 @@ const formatValidationValue = (value: any) => {
                       <div class="response-summary-meta text-sm">期望值:
                         <span class="response-pre font-mono">{{ formatValidationValue(result.expect_value) }}</span>
                         <a-tag size="small" color="arcoblue" class="validation-type-tag">
-                          {{ inferValueType(result.expect_value, result.expect_value_type) }}
+                          {{ inferExpectedValueType(result) }}
                         </a-tag>
                       </div>
                     </div>

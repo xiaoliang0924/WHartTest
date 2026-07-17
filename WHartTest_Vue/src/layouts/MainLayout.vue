@@ -176,6 +176,11 @@
             <a href="#" @click="checkProjectAndNavigate($event, '/task-center')">{{ tasksMenuLabel }}</a>
           </a-menu-item>
 
+          <a-menu-item key="file-management" v-if="hasFileManagementPermission">
+            <template #icon><icon-file /></template>
+            <a href="#" @click="checkProjectAndNavigate($event, '/file-management')">{{ fileManagementMenuLabel }}</a>
+          </a-menu-item>
+
           <!-- 测试管理子菜单 -->
           <a-sub-menu key="test-management" v-if="hasTestManagementMenuItems">
             <template #icon><icon-experiment /></template>
@@ -367,6 +372,7 @@ const requirementsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Requir
 const apiTestingMenuLabel = computed(() => (locale.value === 'en-US' ? 'API Testing' : tl('接口自动化')));
 const automationMenuLabel = computed(() => (locale.value === 'en-US' ? 'Automation' : tl('UI自动化')));
 const tasksMenuLabel = computed(() => (locale.value === 'en-US' ? 'Tasks' : tl('任务中心')));
+const fileManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Files' : tl('文件管理')));
 const knowledgeMenuLabel = computed(() => (locale.value === 'en-US' ? 'RAG' : tl('知识库管理')));
 const apiKeysMenuLabel = computed(() => (locale.value === 'en-US' ? 'Keys' : tl('KEY管理')));
 const testManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Testing' : tl('测试管理')));
@@ -437,6 +443,7 @@ const activeMenu = computed(() => {
   if (path.startsWith('/llm-configs')) return 'llm-configs';
   if (path.startsWith('/langgraph-chat')) return 'langgraph-chat';
   if (path.startsWith('/task-center')) return 'task-center';
+  if (path.startsWith('/file-management')) return 'file-management';
   if (path.startsWith('/knowledge-management')) return 'knowledge-management';
   if (path.startsWith('/api-keys')) return 'api-keys';
   if (path.startsWith('/remote-mcp-configs')) return 'remote-mcp-configs';
@@ -495,6 +502,12 @@ const hasKnowledgePermission = computed(() => {
 
 const hasTaskCenterPermission = computed(() => {
   return authStore.hasPermission('task_center.view_scheduledtask');
+});
+
+const hasFileManagementPermission = computed(() => {
+  return authStore.currentUser?.is_staff ||
+         authStore.hasPermission('file_management.view_fileasset') ||
+         authStore.hasPermission('file_management.add_fileasset');
 });
 
 const hasUsersPermission = computed(() => {

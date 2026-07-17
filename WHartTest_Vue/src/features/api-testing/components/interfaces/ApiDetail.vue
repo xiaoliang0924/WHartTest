@@ -12,6 +12,7 @@ import ApiExtractConfig from './ApiExtractConfig.vue'
 import ApiAssertConfig from './ApiAssertConfig.vue'
 import ApiHooksConfigEnhanced from './ApiHooksConfigEnhanced.vue'
 import { createInterface, updateInterface, debugInterface, quickDebugInterface, type ApiInterface, type DebugInterfaceRequest, type QuickDebugInterfaceRequest, type KeyValuePair } from '../../services/interfaceService'
+import type { ApiExtractPayload } from '../../types/interface'
 import { useProjectStore } from '@/store/projectStore'
 import { useEnvironmentStore } from '../../stores/environmentStore'
 import { useApiTabsStore } from '../../stores/apiTabsStore'
@@ -92,6 +93,17 @@ const extractRef = ref()
 const assertRef = ref()
 // ApiRequestHeader 组件引用
 const requestHeaderRef = ref<any>()
+
+const getCurrentExtractPayload = (): ApiExtractPayload => {
+  const payload = extractRef.value?.getExtractRules()
+  if (payload && typeof payload === 'object' && 'extract' in payload && 'extractMeta' in payload) {
+    return payload as ApiExtractPayload
+  }
+  return {
+    extract: payload ?? props.interface?.extract ?? {},
+    extractMeta: (props.interface as any)?.extract_meta ?? {}
+  }
+}
 
 // 响应卡片高度
 const responseCardHeight = ref(44)
@@ -186,7 +198,7 @@ const handleSend = async (requestData: { method: string, url: string, id?: numbe
     const body = bodyRef.value?.getBody()
     const setupHooks = setupHooksRef.value?.getHooks()
     const teardownHooks = teardownHooksRef.value?.getHooks()
-    const extractRules = extractRef.value?.getExtractRules()
+    const extractPayload = getCurrentExtractPayload()
     const assertRules = assertRef.value?.getAssertRules()
 
     // 如果是快速调试
@@ -226,8 +238,9 @@ const handleSend = async (requestData: { method: string, url: string, id?: numbe
       }
 
       // 添加extract
-      if (extractRules) {
-        quickDebugData.extract = extractRules;
+      if (extractPayload.extract) {
+        quickDebugData.extract = extractPayload.extract;
+        quickDebugData.extract_meta = extractPayload.extractMeta;
       }
 
       // 添加validators（断言）
@@ -269,8 +282,10 @@ const handleSend = async (requestData: { method: string, url: string, id?: numbe
         body,
         setup_hooks: setupHooks,
         teardown_hooks: teardownHooks,
-        extract: extractRules,
-        validators: assertRules
+        extract: extractPayload.extract,
+        extract_meta: extractPayload.extractMeta,
+        validators: assertRules,
+        file_ids: collectFileIdsFromBody(body)
       }
 
       console.log('发送调试请求:', debugData);
@@ -331,6 +346,18 @@ const normalizeModuleValue = (moduleValue: unknown) => {
 // 获取当前环境ID
 const currentEnvironmentId = computed(() => environmentStore.currentEnvironmentId)
 
+const collectFileIdsFromBody = (body: any): number[] => {
+  const ids = new Set<number>()
+  const content = body?.content
+  if (Array.isArray(content)) {
+    content.forEach((item: any) => {
+      const fileId = Number(item?.file_id || (typeof item?.value === 'string' && item.value.startsWith('file_id:') ? item.value.split(':')[1] : 0))
+      if (Number.isFinite(fileId) && fileId > 0) ids.add(fileId)
+    })
+  }
+  return Array.from(ids)
+}
+
 // 处理保存用例
 const handleSave = async (requestData: { method: string, url: string, name: string, module?: number | string | null }) => {
   if (!projectStore.currentProjectId) {
@@ -362,7 +389,7 @@ const handleSave = async (requestData: { method: string, url: string, name: stri
     const body = bodyRef.value?.getBody() ?? props.interface?.body ?? { type: 'none', content: null }
     const setupHooks = setupHooksRef.value?.getHooks() ?? props.interface?.setup_hooks ?? []
     const teardownHooks = teardownHooksRef.value?.getHooks() ?? props.interface?.teardown_hooks ?? []
-    const extractRules = extractRef.value?.getExtractRules() ?? props.interface?.extract ?? {}
+    const extractPayload = getCurrentExtractPayload()
     const assertRules = assertRef.value?.getAssertRules() ?? props.interface?.validators ?? []
 
     // 调试日志
@@ -399,7 +426,9 @@ const handleSave = async (requestData: { method: string, url: string, name: stri
       teardown_hooks: processHooks(teardownHooks),
       variables: {}, // TODO: 待实现变量配置
       validators: assertRules,
-      extract: extractRules
+      extract: extractPayload.extract,
+      extract_meta: extractPayload.extractMeta,
+      file_ids: collectFileIdsFromBody(body)
     }
 
     let savedInterface: ApiInterface | undefined
@@ -436,6 +465,7 @@ const handleSave = async (requestData: { method: string, url: string, name: stri
         setupHooks: savedInterface.setup_hooks,
         teardownHooks: savedInterface.teardown_hooks,
         extractRules: savedInterface.extract,
+        extractMeta: (savedInterface as any).extract_meta,
         assertRules: savedInterface.validators
       })
     }
@@ -509,7 +539,8 @@ watch(() => [
       body: bodyRef.value?.getBody(),
       setupHooks: setupHooksRef.value?.getHooks(),
       teardownHooks: teardownHooksRef.value?.getHooks(),
-      extractRules: extractRef.value?.getExtractRules(),
+      extractRules: getCurrentExtractPayload().extract,
+      extractMeta: getCurrentExtractPayload().extractMeta,
       assertRules: assertRef.value?.getAssertRules()
     })
   }
@@ -657,7 +688,11 @@ watch(() => props.autoDebug, async (newValue) => {
 
         <!-- Extract配置 -->
         <a-tab-pane key="extract" title="Extract">
-          <ApiExtractConfig ref="extractRef" :extract="props.interface?.extract" />
+          <ApiExtractConfig
+            ref="extractRef"
+            :extract="props.interface?.extract"
+            :extract-meta="(props.interface as any)?.extract_meta"
+          />
         </a-tab-pane>
 
         <!-- Assert配置 -->
@@ -775,3 +810,4 @@ watch(() => props.autoDebug, async (newValue) => {
   user-select: none;
 }
 </style>
+

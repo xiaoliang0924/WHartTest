@@ -33,7 +33,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { nextTick, ref, watch } from 'vue'
 import { useAppI18n } from '@/composables/useAppI18n'
 import ModulePanel from '../components/ModulePanel.vue'
 import PageList from './PageList.vue'
@@ -95,7 +95,8 @@ const onModuleSelect = (module: UiModule | null) => {
   selectedModuleId.value = module?.id
 }
 
-const onModuleUpdated = () => {
+const onModuleUpdated = async () => {
+  await nextTick()
   pageListRef.value?.refresh?.()
   pageStepListRef.value?.refresh?.()
   testCaseListRef.value?.refresh?.()

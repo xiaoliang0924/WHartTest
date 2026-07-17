@@ -5,15 +5,23 @@ import json
 import types
 
 from httprunner import HttpRunner, Config, Step, RunRequest, RunSqlRequest
+from httprunner.client import sanitize_json_record
 from httprunner.models import TestCaseSummary
 from httprunner.parser import Parser
 
 from api_functions.models import ApiCustomFunction
 from .logging_utils import new_trace_id, summarize_for_log
+from file_management.services import validate_file_ids, serialize_file_for_runtime
 from .payloads import (
     flatten_key_value_pairs,
     normalize_request_body,
     prepare_request_body_for_runner,
+)
+from .validators import prepare_validator_for_runtime
+from .runner_uploads import (
+    apply_upload_files_to_step,
+    collect_file_ids_from_body,
+    merge_file_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +84,18 @@ def load_custom_functions(project_id):
     return functions
 
 
+
+def _resolve_runtime_files(project_id, file_ids):
+    if not project_id or not file_ids:
+        return []
+    try:
+        from projects.models import Project
+        project = Project.objects.get(id=project_id)
+        return [serialize_file_for_runtime(asset) for asset in validate_file_ids(file_ids, project)]
+    except Exception as exc:
+        raise ValueError(f'附件校验失败: {exc}') from exc
+
+
 class InterfaceRunner(HttpRunner):
     """Interface runner based on httprunner."""
 
@@ -94,6 +114,17 @@ class InterfaceRunner(HttpRunner):
             self.base_url = self.interface_data.get('base_url', '')
             self.verify = self.interface_data.get('verify', None)
             self.variables = self.interface_data.get('variables', {})
+            project_id = self.interface_data.get('project_id')
+            file_ids = merge_file_ids(
+                self.interface_data.get('file_ids'),
+                collect_file_ids_from_body(self.interface_data.get('body')),
+            )
+            self.interface_data['file_ids'] = file_ids
+            self.runtime_files = _resolve_runtime_files(project_id, file_ids)
+            if self.runtime_files:
+                self.variables = self.variables or {}
+                self.variables['file_ids'] = [item['id'] for item in self.runtime_files]
+                self.variables['files'] = self.runtime_files
 
             if self.base_url:
                 self.config.base_url(self.base_url)
@@ -102,7 +133,6 @@ class InterfaceRunner(HttpRunner):
             if self.variables:
                 self.config.variables(**self.variables)
 
-            project_id = self.interface_data.get('project_id')
             if project_id:
                 try:
                     custom_functions = load_custom_functions(project_id)
@@ -266,8 +296,17 @@ class InterfaceRunner(HttpRunner):
                     'prepared_summary': summarize_for_log(body),
                 })
                 self.prepared_request_snapshot['body'] = copy.deepcopy(body)
+                step_obj, upload_applied = apply_upload_files_to_step(
+                    step_obj,
+                    normalized_body,
+                    self.runtime_files,
+                )
+                self.prepared_request_snapshot['headers'] = copy.deepcopy(
+                    step_obj.struct().request.headers,
+                )
                 if normalized_body['type'] in {'form-data', 'x-www-form-urlencoded', 'binary'}:
-                    step_obj = step_obj.with_data(body)
+                    if not upload_applied:
+                        step_obj = step_obj.with_data(body)
                 else:
                     step_obj = step_obj.with_json(body)
             else:
@@ -302,8 +341,12 @@ class InterfaceRunner(HttpRunner):
         # Extract
         if self.interface_data.get('extract'):
             extract_obj = step_obj.extract()
+            extract_meta = self.interface_data.get('extract_meta')
+            extract_meta = extract_meta if isinstance(extract_meta, dict) else {}
             for var_name, expr in self.interface_data['extract'].items():
-                extract_obj = extract_obj.with_jmespath(expr, var_name)
+                meta = extract_meta.get(var_name, {})
+                source = meta.get('source') if isinstance(meta, dict) else 'response'
+                extract_obj = extract_obj.with_jmespath(expr, var_name, source=source)
             step_obj = extract_obj
 
         # Validators
@@ -366,24 +409,12 @@ class InterfaceRunner(HttpRunner):
         """Add validators to an HTTP step."""
         validate_obj = step_obj.validate()
         for validator in validators:
-            if not isinstance(validator, dict):
+            runtime_validator = prepare_validator_for_runtime(validator)
+            if not runtime_validator:
                 logger.warning(f"Unsupported validator format: {validator}")
                 continue
 
-            if "check" in validator and "expect" in validator:
-                validate_obj = validate_obj.assert_equal(
-                    validator["check"], validator["expect"]
-                )
-            elif len(validator) == 1:
-                comparator = list(validator.keys())[0]
-                check_item, expected_value = validator[comparator]
-                validate_obj = self._apply_comparator(
-                    validate_obj, comparator, check_item, expected_value
-                )
-            elif "eq" in validator:
-                check_value = validator["eq"][0]
-                expect_value = validator["eq"][1]
-                validate_obj = validate_obj.assert_equal(check_value, expect_value)
+            validate_obj.struct().validators.append(runtime_validator)
 
         return validate_obj
 
@@ -391,18 +422,11 @@ class InterfaceRunner(HttpRunner):
         """Add validators to a SQL step."""
         validate_obj = step_obj.validate()
         for validator in validators:
-            if not isinstance(validator, dict):
+            runtime_validator = prepare_validator_for_runtime(validator)
+            if not runtime_validator:
                 logger.warning(f"Unsupported validator format: {validator}")
                 continue
-            for comparator, (check_item, expected_value) in validator.items():
-                try:
-                    validate_obj = self._apply_comparator(
-                        validate_obj, comparator, check_item, expected_value
-                    )
-                except AttributeError as e:
-                    logger.warning(f"SQL validator method not found: {str(e)}")
-                except Exception as e:
-                    logger.warning(f"Failed to add validator: {str(e)}")
+            validate_obj.struct().validators.append(runtime_validator)
         return validate_obj
 
     def _apply_comparator(self, validate_obj, comparator, check_item, expected_value):
@@ -552,8 +576,8 @@ class InterfaceRunner(HttpRunner):
         result = {
             "success": step_result.success,
             "name": step_result.name,
-            "validation_results": validation_results,
-            "extracted_variables": step_result.export_vars,  # type: ignore
+            "validation_results": sanitize_json_record(validation_results),
+            "extracted_variables": sanitize_json_record(step_result.export_vars),  # type: ignore
         }
 
         if req_resp:
@@ -576,7 +600,7 @@ class InterfaceRunner(HttpRunner):
             )
             if is_transport_error:
                 result['success'] = False
-            request_data = {
+            request_data = sanitize_json_record({
                 "method": (
                     req_resp.request.method
                     if hasattr(req_resp, 'request') else None
@@ -593,14 +617,15 @@ class InterfaceRunner(HttpRunner):
                     req_resp.request.body
                     if hasattr(req_resp, 'request') else None
                 ),  # type: ignore
-            }
+            })
             recorded_request_body = request_data['body']
             fallback_used = self._apply_prepared_request_fallback(request_data, status_code)
+            request_data = sanitize_json_record(request_data)
             result.update({
                 "status_code": status_code,
                 "elapsed": elapsed,
                 "request": request_data,
-                "response": {
+                "response": sanitize_json_record({
                     "status_code": status_code,
                     "headers": (
                         req_resp.response.headers
@@ -614,7 +639,7 @@ class InterfaceRunner(HttpRunner):
                     "error": response_error,
                     "error_type": response_error_type,
                     "is_transport_error": is_transport_error,
-                },
+                }),
             })
             logger.info(
                 "Interface response assembled: trace_id=%s status_code=%s success=%s "
@@ -655,12 +680,12 @@ class InterfaceRunner(HttpRunner):
                         self.request_body_diagnostic,
                     )
         else:
-            request_data = {
+            request_data = sanitize_json_record({
                 "method": self.prepared_request_snapshot.get('method'),
                 "url": self.prepared_request_snapshot.get('url'),
                 "headers": copy.deepcopy(self.prepared_request_snapshot.get('headers', {})),
                 "body": copy.deepcopy(self.prepared_request_snapshot.get('body')),
-            }
+            })
             result.update({
                 "status_code": None,
                 "elapsed": 0,

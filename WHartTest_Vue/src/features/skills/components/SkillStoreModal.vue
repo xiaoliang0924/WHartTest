@@ -6,6 +6,7 @@
     :footer="false"
     :mask-closable="false"
     :unmount-on-close="false"
+    :body-style="skillStoreModalBodyStyle"
     @cancel="handleCancel"
   >
     <div class="skill-store">
@@ -59,7 +60,7 @@
       </div>
 
       <!-- 内容区 -->
-      <a-spin :loading="loadingManifest" style="display: block; min-height: 280px">
+      <a-spin class="store-content-spin" :loading="loadingManifest">
         <div v-if="manifestError" class="store-empty">
           <icon-exclamation-circle style="font-size: 40px; color: var(--color-danger-light-4)" />
           <p class="empty-text">{{ manifestError }}</p>
@@ -147,7 +148,7 @@
         <div class="footer-left">
           <a-progress
             v-if="batchRunning || batchCompletedAt"
-            :percent="batchPercent"
+            :percent="batchProgressRatio"
             :status="batchProgressStatus"
             :show-text="true"
             :style="{ width: '260px' }"
@@ -297,6 +298,11 @@ const visible = computed({
   set: (v: boolean) => emit('update:visible', v),
 })
 
+const skillStoreModalBodyStyle = {
+  maxHeight: 'calc(100vh - 160px)',
+  overflow: 'hidden',
+}
+
 const storeConfig = ref<SkillStoreConfig | null>(null)
 const customSources = ref<SkillStoreSource[]>([])
 const activeSourceId = ref<string>(SKILL_STORE_DEFAULT_SOURCE_ID)
@@ -354,9 +360,10 @@ const selectedNotInstalledCount = computed(() => filteredStates.value.filter(s =
 const allSelected = computed(() => filteredStates.value.length > 0 && filteredStates.value.every(s => s.selected))
 const someSelected = computed(() => filteredStates.value.some(s => s.selected))
 
-const batchPercent = computed(() => {
+const batchProgressRatio = computed(() => {
   if (batchTotal.value === 0) return 0
-  return Math.round((batchProcessed.value / batchTotal.value) * 100)
+  const roundedPercent = Math.round((batchProcessed.value / batchTotal.value) * 100)
+  return Math.min(Math.max(roundedPercent / 100, 0), 1)
 })
 
 const batchProgressStatus = computed(() => {
@@ -595,7 +602,21 @@ watch(
 .skill-store {
   display: flex;
   flex-direction: column;
-  min-height: 480px;
+  height: min(640px, calc(100vh - 200px));
+  min-height: 320px;
+}
+
+@media (max-height: 520px) {
+  .skill-store {
+    height: calc(100vh - 160px);
+  }
+}
+
+.store-content-spin {
+  display: block;
+  flex: 1;
+  height: 100%;
+  min-height: 0;
 }
 
 .store-toolbar {
@@ -640,7 +661,7 @@ watch(
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
   gap: 12px;
-  max-height: 480px;
+  height: 100%;
   overflow-y: auto;
   padding: 4px;
 }

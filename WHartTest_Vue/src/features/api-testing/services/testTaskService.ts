@@ -3,6 +3,7 @@ import { useProjectStore } from '@/store/projectStore';
 import type { ApiTestTaskSuite, ApiTestTaskExecution, ApiTestTaskCaseResult } from '../types/testtask';
 import type { ApiTestCase } from '../types/testcase';
 import { normalizeListPayload, wrapListResponse, wrapOneResponse } from './responseHelpers';
+import type { ApiInterfaceCase } from '../types/interfaceCase';
 
 const suiteBase = (projectId: number) => `/projects/${projectId}/api-task-suites`;
 const execBase = (projectId: number) => `/projects/${projectId}/api-task-executions`;
@@ -24,12 +25,22 @@ export const testTaskService = {
   deleteSuite: (projectId: number, id: number) =>
     request<void>({ url: `${suiteBase(projectId)}/${id}/`, method: 'DELETE' }),
 
-  addTestcases: (projectId: number, suiteId: number, data: { testcase_ids: number[] }) =>
+  addTestcases: (
+    projectId: number,
+    suiteId: number,
+    data: { testcase_ids?: number[]; interface_case_ids?: number[] }
+  ) =>
     request<void>({ url: `${suiteBase(projectId)}/${suiteId}/add-testcases/`, method: 'POST', data }),
 
   removeTestcase: (projectId: number, suiteId: number, testcaseId: number) =>
     request<void>({
       url: `${suiteBase(projectId)}/${suiteId}/remove-testcase/${testcaseId}/`, method: 'DELETE',
+    }),
+
+  removeCase: (projectId: number, suiteId: number, caseType: 'scenario' | 'interface', caseId: number) =>
+    request<void>({
+      url: `${suiteBase(projectId)}/${suiteId}/remove-case/${caseType}/${caseId}/`,
+      method: 'DELETE',
     }),
 
   // --- Executions ---
@@ -79,7 +90,13 @@ function _wrapOne(res: any): any {
 export type TestTaskSuite = ApiTestTaskSuite & Record<string, any>;
 export type TestTaskExecution = ApiTestTaskExecution & Record<string, any>;
 export type TestCase = ApiTestCase & Record<string, any>;
-export type TestTaskSuiteForm = Partial<ApiTestTaskSuite> & { project?: number; test_cases?: number[] };
+export type InterfaceCase = ApiInterfaceCase & Record<string, any>;
+export type TestTaskCaseType = 'scenario' | 'interface';
+export type TestTaskSuiteForm = Partial<ApiTestTaskSuite> & {
+  project?: number;
+  test_cases?: number[];
+  interface_cases?: number[];
+};
 
 // Suites
 export async function getTestTaskSuites(params: Record<string, any> = {}) {
@@ -143,8 +160,27 @@ export async function getTestTaskExecutionCaseResults(id: number) {
 }
 
 // Suite test-case management
+export async function addCasesToSuite(
+  suiteId: number,
+  testcaseIds: number[] = [],
+  interfaceCaseIds: number[] = []
+) {
+  return _wrapOne(await testTaskService.addTestcases(_pid(), suiteId, {
+    testcase_ids: testcaseIds,
+    interface_case_ids: interfaceCaseIds,
+  }));
+}
+
 export async function addTestCaseToSuite(suiteId: number, testcaseIds: number[]) {
-  return _wrapOne(await testTaskService.addTestcases(_pid(), suiteId, { testcase_ids: testcaseIds }));
+  return addCasesToSuite(suiteId, testcaseIds, []);
+}
+
+export async function removeCaseFromSuite(
+  suiteId: number,
+  caseType: TestTaskCaseType,
+  caseId: number
+) {
+  return _wrapOne(await testTaskService.removeCase(_pid(), suiteId, caseType, caseId));
 }
 
 export async function removeTestCaseFromSuite(suiteId: number, testcaseId: number) {
@@ -155,4 +191,9 @@ export async function removeTestCaseFromSuite(suiteId: number, testcaseId: numbe
 export async function getTestCases(params: Record<string, any> = {}) {
   const pid = _pid(params);
   return _wrapList(await request<any>({ url: `/projects/${pid}/api-testcases/`, method: 'GET', params }));
+}
+
+export async function getInterfaceCasesForTask(params: Record<string, any> = {}) {
+  const pid = _pid(params);
+  return _wrapList(await request<any>({ url: `/projects/${pid}/api-interface-cases/`, method: 'GET', params }));
 }

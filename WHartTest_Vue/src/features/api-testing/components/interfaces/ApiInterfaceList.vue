@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { IconSearch, IconSend, IconEdit, IconDelete, IconClockCircle } from '@arco-design/web-vue/es/icon'
+import { IconSearch, IconSend, IconEdit, IconDelete, IconClockCircle, IconCopy } from '@arco-design/web-vue/es/icon'
 import type { ApiInterface } from '../../services/interfaceService'
 import { formatDateTime } from '@/utils/formatters'
 
@@ -23,6 +23,7 @@ const emit = defineEmits<{
   'interface-select': [api: ApiInterface]
   'interface-edit': [api: ApiInterface]
   'interface-delete': [api: ApiInterface]
+  'interface-copy': [api: ApiInterface]
   'interface-run': [api: ApiInterface]
 }>()
 
@@ -140,7 +141,7 @@ const getMethodColor = (method: string) => {
                 <span v-else class="list-time-text">-</span>
               </template>
             </a-table-column>
-            <a-table-column title="操作" align="center" :width="150">
+            <a-table-column title="操作" align="center" :width="180">
               <template #cell="{ record }">
                 <div class="flex justify-center gap-1">
                   <a-button
@@ -158,6 +159,14 @@ const getMethodColor = (method: string) => {
                     title="编辑接口"
                   >
                     <template #icon><icon-edit /></template>
+                  </a-button>
+                  <a-button
+                    type="text"
+                    size="mini"
+                    @click.stop="$emit('interface-copy', record)"
+                    title="复制接口"
+                  >
+                    <template #icon><icon-copy /></template>
                   </a-button>
                   <a-button
                     type="text"

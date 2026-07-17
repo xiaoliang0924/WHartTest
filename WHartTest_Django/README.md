@@ -277,7 +277,9 @@ python manage.py runserver
 | `DJANGO_SUPERUSER_EMAIL` | 否 | `admin@qq.com` | `admin@qq.com` | Docker 容器启动时自动创建的超级用户邮箱 |
 | `DJANGO_CORS_ALLOWED_ORIGINS` | 否 | 开发默认 | `http://localhost:3000,http://127.0.0.1:3000` | CORS 允许的源，用逗号分隔 |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | 否 | 开发默认 | `http://localhost:3000,http://127.0.0.1:3000` | CSRF 信任的源，用逗号分隔 |
-| `USER_AGENT` | 否 | 默认值 | `WhartTest-Django/1.0 (AI Test Case Generation Platform)` | HTTP 请求的用户代理标识 |
+| `USER_AGENT` | 否 | `WHartTest/2.6.0-ce` | `WHartTest/2.6.0-ce` | HTTP 请求的用户代理标识 |
+| `FILE_MANAGEMENT_MAX_FILE_SIZE` | 否 | `104857600` | `209715200` | 文件管理单文件上传大小限制，单位：字节，默认 100MB |
+| `FILE_MANAGEMENT_LLM_MAX_CHARS_PER_FILE` | 否 | `0` | `0` | LLM 附件单文件解析文本字符数限制；`0` 表示不限制，超限会报错且不会截断 |
 | `DATABASE_URL` | 否 | SQLite | `postgresql://user:pass@localhost/dbname` | 数据库连接 URL（生产环境推荐 PostgreSQL） |
 | `OPENAI_API_KEY` | 否 | - | `sk-...` | OpenAI API 密钥（如果使用 OpenAI 模型） |
 | `ANTHROPIC_API_KEY` | 否 | - | `sk-ant-...` | Anthropic API 密钥（注：项目当前默认只支持 OpenAI 兼容格式，如需启用 Anthropic/Claude，请按需安装依赖并修改配置） |
@@ -465,6 +467,12 @@ ALLOWED_HOSTS=your-domain.com,your-ip-address
 
 # 数据库配置（生产环境推荐PostgreSQL）
 DATABASE_URL=postgresql://user:password@localhost/dbname
+
+# 文件管理配置
+# 单文件上传大小限制，单位：字节，默认 100MB
+FILE_MANAGEMENT_MAX_FILE_SIZE=104857600
+# LLM 附件单文件解析文本字符数限制；0 表示不限制，超限会报错且不会截断
+FILE_MANAGEMENT_LLM_MAX_CHARS_PER_FILE=0
 
 # LLM API Keys (根据实际使用的模型配置)
 OPENAI_API_KEY=your_openai_api_key_here

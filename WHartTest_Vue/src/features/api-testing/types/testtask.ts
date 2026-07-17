@@ -1,6 +1,7 @@
 import type { UserBrief } from './common';
 
 export type TaskSuitePriority = 'P0' | 'P1' | 'P2' | 'P3';
+export type ApiTaskCaseType = 'scenario' | 'interface';
 
 export interface ApiTestTaskSuite {
   id: number;
@@ -18,7 +19,12 @@ export interface ApiTestTaskSuite {
 export interface ApiTestTaskCase {
   id: number;
   task_suite: number;
-  testcase: number;
+  case_type: ApiTaskCaseType;
+  case_id: number;
+  testcase: number | null;
+  testcase_id?: number | null;
+  interface_case_id?: number | null;
+  testcase_name?: string;
   order: number;
   [key: string]: any;
 }
@@ -48,9 +54,12 @@ export type CaseResultStatus = 'pending' | 'running' | 'success' | 'failure' | '
 
 export interface ApiTestTaskCaseResult {
   id: number;
+  case_type: ApiTaskCaseType;
+  case_id: number;
   execution: number;
-  testcase: number;
-  report: number | null;
+  testcase: number | null;
+  interface_case?: number | null;
+  report: Record<string, any> | null;
   status: CaseResultStatus;
   start_time: string | null;
   end_time: string | null;

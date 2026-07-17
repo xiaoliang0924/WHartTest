@@ -289,12 +289,15 @@ const handleAction = async (value: string) => {
           cancelText: '取消',
           onOk: async () => {
             try {
-              await moduleApi.delete(selectedModuleId.value!);
+              const deletedModuleId = selectedModuleId.value;
+              if (!deletedModuleId) return;
+              await moduleApi.delete(deletedModuleId);
               Message.success('删除成功');
               selectedModuleId.value = null;
               selectedKeys.value = [];
+              emit('select', null);
+              await fetchModules();
               emit('updated');
-              fetchModules();
             } catch (error: unknown) {
               const err = error as { error?: string };
               Message.error(err?.error || '存在关联，无法删除。请先解除关联');

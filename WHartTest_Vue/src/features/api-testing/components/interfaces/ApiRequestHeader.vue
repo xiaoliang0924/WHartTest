@@ -158,7 +158,6 @@ const applyDefaultModule = (moduleId?: number) => {
 
 // 监听接口数据变化
 watch(() => props.interface, (newInterface) => {
-  console.log('接口数据更新：', newInterface)
   if (newInterface) {
     // 更新表单数据
     apiName.value = newInterface.name || ''

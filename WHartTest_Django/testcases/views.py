@@ -76,9 +76,12 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     filter_backends = [
         DjangoFilterBackend,
         filters.SearchFilter,
-    ]  # 添加 DjangoFilterBackend
+        filters.OrderingFilter,
+    ]  # 添加 DjangoFilterBackend、搜索与排序
     filterset_class = TestCaseFilter  # 使用自定义的 FilterSet
     search_fields = ["name", "precondition"]
+    ordering_fields = ["id", "created_at", "updated_at"]
+    ordering = ["-created_at"]
 
     def _should_include_steps(self):
         value = self.request.query_params.get("include_steps")
@@ -366,6 +369,69 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             if result.success
             else status.HTTP_400_BAD_REQUEST,
         )
+
+    @action(detail=True, methods=["post"], url_path="copy")
+    def copy(self, request, project_pk=None, pk=None):
+        """
+        复制功能测试用例。
+        默认复制到原模块，可通过 target_module_id 指定目标模块；复制用例基础信息、步骤和截图引用。
+        """
+        source = self.get_object()
+        project = get_object_or_404(Project, pk=project_pk)
+        target_module_id = request.data.get("target_module_id") or request.data.get("module_id")
+
+        if target_module_id:
+            target_module = get_object_or_404(
+                TestCaseModule,
+                pk=target_module_id,
+                project=project,
+            )
+        else:
+            target_module = source.module
+
+        with transaction.atomic():
+            base_name = request.data.get("name") or f"{source.name} - 副本"
+            candidate_name = base_name
+            suffix = 2
+            while TestCase.objects.filter(project=project, module=target_module, name=candidate_name).exists():
+                candidate_name = f"{base_name} {suffix}"
+                suffix += 1
+
+            copied_case = TestCase.objects.create(
+                project=project,
+                module=target_module,
+                name=candidate_name,
+                precondition=source.precondition,
+                level=source.level,
+                test_type=source.test_type,
+                notes=source.notes,
+                screenshot=source.screenshot,
+                review_status=source.review_status,
+                creator=request.user,
+            )
+
+            for step in source.steps.all().order_by("step_number"):
+                copied_case.steps.create(
+                    step_number=step.step_number,
+                    description=step.description,
+                    expected_result=step.expected_result,
+                    creator=request.user,
+                )
+
+            for screenshot in source.screenshots.all():
+                TestCaseScreenshot.objects.create(
+                    test_case=copied_case,
+                    screenshot=screenshot.screenshot,
+                    title=screenshot.title,
+                    description=screenshot.description,
+                    step_number=screenshot.step_number,
+                    mcp_session_id=screenshot.mcp_session_id,
+                    page_url=screenshot.page_url,
+                    uploader=request.user,
+                )
+
+        serializer = self.get_serializer(copied_case)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["post"], url_path="batch-delete")
     def batch_delete(self, request, **kwargs):

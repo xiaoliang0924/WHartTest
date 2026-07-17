@@ -25,6 +25,7 @@ export interface InterfaceTab {
   setupHooks?: any;
   teardownHooks?: any;
   extractRules?: any;
+  extractMeta?: any;
   assertRules?: any;
   response?: any;
   activeTab?: string;

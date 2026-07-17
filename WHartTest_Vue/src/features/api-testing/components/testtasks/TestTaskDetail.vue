@@ -8,9 +8,12 @@ import {
   getTestTaskSuite, 
   deleteTestTaskSuite, 
   createTestTaskExecution,
-  removeTestCaseFromSuite,
-  addTestCaseToSuite,
+  removeCaseFromSuite,
+  addCasesToSuite,
   getTestCases,
+  getInterfaceCasesForTask,
+  type InterfaceCase,
+  type TestTaskCaseType,
   type TestTaskSuite,
   type TestCase 
 } from '../../services/testTaskService'
@@ -34,19 +37,55 @@ const state = reactive({
 })
 
 // 添加用例相关
+type TaskCaseOption = (TestCase | InterfaceCase) & {
+  case_type: TestTaskCaseType
+  selectionKey: string
+  interface_name?: string
+}
+
 const addVisible = ref(false)
 const addLoading = ref(false)
-const testCases = ref<TestCase[]>([])
+const allTestCases = ref<TaskCaseOption[]>([])
 const pagination = ref({
   current: 1,
   pageSize: 10,
   total: 0
 })
 
+const makeCaseKey = (caseType: TestTaskCaseType, id: number) => `${caseType}:${id}`
+
+const existingCaseKeys = computed(() => (
+  testTaskSuite.value?.task_cases?.map(tc => {
+    const caseType = (tc.case_type || 'scenario') as TestTaskCaseType
+    const caseId = tc.case_id || tc.testcase_id || tc.interface_case_id
+    return caseId ? makeCaseKey(caseType, Number(caseId)) : ''
+  }).filter(Boolean) || []
+))
+
+const splitSelectedCases = (selectedKeys: string[]) => {
+  const testcaseIds: number[] = []
+  const interfaceCaseIds: number[] = []
+
+  selectedKeys.forEach(key => {
+    const [caseType, rawId] = String(key).split(':')
+    const id = Number(rawId)
+    if (!id) return
+    if (caseType === 'interface') {
+      interfaceCaseIds.push(id)
+    } else {
+      testcaseIds.push(id)
+    }
+  })
+
+  return { testcaseIds, interfaceCaseIds }
+}
+
 // 从测试任务集中移除测试用例
-const removeTestCase = async (testcaseId: number) => {
+const removeTestCase = async (record: any) => {
   try {
-    await removeTestCaseFromSuite(Number(route.params.id), testcaseId)
+    const caseType = (record.case_type || 'scenario') as TestTaskCaseType
+    const caseId = Number(record.case_id || record.testcase_id || record.interface_case_id)
+    await removeCaseFromSuite(Number(route.params.id), caseType, caseId)
     Message.success('移除成功')
     // 重新加载测试任务集详情
     await fetchTestTaskSuite()
@@ -289,12 +328,31 @@ const fetchTestCases = async () => {
   try {
     const response = await getTestCases({
       project: testTaskSuite.value.project,
-      page: pagination.value.current,
-      page_size: pagination.value.pageSize,
+      page: 1,
+      page_size: 1000,
       ordering: '-created_at'
     })
-    testCases.value = toArray<TestCase>(response.data?.results ?? response.data)
-    pagination.value.total = response.data.count
+    const interfaceCaseResponse = await getInterfaceCasesForTask({
+      project: testTaskSuite.value.project,
+      page: 1,
+      page_size: 1000,
+      ordering: '-created_at'
+    })
+
+    const scenarioCases: TaskCaseOption[] = toArray<TestCase>(response.data?.results ?? response.data).map((item: TestCase) => ({
+      ...item,
+      case_type: 'scenario',
+      selectionKey: makeCaseKey('scenario', item.id)
+    }))
+    const interfaceCases: TaskCaseOption[] = toArray<InterfaceCase>(interfaceCaseResponse.data?.results ?? interfaceCaseResponse.data).map((item: InterfaceCase) => ({
+      ...item,
+      case_type: 'interface',
+      selectionKey: makeCaseKey('interface', item.id),
+      interface_name: item.interface_info?.name || ''
+    }))
+
+    allTestCases.value = [...scenarioCases, ...interfaceCases]
+    pagination.value.total = allTestCases.value.length
   } catch (error) {
     console.error('获取测试用例列表失败', error)
     Message.error('获取测试用例列表失败')
@@ -313,20 +371,19 @@ const openAddDialog = async () => {
 // 处理分页变化
 const handlePageChange = (current: number) => {
   pagination.value.current = current
-  fetchTestCases()
 }
 
 // 处理每页条数变化
 const handlePageSizeChange = (pageSize: number) => {
   pagination.value.pageSize = pageSize
   pagination.value.current = 1
-  fetchTestCases()
 }
 
 // 处理添加测试用例
-const handleAdd = async (selectedIds: number[]) => {
+const handleAdd = async (selectedKeys: string[]) => {
   try {
-    await addTestCaseToSuite(Number(route.params.id), selectedIds)
+    const { testcaseIds, interfaceCaseIds } = splitSelectedCases(selectedKeys)
+    await addCasesToSuite(Number(route.params.id), testcaseIds, interfaceCaseIds)
     Message.success('添加成功')
     addVisible.value = false
     // 重新加载测试任务集详情
@@ -444,11 +501,25 @@ onMounted(() => {
         >
           <template #columns>
             <a-table-column title="序号" data-index="order" :width="80" align="center" />
+            <a-table-column title="类型" data-index="case_type" :width="110" align="center">
+              <template #cell="{ record }">
+                <a-tag :color="record.case_type === 'interface' ? 'arcoblue' : 'purple'">
+                  {{ record.case_type === 'interface' ? '接口用例' : '场景用例' }}
+                </a-tag>
+              </template>
+            </a-table-column>
             <a-table-column title="用例名称" data-index="testcase_name" :width="200" align="center">
               <template #cell="{ record }">
                 <span class="table-link cursor-pointer">
                   {{ record.testcase_name }}
                 </span>
+              </template>
+            </a-table-column>
+            <a-table-column title="关联接口" data-index="interface_name" :width="180" align="center">
+              <template #cell="{ record }">
+                <div class="table-muted-text">
+                  {{ record.case_type === 'interface' ? (record.interface_name || '-') : '-' }}
+                </div>
               </template>
             </a-table-column>
             <a-table-column title="描述" data-index="description" align="center">
@@ -467,7 +538,7 @@ onMounted(() => {
               <template #cell="{ record }">
                 <a-popconfirm
                   content="确定要移除这个测试用例吗？"
-                  @ok="() => removeTestCase(record.testcase_id)"
+                  @ok="() => removeTestCase(record)"
                   position="left"
                   popup-container="body"
                   class="custom-popconfirm"
@@ -491,13 +562,13 @@ onMounted(() => {
     <AddTestCaseModal
       v-model:visible="addVisible"
       :loading="addLoading"
-      :test-cases="testCases"
+      :test-cases="allTestCases"
       :pagination="{
         current: pagination.current,
         pageSize: pagination.pageSize,
         total: pagination.total
       }"
-      :existing-ids="testTaskSuite?.task_cases?.map(tc => tc.testcase_id) || []"
+      :existing-keys="existingCaseKeys"
       @page-change="handlePageChange"
       @page-size-change="handlePageSizeChange"
       @add="handleAdd"

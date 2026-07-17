@@ -1,26 +1,32 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { IconSearch } from '@arco-design/web-vue/es/icon'
 import type { TableRowSelection } from '@arco-design/web-vue'
-import type { TestCase } from '../../services/testTaskService'
+import type { InterfaceCase, TestCase, TestTaskCaseType } from '../../services/testTaskService'
 import { useThemeStore } from '@/store/themeStore'
+
+type TaskCaseOption = (TestCase | InterfaceCase) & {
+  case_type: TestTaskCaseType
+  selectionKey: string
+  interface_name?: string
+}
 
 const props = defineProps<{
   visible: boolean
   loading: boolean
-  testCases: TestCase[]
+  testCases: TaskCaseOption[]
   pagination: {
     current: number
     pageSize: number
     total: number
   }
-  existingIds?: number[] // 已添加的测试用例ID列表
+  existingKeys?: string[]
 }>()
 
 const emit = defineEmits<{
   'update:visible': [value: boolean]
-  'add': [selectedIds: number[]]
+  'add': [selectedKeys: string[]]
   'pageChange': [current: number]
   'pageSizeChange': [pageSize: number]
 }>()
@@ -35,9 +41,10 @@ const modalVisible = computed({
 })
 
 // 选中的测试用例
-const selectedTestCases = ref<(string | number)[]>([])
+const selectedTestCases = ref<string[]>([])
 // 搜索关键词
 const searchKeyword = ref('')
+const caseTypeFilter = ref<TestTaskCaseType | undefined>(undefined)
 
 // 处理分页变化
 const handlePageChange = (current: number) => {
@@ -55,8 +62,7 @@ const handleAdd = async () => {
     Message.warning('请选择要添加的测试用例')
     return
   }
-  // 将 selectedTestCases 转换为数字数组
-  emit('add', selectedTestCases.value.map(id => Number(id)))
+  emit('add', [...selectedTestCases.value])
   selectedTestCases.value = []
 }
 
@@ -65,6 +71,7 @@ const handleClose = () => {
   modalVisible.value = false
   selectedTestCases.value = []
   searchKeyword.value = ''
+  caseTypeFilter.value = undefined
 }
 
 // 优先级颜色映射
@@ -76,14 +83,30 @@ const testCasePriorityColorMap: Record<string, string> = {
 }
 
 // 过滤测试用例
-const filteredTestCases = computed(() => {
-  if (!searchKeyword.value) return props.testCases
+const matchedTestCases = computed(() => {
+  let cases = props.testCases
+
+  if (caseTypeFilter.value) {
+    cases = cases.filter(item => item.case_type === caseTypeFilter.value)
+  }
+
+  if (!searchKeyword.value) return cases
   
   const keyword = searchKeyword.value.toLowerCase()
-  return props.testCases.filter(item => 
+  return cases.filter(item =>
     (item.name?.toLowerCase().includes(keyword) || 
     item.description?.toLowerCase().includes(keyword))
   )
+})
+
+const filteredTestCases = computed(() => {
+  const start = (props.pagination.current - 1) * props.pagination.pageSize
+  const end = start + props.pagination.pageSize
+  return matchedTestCases.value.slice(start, end)
+})
+
+watch([searchKeyword, caseTypeFilter], () => {
+  emit('pageChange', 1)
 })
 </script>
 
@@ -101,15 +124,26 @@ const filteredTestCases = computed(() => {
     <a-spin :loading="loading">
       <div class="testtask-add-case flex flex-col gap-4">
         <div class="modal-section rounded p-3">
-          <a-input-search
-            v-model="searchKeyword"
-            placeholder="搜索测试用例名称或描述"
-            class="custom-search"
-          >
-            <template #prefix>
-              <icon-search />
-            </template>
-          </a-input-search>
+          <div class="flex items-center gap-3">
+            <a-input-search
+              v-model="searchKeyword"
+              placeholder="搜索测试用例名称或描述"
+              class="custom-search flex-1"
+            >
+              <template #prefix>
+                <icon-search />
+              </template>
+            </a-input-search>
+            <a-select
+              v-model="caseTypeFilter"
+              placeholder="全部类型"
+              allow-clear
+              class="case-type-filter"
+            >
+              <a-option value="scenario">场景用例</a-option>
+              <a-option value="interface">接口用例</a-option>
+            </a-select>
+          </div>
         </div>
 
         <div class="modal-section rounded p-3 flex flex-col">
@@ -117,7 +151,7 @@ const filteredTestCases = computed(() => {
           
           <div class="flex-1 overflow-x-auto overflow-y-auto hide-scrollbar" style="max-height: 400px">
             <a-table
-              v-if="filteredTestCases.length > 0"
+              v-if="matchedTestCases.length > 0"
               :scroll="{ y: '100%' }"
               :data="filteredTestCases"
               :pagination="false"
@@ -127,8 +161,8 @@ const filteredTestCases = computed(() => {
                 showCheckedAll: true,
                 selectedRowKeys: selectedTestCases
               } as TableRowSelection"
-              :row-class="(record) => props.existingIds?.includes(record.id) ? 'has-added' : ''"
-              :row-key="'id'"
+              :row-class="(record) => props.existingKeys?.includes(record.selectionKey) ? 'has-added' : ''"
+              :row-key="'selectionKey'"
               @selection-change="selectedTestCases = $event"
               class="custom-table"
             >
@@ -137,13 +171,25 @@ const filteredTestCases = computed(() => {
                   <template #cell="{ record }">
                     <div class="flex items-center gap-2">
                       <span>{{ record.id }}</span>
-                      <a-tag v-if="props.existingIds?.includes(record.id)" size="small" class="added-tag">
+                      <a-tag v-if="props.existingKeys?.includes(record.selectionKey)" size="small" class="added-tag">
                         已添加
                       </a-tag>
                     </div>
                   </template>
                 </a-table-column>
+                <a-table-column title="类型" data-index="case_type" align="center">
+                  <template #cell="{ record }">
+                    <a-tag :color="record.case_type === 'interface' ? 'arcoblue' : 'purple'">
+                      {{ record.case_type === 'interface' ? '接口用例' : '场景用例' }}
+                    </a-tag>
+                  </template>
+                </a-table-column>
                 <a-table-column title="用例名称" data-index="name" ellipsis tooltip />
+                <a-table-column title="关联接口" data-index="interface_name" ellipsis tooltip>
+                  <template #cell="{ record }">
+                    {{ record.case_type === 'interface' ? (record.interface_name || '-') : '-' }}
+                  </template>
+                </a-table-column>
                 <a-table-column title="描述" data-index="description" ellipsis tooltip />
                 <a-table-column title="优先级" data-index="priority" align="center">
                   <template #cell="{ record }">
@@ -161,7 +207,7 @@ const filteredTestCases = computed(() => {
 
           <div class="pagination-shell flex justify-end mt-3 pt-3">
             <a-pagination
-              :total="pagination.total"
+              :total="matchedTestCases.length"
               :current="pagination.current"
               :page-size="pagination.pageSize"
               :page-size-options="[10, 20, 30, 50]"
@@ -248,6 +294,11 @@ const filteredTestCases = computed(() => {
 .modal-section {
   background: var(--tt-modal-section-bg);
   border: 1px solid var(--tt-border);
+}
+
+.case-type-filter {
+  width: 140px;
+  flex: 0 0 140px;
 }
 
 :deep(.testtask-add-case-modal .arco-modal) {

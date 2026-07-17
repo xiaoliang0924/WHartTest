@@ -60,6 +60,7 @@ APP_LABEL_MAPPINGS = {
     'api_testtasks': 'API测试任务',
     'api_sync': 'API接口同步',
     'operation_logs': '操作日志审计',
+    'file_management': '文件管理',
 }
 
 # 视图类与模块中文对应映射
@@ -179,6 +180,7 @@ MODULE_MAPPINGS = {
     'WeixinBotAccountListAPIView': '微信集成',
     'WeixinBotAccountToggleAPIView': '微信集成',
     'WeixinPluginInboundAPIView': '微信集成',
+    'FileAssetViewSet': '文件管理',
 }
 
 # 方法与动作对应映射
@@ -216,6 +218,23 @@ ACTION_MAPPINGS = {
     'members': '成员管理',
     'quick_debug': '快捷调试',
     'quick-debug': '快捷调试',
+    'statistics': '统计',
+    'runtime_current': '当前运行时配置',
+    'default': '默认',
+    'content': '内容',
+    'upload': '上传',
+    'store_manifest': '存储清单',
+    'store_config': '存储配置',
+    'system_config': '系统配置',
+    'initialize_default_subagents': '初始化默认子代理',
+    'activate': '激活',
+    'view': '查看',
+    'fetch_models': '获取模型列表',
+    'cleanup_unreferenced': '清理未引用文件',
+    'file_settings': '文件管理设置',
+    'download': '下载文件',
+    'preview': '预览文件',
+    'references': '查看文件引用详情',
 
     # APIView / URL name 补充映射
     'register': '用户注册',

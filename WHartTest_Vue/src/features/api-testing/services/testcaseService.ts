@@ -24,8 +24,8 @@ export const testcaseService = {
   delete: (projectId: number, id: number) =>
     request<void>({ url: `${base(projectId)}/${id}/`, method: 'DELETE' }),
 
-  copy: (projectId: number, id: number) =>
-    request<ApiTestCase>({ url: `${base(projectId)}/${id}/copy/`, method: 'POST' }),
+  copy: (projectId: number, id: number, data?: { name?: string }) =>
+    request<ApiTestCase>({ url: `${base(projectId)}/${id}/copy/`, method: 'POST', data }),
 
   run: (projectId: number, id: number, data?: { environment_id?: number }) =>
     request<any>({ url: `${base(projectId)}/${id}/run/`, method: 'POST', data }),
@@ -146,6 +146,11 @@ export async function updateTestCase(id: number, data: any) {
 
 export async function deleteTestCase(id: number) {
   return _wrapOne(await testcaseService.delete(_pid(), id));
+}
+
+export async function copyTestCase(id: number, data?: { name?: string }) {
+  const pid = _pid();
+  return _wrapOne(await testcaseService.copy(pid, id, data));
 }
 
 export async function runTestCase(id: number, data?: { environment?: number }) {

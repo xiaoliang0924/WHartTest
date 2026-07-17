@@ -192,6 +192,7 @@ class UiPageSteps(models.Model):
     description = models.TextField(_('步骤描述'), blank=True, null=True)
     run_flow = models.TextField(_('执行顺序描述'), null=True, blank=True)
     flow_data = models.JSONField(_('流程图数据'), default=dict, blank=True)
+    file_ids = models.JSONField(_('附件 file_id 列表'), default=list, blank=True)
     status = models.SmallIntegerField(_('状态'), choices=STATUS_CHOICES, default=0)
     result_data = models.JSONField(_('最近执行结果'), null=True, blank=True)
     creator = models.ForeignKey(
@@ -274,6 +275,7 @@ class UiTestCase(models.Model):
     posterior_sql = models.JSONField(_('后置SQL'), default=list, blank=True)
     parametrize = models.JSONField(_('参数化数据'), default=list, blank=True)
     case_flow = models.TextField(_('用例流程'), blank=True, null=True)
+    file_ids = models.JSONField(_('附件 file_id 列表'), default=list, blank=True)
     result_data = models.JSONField(_('最近执行结果'), null=True, blank=True)
     error_message = models.TextField(_('错误信息'), null=True, blank=True)
     creator = models.ForeignKey(
@@ -469,10 +471,9 @@ class UiEnvironmentConfig(models.Model):
     timeout = models.IntegerField(_('默认超时（毫秒）'), default=30000)
     db_c_status = models.BooleanField(_('数据库新增状态'), default=False)
     db_rud_status = models.BooleanField(_('数据库查改删状态'), default=False)
-    DB_TYPE_CHOICES = [('mysql', 'MySQL'), ('db2', 'DB2')]
+    DB_TYPE_CHOICES = [('mysql', 'MySQL')]
     db_type = models.CharField(_('数据库类型'), max_length=20, choices=DB_TYPE_CHOICES, default='mysql')
     mysql_config = models.JSONField(_('MySQL配置'), null=True, blank=True)
-    db2_config = models.JSONField(_('DB2配置'), null=True, blank=True)
     extra_config = models.JSONField(_('额外配置'), null=True, blank=True)
     is_default = models.BooleanField(_('是否默认'), default=False)
     creator = models.ForeignKey(

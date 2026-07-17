@@ -6,14 +6,17 @@ import { Message } from '@arco-design/web-vue'
 import jmespath from 'jmespath'
 import { useAppI18n } from '@/composables/useAppI18n'
 
+type ViewerDataSource = 'response' | 'request'
+
 interface Props {
   visible: boolean
   responseData: any
   fieldType?: 'extract' | 'assert'
+  dataSource?: ViewerDataSource
 }
 
 const props = defineProps<Props>()
-const emit = defineEmits(['update:visible', 'select-path'])
+const emit = defineEmits(['update:visible', 'update:dataSource', 'select-path'])
 const { isEnglish } = useAppI18n()
 
 const viewerModeLabel = computed(() => (
@@ -40,8 +43,23 @@ const guideTargetLabel = computed(() => (
     : (isEnglish.value ? 'assert config' : '断言配置')
 ))
 
+const dataSourceLabel = computed(() => (
+  props.dataSource === 'request'
+    ? (isEnglish.value ? 'Request Body' : '请求体')
+    : (isEnglish.value ? 'Response Body' : '响应体')
+))
+
+const activeDataSource = computed<ViewerDataSource>(() => (
+  props.dataSource === 'request' ? 'request' : 'response'
+))
+
+const dataSourceOptions = computed(() => [
+  { label: isEnglish.value ? 'Response' : '响应体', value: 'response' },
+  { label: isEnglish.value ? 'Request' : '请求体', value: 'request' },
+])
+
 const viewerTitle = computed(() => (
-  `${isEnglish.value ? 'Response Data' : '响应数据'} - ${viewerModeLabel.value}`
+  `${dataSourceLabel.value} - ${viewerModeLabel.value}`
 ))
 
 const guideTitle = computed(() => (
@@ -81,17 +99,106 @@ const testExpression = ref('')
 const testResult = ref<{ success: boolean; value: any; error?: string } | null>(null)
 const isTestAreaExpanded = ref(false)
 
+const handleDataSourceChange = (source: string | number | boolean) => {
+  emit('update:dataSource', source === 'request' ? 'request' : 'response')
+  testResult.value = null
+}
+
+const parseJsonString = (value: string) => {
+  let current = value
+
+  for (let depth = 0; depth < 2; depth += 1) {
+    const trimmed = current.trim()
+    if (!trimmed) return current
+
+    const looksLikeStructuredJson = trimmed.startsWith('{') || trimmed.startsWith('[')
+    const looksLikeQuotedStructuredJson = trimmed.startsWith('"')
+
+    if (!looksLikeStructuredJson && !looksLikeQuotedStructuredJson) {
+      return current
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed)
+
+      if (typeof parsed === 'string') {
+        const parsedTrimmed = parsed.trim()
+        if (parsedTrimmed.startsWith('{') || parsedTrimmed.startsWith('[')) {
+          current = parsed
+          continue
+        }
+        return value
+      }
+
+      return parsed
+    } catch {
+      return current
+    }
+  }
+
+  return current
+}
+
+const normalizeResponseContent = (responseData: any) => {
+  const data = responseData?.value ?? responseData
+  const content = data?.response?.content
+    ?? data?.response?.body
+    ?? data?.data?.response?.content
+    ?? data?.data?.response?.body
+    ?? data?.response_data?.content
+    ?? data?.response_data?.body
+    ?? data?.data?.response_data?.content
+    ?? data?.data?.response_data?.body
+    ?? data?.content
+    ?? data?.body
+
+  if (content === null || content === undefined || content === '') {
+    return null
+  }
+
+  return typeof content === 'string' ? parseJsonString(content) : content
+}
+
+const normalizeRequestContent = (responseData: any) => {
+  const data = responseData?.value ?? responseData
+  const request = data?.request
+    ?? data?.data?.request
+    ?? data?.request_data
+    ?? data?.data?.request_data
+  const content = request?.body
+    ?? request?.json
+    ?? request?.data
+    ?? data?.requestBody
+    ?? data?.request_body
+    ?? data?.data?.requestBody
+    ?? data?.data?.request_body
+
+  if (content === null || content === undefined || content === '') {
+    return null
+  }
+
+  return typeof content === 'string' ? parseJsonString(content) : content
+}
+
+const normalizeViewerContent = (responseData: any) => {
+  return props.dataSource === 'request'
+    ? normalizeRequestContent(responseData)
+    : normalizeResponseContent(responseData)
+}
+
+const stringifyForCopy = (data: any) => {
+  if (typeof data === 'string') return data
+  return JSON.stringify(data, null, 2)
+}
+
 // 格式化的JSON数据
 const formattedData = computed(() => {
   try {
     if (!props.responseData) return null
-    
-    const content = props.responseData?.response?.content
-    if (!content) return null
-    
-    return content
+
+    return normalizeViewerContent(props.responseData)
   } catch (error) {
-    console.error('解析响应数据失败:', error)
+    console.error('解析接口数据失败:', error)
     return null
   }
 })
@@ -104,7 +211,7 @@ const runTest = () => {
   }
   
   if (!formattedData.value) {
-    Message.warning('暂无响应数据')
+    Message.warning(`暂无${dataSourceLabel.value}`)
     return
   }
   
@@ -402,13 +509,14 @@ const expandAllNodes = (data: any, basePath: string = '') => {
 }
 
 // 监听数据变化时自动展开所有节点
-watch(() => props.responseData, (newData) => {
+watch(() => [props.responseData, props.dataSource], ([newData]) => {
   // 重置展开状态
   expandedPaths.value = ['']
   
   // 如果有数据，展开所有节点
-  if (newData?.response?.content) {
-    expandAllNodes(newData.response.content, '')
+  const content = normalizeViewerContent(newData)
+  if (content) {
+    expandAllNodes(content, '')
   }
 }, { immediate: true })
 
@@ -434,8 +542,19 @@ watch(() => props.visible, (visible) => {
   >
     <template #title>
       <div class="flex justify-between items-center">
-        <span>{{ viewerTitle }}</span>
-        <a-button type="text" @click="closeDrawer">
+        <div class="flex flex-1 items-center gap-3 min-w-0">
+          <span class="viewer-title-text">{{ viewerTitle }}</span>
+          <a-radio-group
+            v-if="fieldType === 'extract'"
+            :model-value="activeDataSource"
+            :options="dataSourceOptions"
+            type="button"
+            size="small"
+            class="flex-shrink-0"
+            @change="handleDataSourceChange"
+          />
+        </div>
+        <a-button type="text" @click="closeDrawer" class="flex-shrink-0">
           <template #icon><icon-close /></template>
         </a-button>
       </div>
@@ -485,11 +604,11 @@ watch(() => props.visible, (visible) => {
         </div>
       </div>
       
-      <!-- 响应数据展示 -->
+      <!-- 数据展示 -->
       <div v-if="formattedData" class="viewer-json-shell rounded-lg shadow-inner p-4 relative overflow-auto">
         <div
           class="absolute right-2 top-2 cursor-pointer viewer-copy-button"
-          @click="copyContent(JSON.stringify(formattedData, null, 2))"
+          @click="copyContent(stringifyForCopy(formattedData))"
           title="复制"
         >
           <icon-copy />
@@ -506,7 +625,7 @@ watch(() => props.visible, (visible) => {
           </div>
         </div>
       </div>
-      <a-empty v-else description="暂无响应数据" />
+      <a-empty v-else :description="`暂无${dataSourceLabel}`" />
       
       <div class="viewer-guide mt-4 rounded-lg p-4">
         <h3 class="viewer-guide-title font-medium mb-2">{{ guideTitle }}</h3>
@@ -537,6 +656,12 @@ watch(() => props.visible, (visible) => {
   --viewer-copy-text: var(--color-text-3);
   --viewer-test-code-bg: rgba(241, 245, 249, 0.96);
   color: var(--viewer-shell-text);
+}
+
+.viewer-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .viewer-test-result--success {

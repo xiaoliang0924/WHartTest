@@ -70,8 +70,11 @@ from api_testcases.views import (
     ApiTestCaseGroupViewSet,
     ApiTestCaseViewSet,
     ApiTestReportViewSet,
+    ApiInterfaceCaseViewSet,
+    ApiInterfaceCaseReportViewSet,
 )
 from api_testtasks.views import ApiTestTaskSuiteViewSet, ApiTestTaskExecutionViewSet
+from file_management.views import FileAssetViewSet
 from api_sync.views import (
     ApiSyncConfigViewSet,
     ApiSyncHistoryViewSet,
@@ -126,12 +129,15 @@ projects_router.register(r'api-interface-results', ApiInterfaceResultViewSet, ba
 projects_router.register(r'api-testcase-tags', ApiTestCaseTagViewSet, basename='project-api-testcase-tags')
 projects_router.register(r'api-testcase-groups', ApiTestCaseGroupViewSet, basename='project-api-testcase-groups')
 projects_router.register(r'api-testcases', ApiTestCaseViewSet, basename='project-api-testcases')
+projects_router.register(r'api-interface-cases', ApiInterfaceCaseViewSet, basename='project-api-interface-cases')
 projects_router.register(r'api-test-reports', ApiTestReportViewSet, basename='project-api-test-reports')
+projects_router.register(r'api-interface-case-reports', ApiInterfaceCaseReportViewSet, basename='project-api-interface-case-reports')
 projects_router.register(r'api-task-suites', ApiTestTaskSuiteViewSet, basename='project-api-task-suites')
 projects_router.register(r'api-task-executions', ApiTestTaskExecutionViewSet, basename='project-api-task-executions')
 projects_router.register(r'api-sync-configs', ApiSyncConfigViewSet, basename='project-api-sync-configs')
 projects_router.register(r'api-sync-histories', ApiSyncHistoryViewSet, basename='project-api-sync-histories')
 projects_router.register(r'api-global-sync-configs', ApiGlobalSyncConfigViewSet, basename='project-api-global-sync-configs')
+projects_router.register(r'files', FileAssetViewSet, basename='project-files')
 
 # 定义根 URL 路由表。
 urlpatterns = [

@@ -3,9 +3,11 @@ import { ref, watch, onMounted, inject } from 'vue'
 import { IconDelete, IconPlus, IconCode } from '@arco-design/web-vue/es/icon'
 import ResponseJsonViewer from './ResponseJsonViewer.vue'
 import { Message } from '@arco-design/web-vue'
+import type { ApiExtractMeta, ApiExtractPayload, ExtractSource, ExtractVariableType } from '../../types/interface'
 
 interface Props {
   extract?: Record<string, string>
+  extractMeta?: ApiExtractMeta
 }
 
 const props = defineProps<Props>()
@@ -21,9 +23,31 @@ interface ExtractRule {
   variable: string
   expression: string
   enabled: boolean
+  source: ExtractSource
+  variableType: ExtractVariableType
 }
 
-const extractRules = ref<ExtractRule[]>([{ variable: '', expression: '', enabled: true }])
+const createEmptyRule = (): ExtractRule => ({
+  variable: '',
+  expression: '',
+  enabled: true,
+  source: 'response',
+  variableType: 'temporary',
+})
+
+const extractRules = ref<ExtractRule[]>([createEmptyRule()])
+const variableTypeOptions = [
+  { label: '临时变量', value: 'temporary' },
+  { label: '项目变量', value: 'project' },
+]
+const sourceOptions = [
+  { label: '响应体', value: 'response' },
+  { label: '请求体', value: 'request' },
+]
+
+const normalizeExtractSource = (source: unknown): ExtractSource => {
+  return source === 'request' ? 'request' : 'response'
+}
 
 // 初始化提取规则
 const initExtractRules = () => {
@@ -31,36 +55,30 @@ const initExtractRules = () => {
     extractRules.value = Object.entries(props.extract).map(([variable, expression]) => ({
       variable,
       expression,
-      enabled: true
+      enabled: true,
+      source: normalizeExtractSource(props.extractMeta?.[variable]?.source),
+      variableType: props.extractMeta?.[variable]?.variable_type || 'temporary',
     }))
   } else {
-    extractRules.value = [{ variable: '', expression: '', enabled: true }]
+    extractRules.value = [createEmptyRule()]
   }
 }
 
 // 监听 extract 变化
-watch(() => props.extract, (newExtract) => {
-  if (newExtract && Object.keys(newExtract).length > 0) {
-    extractRules.value = Object.entries(newExtract).map(([variable, expression]) => ({
-      variable,
-      expression,
-      enabled: true
-    }))
-  } else {
-    extractRules.value = [{ variable: '', expression: '', enabled: true }]
-  }
-})
+watch(() => [props.extract, props.extractMeta], () => {
+  initExtractRules()
+}, { deep: true })
 
 // 添加提取规则
 const addRow = () => {
-  extractRules.value.push({ variable: '', expression: '', enabled: true })
+  extractRules.value.push(createEmptyRule())
 }
 
 // 删除提取规则
 const removeRow = (index: number) => {
   extractRules.value.splice(index, 1)
   if (extractRules.value.length === 0) {
-    extractRules.value.push({ variable: '', expression: '', enabled: true })
+    extractRules.value.push(createEmptyRule())
   }
 }
 
@@ -82,6 +100,12 @@ const handleSelectPath = (path: string, value: string) => {
   }
 }
 
+const handleDataSourceChange = (source: unknown) => {
+  if (currentEditingIndex.value >= 0 && currentEditingIndex.value < extractRules.value.length) {
+    extractRules.value[currentEditingIndex.value].source = normalizeExtractSource(source)
+  }
+}
+
 // 打开响应查看器
 const openResponseViewer = (index: number) => {
   currentEditingIndex.value = index
@@ -92,12 +116,21 @@ const openResponseViewer = (index: number) => {
 defineExpose({
   getExtractRules: () => {
     const rules: Record<string, string> = {}
+    const extractMeta: ApiExtractMeta = {}
     extractRules.value
       .filter(rule => rule.enabled && rule.variable && rule.expression)
       .forEach(rule => {
         rules[rule.variable] = rule.expression
+        extractMeta[rule.variable] = {
+          variable_type: rule.variableType,
+          source: rule.source,
+        }
       })
-    return rules
+    const payload: ApiExtractPayload = {
+      extract: rules,
+      extractMeta,
+    }
+    return payload
   }
 })
 
@@ -119,7 +152,7 @@ onMounted(() => {
           <a-checkbox v-model="rule.enabled" class="flex-shrink-0" />
           
           <div class="flex flex-1 gap-2">
-            <div class="flex relative w-3/5">
+            <div class="flex relative flex-[1.4]">
               <a-input
                 v-model="rule.expression"
                 placeholder="提取表达式 (例如: body.data.results[?name=='测试用例执行'].id | [0])"
@@ -140,7 +173,19 @@ onMounted(() => {
               v-model="rule.variable"
               placeholder="变量名"
               allow-clear
-              class="w-2/5"
+              class="flex-1"
+            />
+
+            <a-select
+              v-model="rule.source"
+              :options="sourceOptions"
+              class="extract-source-select flex-shrink-0"
+            />
+
+            <a-select
+              v-model="rule.variableType"
+              :options="variableTypeOptions"
+              class="extract-type-select flex-shrink-0"
             />
           </div>
           
@@ -166,7 +211,9 @@ onMounted(() => {
     <ResponseJsonViewer
       v-model:visible="drawerVisible"
       :response-data="apiResponse"
+      :data-source="currentEditingIndex >= 0 ? extractRules[currentEditingIndex]?.source : 'response'"
       field-type="extract"
+      @update:data-source="handleDataSourceChange"
       @select-path="handleSelectPath"
     />
   </div>
@@ -187,6 +234,26 @@ onMounted(() => {
       @apply text-[color:var(--color-text-3)];
     }
   }
+}
+
+:deep(.extract-type-select .arco-select-view) {
+  @apply bg-white border-[color:var(--color-border-2)];
+  color: var(--color-text-1);
+}
+
+:deep(.extract-source-select .arco-select-view) {
+  @apply bg-white border-[color:var(--color-border-2)];
+  color: var(--color-text-1);
+}
+
+:deep(.extract-type-select) {
+  width: 108px !important;
+  min-width: 108px;
+}
+
+:deep(.extract-source-select) {
+  width: 96px !important;
+  min-width: 96px;
 }
 
 :deep(.arco-checkbox) {
@@ -214,6 +281,16 @@ onMounted(() => {
       @apply text-gray-500;
     }
   }
+}
+
+:global(body.api-testing-theme) :deep(.extract-type-select .arco-select-view) {
+  @apply bg-gray-900/60 border-gray-700;
+  color: rgb(229, 231, 235);
+}
+
+:global(body.api-testing-theme) :deep(.extract-source-select .arco-select-view) {
+  @apply bg-gray-900/60 border-gray-700;
+  color: rgb(229, 231, 235);
 }
 
 :global(body.api-testing-theme) :deep(.arco-checkbox) {

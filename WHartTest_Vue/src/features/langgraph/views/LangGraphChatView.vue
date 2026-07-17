@@ -187,6 +187,7 @@ import { marked } from 'marked';
 import { IconFullscreen, IconFullscreenExit } from '@arco-design/web-vue/es/icon';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
 import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolResultParser';
+import type { FileAsset } from '@/features/file-management/types';
 
 // 导入子组件
 import ChatSidebar from '../components/ChatSidebar.vue';
@@ -342,6 +343,7 @@ interface ChatMessage {
   imageBase64?: string;
   imageDataUrl?: string;
   fileAttachments?: ToolFileAttachment[];
+  attachments?: FileAsset[];
   imageBase64List?: string[];
   imageDataUrls?: string[];
   isThinkingProcess?: boolean;
@@ -1800,6 +1802,8 @@ const handleSendMessage = async (data: {
   images?: string[];
   imageDataUrls?: string[];
   quotedMessage?: ChatMessage | null;
+  file_ids?: number[];
+  files?: FileAsset[];
 }) => {
   const imageBase64List = data.images && data.images.length > 0
     ? data.images
@@ -1811,7 +1815,7 @@ const handleSendMessage = async (data: {
   const imageDataUrl = imageDataUrlList[0];
   const { message } = data;
 
-  if (!message.trim() && imageBase64List.length === 0) {
+  if (!message.trim() && imageBase64List.length === 0 && (!data.file_ids || data.file_ids.length === 0)) {
     Message.warning(pageText.value.messageEmpty);
     return;
   }
@@ -1844,7 +1848,8 @@ const handleSendMessage = async (data: {
     imageBase64: image, // 保存图片Base64数据（用于发送到后端）
     imageDataUrl: imageDataUrl, // 保存完整Data URL（用于前端显示）
     imageBase64List: imageBase64List,
-    imageDataUrls: imageDataUrlList
+    imageDataUrls: imageDataUrlList,
+    attachments: data.files || []
   });
 
   isLoading.value = true;
@@ -1853,6 +1858,7 @@ const handleSendMessage = async (data: {
     message: finalMessage,
     session_id: sessionId.value || undefined,
     project_id: String(projectStore.currentProjectId), // 转换为string类型
+    file_ids: data.file_ids || []
   };
   
   // 如果有图片，添加到请求中

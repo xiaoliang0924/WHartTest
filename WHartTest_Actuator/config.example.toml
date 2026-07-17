@@ -6,7 +6,7 @@
 ws_url = "ws://127.0.0.1:8000/ws/ui/actuator/"
 # API服务器地址
 api_url = "http://127.0.0.1:8000"
-# 是否启用 GUI 登录窗口（需要安装 PySide6）
+# 是否启用 GUI 登录窗口（需要安装 CustomTkinter）
 # true = 使用图形界面登录（推荐）
 # false = 使用配置文件中的账号密码，适合服务器无头部署
 use_gui = true
@@ -62,3 +62,7 @@ sources = false
 level = "INFO"
 # 日志文件（可选，不设置则只输出到控制台）
 # file = "./data/logs/actuator.log"
+
+[gui]
+# GUI 语言: zh, en
+language = "zh"

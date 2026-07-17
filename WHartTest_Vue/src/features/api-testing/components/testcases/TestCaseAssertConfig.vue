@@ -5,7 +5,7 @@ import { Message } from '@arco-design/web-vue'
 import ResponseJsonViewer from '../interfaces/ResponseJsonViewer.vue'
 
 interface Props {
-  validators?: Array<Record<string, [string, any]>>
+  validators?: Array<Record<string, any>>
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -26,6 +26,7 @@ interface AssertRule {
 }
 
 type ExpectedValueType = 'string' | 'number' | 'boolean' | 'null' | 'json'
+const EXPECTED_VALUE_TYPE_META_KEY = '__expected_value_type'
 
 const dataTypes = [
   { label: '整数', value: 'int' },
@@ -76,6 +77,41 @@ const inferExpectedValueType = (value: any): ExpectedValueType => {
   return 'string'
 }
 
+const isExpectedValueType = (value: unknown): value is ExpectedValueType => (
+  value === 'string' ||
+  value === 'number' ||
+  value === 'boolean' ||
+  value === 'null' ||
+  value === 'json'
+)
+
+const extractValidatorRule = (validator: Record<string, any>) => {
+  if ('check' in validator && 'expect' in validator) {
+    return {
+      type: validator.assert || validator.comparator || 'eq',
+      expression: validator.check ?? '',
+      expected: validator.expect,
+      expectedValueType: isExpectedValueType(validator[EXPECTED_VALUE_TYPE_META_KEY])
+        ? validator[EXPECTED_VALUE_TYPE_META_KEY]
+        : undefined
+    }
+  }
+
+  const entry = Object.entries(validator).find(([key, value]) =>
+    key !== EXPECTED_VALUE_TYPE_META_KEY && Array.isArray(value)
+  )
+  if (!entry) return null
+  const [type, values] = entry
+  return {
+    type,
+    expression: values[0] ?? '',
+    expected: values[1],
+    expectedValueType: isExpectedValueType(validator[EXPECTED_VALUE_TYPE_META_KEY])
+      ? validator[EXPECTED_VALUE_TYPE_META_KEY]
+      : undefined
+  }
+}
+
 const formatExpectedForInput = (value: any): string => {
   if (value === null || value === undefined) return ''
   if (typeof value === 'object') {
@@ -123,12 +159,15 @@ const hasExpectedValue = (rule: AssertRule) => {
 const buildAssertRule = (
   type = 'eq',
   expression = '',
-  expected: any = ''
+  expected: any = '',
+  expectedValueType?: ExpectedValueType
 ): AssertRule => ({
   type,
   expression,
   expected: formatExpectedForInput(expected),
-  expectedValueType: type === 'type_match' ? 'string' : inferExpectedValueType(expected),
+  expectedValueType: type === 'type_match'
+    ? 'string'
+    : expectedValueType ?? inferExpectedValueType(expected),
   description: '',
   enabled: true
 })
@@ -139,10 +178,17 @@ const assertRules = ref<AssertRule[]>([
 
 const initAssertRules = () => {
   if (props.validators && props.validators.length > 0) {
-    assertRules.value = props.validators.map(validator => {
-      const [type, [expression, expected]] = Object.entries(validator)[0] as [string, [string, any]]
-      return buildAssertRule(type, expression, expected)
-    })
+    assertRules.value = props.validators
+      .map(validator => {
+        const rule = extractValidatorRule(validator)
+        return rule
+          ? buildAssertRule(rule.type, rule.expression, rule.expected, rule.expectedValueType)
+          : null
+      })
+      .filter((rule): rule is AssertRule => Boolean(rule))
+    if (assertRules.value.length === 0) {
+      assertRules.value = [buildAssertRule()]
+    }
   } else {
     assertRules.value = [buildAssertRule()]
   }
@@ -150,10 +196,17 @@ const initAssertRules = () => {
 
 watch(() => props.validators, (newValidators) => {
   if (newValidators && newValidators.length > 0) {
-    assertRules.value = newValidators.map(validator => {
-      const [type, [expression, expected]] = Object.entries(validator)[0] as [string, [string, any]]
-      return buildAssertRule(type, expression, expected)
-    })
+    assertRules.value = newValidators
+      .map(validator => {
+        const rule = extractValidatorRule(validator)
+        return rule
+          ? buildAssertRule(rule.type, rule.expression, rule.expected, rule.expectedValueType)
+          : null
+      })
+      .filter((rule): rule is AssertRule => Boolean(rule))
+    if (assertRules.value.length === 0) {
+      assertRules.value = [buildAssertRule()]
+    }
   } else {
     assertRules.value = [buildAssertRule()]
   }
@@ -198,7 +251,15 @@ const openResponseViewer = (index: number) => {
 const getAssertRules = () => {
   return assertRules.value
     .filter(rule => rule.enabled && rule.expression && hasExpectedValue(rule))
-    .map(rule => ({ [rule.type]: [rule.expression, parseExpectedValue(rule)] }))
+    .map(rule => {
+      const validator: Record<string, any> = {
+        [rule.type]: [rule.expression, parseExpectedValue(rule)]
+      }
+      if (rule.type !== 'type_match') {
+        validator[EXPECTED_VALUE_TYPE_META_KEY] = rule.expectedValueType
+      }
+      return validator
+    })
 }
 
 onMounted(() => { initAssertRules() })

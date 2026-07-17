@@ -26,6 +26,7 @@
           @view-test-case="showViewTestCaseDetail"
           @execute-test-case="handleExecuteTestCase"
           @test-case-deleted="handleTestCaseDeleted"
+          @test-case-copied="handleTestCaseCopied"
           @module-filter-change="handleModuleSelected"
           @request-optimization="handleRequestOptimization"
           ref="testCaseListRef"
@@ -466,6 +467,15 @@ const handleFormSubmitSuccess = () => {
 const handleTestCaseDeleted = () => {
   // 用例在列表组件内部删除并刷新列表，这里可能需要刷新模块面板的用例计数
   modulePanelRef.value?.refreshModules();
+};
+
+const handleTestCaseCopied = async () => {
+  // 复制用例会影响模块用例数量，列表组件已刷新自身，这里同步模块面板和脑图数据
+  modulePanelRef.value?.refreshModules();
+  await fetchAllModulesForForm();
+  if (activeView.value === 'mindmap') {
+    await fetchTestCasesForMindmap(true);
+  }
 };
 
 const handleViewDetailTestCaseDeleted = () => {

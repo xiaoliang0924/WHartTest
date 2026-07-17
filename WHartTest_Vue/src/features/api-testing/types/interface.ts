@@ -4,6 +4,27 @@ export type InterfaceType = 'http' | 'sql';
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
 export type SqlMethod = 'fetchone' | 'fetchmany' | 'fetchall' | 'insert' | 'update' | 'delete';
 export type ApiBodyType = 'none' | 'form-data' | 'x-www-form-urlencoded' | 'raw' | 'binary';
+export type ExtractVariableType = 'temporary' | 'project';
+export type ExtractSource = 'response' | 'request';
+
+export interface ApiExtractMetaRule {
+  variable_type: ExtractVariableType;
+  source?: ExtractSource;
+}
+
+export type ApiExtractMeta = Record<string, ApiExtractMetaRule>;
+
+export interface ApiExtractPayload {
+  extract: Record<string, string>;
+  extractMeta: ApiExtractMeta;
+}
+
+export interface ApiExtractPersistenceResult {
+  matched_count: number;
+  created_count: number;
+  updated_count: number;
+  skipped_no_environment: boolean;
+}
 
 export interface ApiKeyValuePair {
   key: string;
@@ -29,6 +50,7 @@ export interface ApiInterface {
   headers: ApiKeyValuePair[];
   params: ApiKeyValuePair[];
   body: ApiRequestBody;
+  file_ids: number[];
 
   // SQL fields
   sql_method: SqlMethod | null;
@@ -42,6 +64,7 @@ export interface ApiInterface {
   variables: Record<string, any>;
   validators: any[];
   extract: Record<string, string>;
+  extract_meta: ApiExtractMeta;
 
   // Relationships
   project: number;
