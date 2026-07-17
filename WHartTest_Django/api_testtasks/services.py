@@ -163,7 +163,7 @@ class ApiTestTaskExecutionService:
     @staticmethod
     def execute_task(execution):
         """Execute a test task synchronously."""
-from api_testcases.services import (
+        from api_testcases.services import (
             InterfaceCaseExecutionService,
             TestExecutionService,
             suppress_testcase_notifications,
@@ -210,7 +210,7 @@ from api_testcases.services import (
             case_result.save()
 
             try:
-case_obj = case_result.case_object
+                case_obj = case_result.case_object
                 if case_result.case_type == ApiTestTaskCase.CASE_TYPE_INTERFACE:
                     report = InterfaceCaseExecutionService.run_interface_case(
                         case_obj, environment, execution.executed_by

@@ -384,7 +384,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             else status.HTTP_400_BAD_REQUEST,
         )
 
-@action(detail=False, methods=["post"], url_path="reorder")
+    @action(detail=False, methods=["post"], url_path="reorder")
     def reorder(self, request, project_pk=None):
         """
         保存当前测试用例列表的拖拽顺序。
