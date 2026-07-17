@@ -31,3 +31,6 @@ sources = false
 
 [logging]
 level = "INFO"
+
+[gui]
+language = "zh"

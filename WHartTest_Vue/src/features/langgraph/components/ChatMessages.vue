@@ -29,6 +29,7 @@ import { ref, watch, nextTick, onMounted, onUnmounted, computed } from 'vue';
 import MessageItem from './MessageItem.vue';
 import { brandLogoUrl } from '@/utils/assetUrl';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
+import type { FileAsset } from '@/features/file-management/types';
 import { useAppI18n } from '@/composables/useAppI18n';
 
 interface ChatMessage {
@@ -43,6 +44,7 @@ interface ChatMessage {
   imageBase64?: string;
   imageDataUrl?: string;
   fileAttachments?: ToolFileAttachment[];
+  attachments?: FileAsset[];
   imageBase64List?: string[];
   imageDataUrls?: string[];
   isThinkingProcess?: boolean;

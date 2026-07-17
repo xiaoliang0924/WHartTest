@@ -10,7 +10,8 @@ import {
   IconRight,
   IconDown,
   IconSend,
-  IconEdit
+  IconEdit,
+  IconCopy
 } from '@arco-design/web-vue/es/icon'
 import { Message } from '@arco-design/web-vue'
 
@@ -19,14 +20,17 @@ interface Props {
   level?: number
   expandedIds: number[]
   selectedId?: number
+  selectedInterfaceId?: number
   formLoading?: boolean
   displayMode?: 'list' | 'detail'
+  interfaceSelectMode?: 'detail' | 'direct'
 }
 
 const props = withDefaults(defineProps<Props>(), {
   level: 0,
   formLoading: false,
-  displayMode: 'detail'
+  displayMode: 'detail',
+  interfaceSelectMode: 'detail'
 })
 
 const emit = defineEmits<{
@@ -37,6 +41,7 @@ const emit = defineEmits<{
   (e: 'delete', module: ApiModule): void
   (e: 'edit-interface', api: ApiInterface): void
   (e: 'delete-interface', api: ApiInterface): void
+  (e: 'copy-interface', api: ApiInterface): void
   (e: 'run-interface', api: ApiInterface): void
   (e: 'select-interface', api: ApiInterface): void
 }>()
@@ -123,6 +128,11 @@ const fetchInterfaceDetail = async (api: ApiInterface) => {
 // 处理接口选择
 const handleInterfaceSelect = async (api: ApiInterface) => {
   console.log('接口被点击:', api)
+
+  if (props.interfaceSelectMode === 'direct') {
+    emit('select-interface', api)
+    return
+  }
   
   // 如果已经加载过详情，直接使用
   if (api.id && loadedInterfaceIds.value.has(api.id)) {
@@ -134,6 +144,13 @@ const handleInterfaceSelect = async (api: ApiInterface) => {
   console.log('接口未加载过详情，开始获取')
   // 否则请求详情
   await fetchInterfaceDetail(api)
+}
+
+const handleModuleSelect = () => {
+  if (props.module.id && props.displayMode === 'detail') {
+    fetchInterfaces(props.module.id)
+  }
+  emit('select', props.module)
 }
 
 // 拖拽排序逻辑注入与处理
@@ -251,7 +268,7 @@ const handleDrop = async (e: DragEvent) => {
       @dragleave="handleDragLeave"
       @dragend="handleDragEnd"
       @drop="handleDrop"
-      @click.stop="emit('select', module)"
+      @click.stop="handleModuleSelect"
     >
       <div class="flex items-center justify-between">
         <div class="flex items-center gap-2">
@@ -312,6 +329,7 @@ const handleDrop = async (e: DragEvent) => {
             v-for="api in interfaces"
             :key="api.id"
             class="module-tree__interface-item px-6 py-2 text-sm rounded min-w-0 cursor-pointer"
+            :class="{ 'module-tree__interface-item--selected': selectedInterfaceId === api.id }"
             :style="{ paddingLeft: `${paddingLeft + 4}px` }"
             @click="handleInterfaceSelect(api)"
           >
@@ -348,6 +366,15 @@ const handleDrop = async (e: DragEvent) => {
                   type="text"
                   size="mini"
                   class="module-tree__action-btn !p-0"
+                  @click.stop="emit('copy-interface', api)"
+                  title="复制接口"
+                >
+                  <template #icon><icon-copy /></template>
+                </a-button>
+                <a-button
+                  type="text"
+                  size="mini"
+                  class="module-tree__action-btn !p-0"
                   @click.stop="emit('delete-interface', api)"
                   title="删除接口"
                 >
@@ -368,8 +395,10 @@ const handleDrop = async (e: DragEvent) => {
           :level="level + 1"
           :expanded-ids="expandedIds"
           :selected-id="selectedId"
+          :selected-interface-id="selectedInterfaceId"
           :form-loading="formLoading"
           :display-mode="displayMode"
+          :interface-select-mode="interfaceSelectMode"
           @select="emit('select', $event)"
           @toggle-expand="emit('toggle-expand', $event)"
           @edit="emit('edit', $event)"
@@ -377,6 +406,7 @@ const handleDrop = async (e: DragEvent) => {
           @delete="emit('delete', $event)"
           @edit-interface="emit('edit-interface', $event)"
           @delete-interface="emit('delete-interface', $event)"
+          @copy-interface="emit('copy-interface', $event)"
           @run-interface="emit('run-interface', $event)"
           @select-interface="emit('select-interface', $event)"
         />
@@ -412,6 +442,11 @@ const handleDrop = async (e: DragEvent) => {
 
 .module-tree__interface-item:hover {
   background: var(--module-interface-hover-bg);
+}
+
+.module-tree__interface-item--selected {
+  background: var(--interface-module-active, rgba(24, 144, 255, 0.16));
+  box-shadow: inset 0 0 0 1px var(--interface-module-active-border, rgba(24, 144, 255, 0.2));
 }
 
 .module-tree__interface-main {

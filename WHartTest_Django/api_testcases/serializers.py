@@ -1,8 +1,12 @@
 from rest_framework import serializers
 from django.db import transaction, models
+from file_management.services import validate_file_ids, sync_file_references
+from file_management.models import FileReference
 from .models import (
     ApiTestCase, ApiTestCaseStep, ApiTestReport, ApiTestReportDetail,
-    ApiTestCaseTag, ApiTestCaseGroup
+    ApiTestCaseTag, ApiTestCaseGroup,
+    ApiInterfaceCase, ApiInterfaceCaseStep,
+    ApiInterfaceCaseReport, ApiInterfaceCaseReportDetail
 )
 
 
@@ -32,6 +36,60 @@ class ApiTestCaseGroupSerializer(serializers.ModelSerializer):
         return []
 
 
+def validate_file_ids_for_project(file_ids, project_pk, user=None):
+    if file_ids in (None, ''):
+        return []
+    from projects.models import Project
+    try:
+        project = Project.objects.get(id=project_pk)
+    except Project.DoesNotExist as exc:
+        raise serializers.ValidationError({'project': 'Project does not exist.'}) from exc
+    validate_file_ids(file_ids, project, user)
+    return file_ids
+
+
+def build_interface_data_snapshot(interface, override_data=None):
+    """Build a runnable, independent snapshot from an ApiInterface."""
+    data = interface.get_interface_data()
+    if interface.type == interface.TYPE_SQL:
+        data.update({
+            'sql_method': interface.sql_method,
+            'sql_params': interface.sql_params or {},
+            'sql_size': interface.sql_size,
+        })
+    else:
+        data.update({
+            'headers': interface.headers or [],
+            'params': interface.params or [],
+            'body': interface.body or {'type': 'none', 'content': None},
+        })
+
+    if isinstance(override_data, dict):
+        data.update(override_data)
+
+    return data
+
+
+def build_interface_info(interface):
+    if not interface:
+        return None
+    return {
+        'id': interface.id,
+        'name': interface.name,
+        'type': interface.type,
+        'method': interface.method or interface.sql_method,
+        'url': interface.url or interface.sql,
+        'module': {
+            'id': interface.module.id,
+            'name': interface.module.name
+        } if interface.module else None,
+        'project': {
+            'id': interface.project.id,
+            'name': interface.project.name
+        }
+    }
+
+
 class ApiTestCaseStepSerializer(serializers.ModelSerializer):
     interface_id = serializers.IntegerField(write_only=True, required=False)
     interface_info = serializers.SerializerMethodField(read_only=True)
@@ -41,7 +99,7 @@ class ApiTestCaseStepSerializer(serializers.ModelSerializer):
         model = ApiTestCaseStep
         fields = [
             'id', 'name', 'order', 'interface_id',
-            'interface_info', 'interface_data', 'config',
+            'interface_info', 'interface_data', 'config', 'file_ids',
             'sync_fields', 'last_sync_time'
         ]
         read_only_fields = ['last_sync_time']
@@ -75,7 +133,8 @@ class ApiTestCaseStepSerializer(serializers.ModelSerializer):
             'variables': {},
             'validators': [],
             'setup_hooks': [],
-            'teardown_hooks': []
+            'teardown_hooks': [],
+            'file_ids': interface.file_ids or []
         }
 
     def _create_sync_config(self, step, interface):
@@ -117,6 +176,14 @@ class ApiTestCaseStepSerializer(serializers.ModelSerializer):
         """Get project_pk from serializer context (passed by DRF ViewSet)."""
         view = self.context.get('view')
         return view.kwargs.get('project_pk') if view else None
+
+    def validate(self, attrs):
+        project_pk = self._get_project_pk()
+        if 'file_ids' in attrs and project_pk:
+            attrs['file_ids'] = validate_file_ids_for_project(attrs.get('file_ids'), project_pk, self.context.get('request').user if self.context.get('request') else None)
+        if 'interface_data' in attrs and isinstance(attrs.get('interface_data'), dict) and 'file_ids' in attrs['interface_data'] and project_pk:
+            validate_file_ids_for_project(attrs['interface_data'].get('file_ids'), project_pk, self.context.get('request').user if self.context.get('request') else None)
+        return attrs
 
     def create(self, validated_data):
         from api_interfaces.models import ApiInterface
@@ -206,7 +273,7 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
         model = ApiTestCase
         fields = [
             'id', 'name', 'description', 'priority',
-            'config', 'project', 'group',
+            'config', 'file_ids', 'project', 'group',
             'tags', 'tags_info', 'group_info',
             'created_by', 'created_by_name', 'created_at', 'updated_at',
             'steps', 'steps_info', 'related_interfaces'
@@ -217,6 +284,18 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
         """Get project_pk from serializer context (passed by DRF ViewSet)."""
         view = self.context.get('view')
         return view.kwargs.get('project_pk') if view else None
+
+    def validate(self, attrs):
+        project_pk = self._get_project_pk()
+        if 'file_ids' in attrs and project_pk:
+            attrs['file_ids'] = validate_file_ids_for_project(attrs.get('file_ids'), project_pk, self.context.get('request').user if self.context.get('request') else None)
+        for step_data in attrs.get('steps_info') or []:
+            if 'file_ids' in step_data and project_pk:
+                validate_file_ids_for_project(step_data.get('file_ids'), project_pk, self.context.get('request').user if self.context.get('request') else None)
+            interface_data = step_data.get('interface_data')
+            if isinstance(interface_data, dict) and 'file_ids' in interface_data and project_pk:
+                validate_file_ids_for_project(interface_data.get('file_ids'), project_pk, self.context.get('request').user if self.context.get('request') else None)
+        return attrs
 
     def _build_interface_data(self, interface):
         return {
@@ -229,7 +308,8 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
             'variables': {},
             'validators': [],
             'setup_hooks': [],
-            'teardown_hooks': []
+            'teardown_hooks': [],
+            'file_ids': interface.file_ids or []
         }
 
     def _create_sync_config(self, step, interface):
@@ -286,17 +366,20 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
                 'variables': user_interface_data.get('variables', {}),
                 'validators': user_interface_data.get('validators', []),
                 'setup_hooks': user_interface_data.get('setup_hooks', []),
-                'teardown_hooks': user_interface_data.get('teardown_hooks', [])
+                'teardown_hooks': user_interface_data.get('teardown_hooks', []),
+                'file_ids': user_interface_data.get('file_ids', interface.file_ids or [])
             }
         else:
             interface_data = self._build_interface_data(interface)
 
         step_data.pop('order', None)
+        file_ids = step_data.pop('file_ids', interface_data.get('file_ids', []))
         step = ApiTestCaseStep.objects.create(
             testcase=instance,
             order=order,
             origin_interface=interface,
             interface_data=interface_data,
+            file_ids=file_ids,
             **step_data
         )
         self._create_sync_config(step, interface)
@@ -335,6 +418,10 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
             step.sync_fields = update_data['sync_fields']
         if 'config' in update_data:
             step.config = update_data['config']
+        if 'file_ids' in update_data:
+            step.file_ids = update_data['file_ids']
+        if isinstance(step.interface_data, dict) and step.file_ids:
+            step.interface_data['file_ids'] = step.file_ids
 
         step.save()
         return step
@@ -357,6 +444,7 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
             )
 
         instance.refresh_from_db()
+        sync_file_references(instance.file_ids or [], instance.project, FileReference.REF_API_TESTCASE, instance.id, self.context.get('request').user if self.context.get('request') else None)
         return instance
 
     def update(self, instance, validated_data):
@@ -426,6 +514,266 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
 
             instance.refresh_from_db()
 
+        sync_file_references(instance.file_ids or [], instance.project, FileReference.REF_API_TESTCASE, instance.id, self.context.get('request').user if self.context.get('request') else None)
+        return instance
+
+
+class ApiInterfaceCaseStepSerializer(serializers.ModelSerializer):
+    interface_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+    interface_info = serializers.SerializerMethodField(read_only=True)
+    interface_data = serializers.JSONField(required=False)
+
+    class Meta:
+        model = ApiInterfaceCaseStep
+        fields = [
+            'id', 'name', 'role', 'order', 'interface_id',
+            'interface_info', 'interface_data', 'config', 'file_ids',
+            'sync_fields', 'last_sync_time'
+        ]
+        read_only_fields = ['last_sync_time']
+
+    def get_interface_info(self, obj):
+        if obj.origin_interface:
+            return build_interface_info(obj.origin_interface)
+
+        interface_data = obj.interface_data if isinstance(obj.interface_data, dict) else {}
+        return {
+            'id': 0,
+            'name': obj.name,
+            'type': interface_data.get('type', 'http'),
+            'method': interface_data.get('method'),
+            'url': interface_data.get('url') or interface_data.get('sql'),
+            'module': None,
+            'project': {
+                'id': obj.interface_case.project_id,
+                'name': obj.interface_case.project.name
+            } if obj.interface_case and obj.interface_case.project else None
+        }
+
+
+class ApiInterfaceCaseSerializer(serializers.ModelSerializer):
+    steps = ApiInterfaceCaseStepSerializer(many=True, read_only=True)
+    steps_info = serializers.ListField(
+        child=serializers.DictField(),
+        write_only=True,
+        required=False,
+    )
+    interface_id = serializers.IntegerField(write_only=True, required=False)
+    interface_info = serializers.SerializerMethodField()
+    main_step = serializers.SerializerMethodField()
+    precondition_count = serializers.SerializerMethodField()
+    tags_info = ApiTestCaseTagSerializer(source='tags', many=True, read_only=True)
+    group_info = ApiTestCaseGroupSerializer(source='group', read_only=True)
+    created_by_name = serializers.CharField(
+        source='created_by.username', read_only=True, default=''
+    )
+
+    class Meta:
+        model = ApiInterfaceCase
+        fields = [
+            'id', 'name', 'description', 'priority',
+            'config', 'file_ids', 'project', 'interface', 'interface_id',
+            'interface_info', 'group', 'tags', 'tags_info', 'group_info',
+            'created_by', 'created_by_name', 'created_at', 'updated_at',
+            'steps', 'steps_info', 'main_step', 'precondition_count'
+        ]
+        read_only_fields = [
+            'project', 'interface', 'created_by', 'created_at', 'updated_at'
+        ]
+
+    def get_interface_info(self, obj):
+        return build_interface_info(obj.interface)
+
+    def get_main_step(self, obj):
+        main_step = obj.steps.filter(role=ApiInterfaceCaseStep.ROLE_MAIN).first()
+        return ApiInterfaceCaseStepSerializer(main_step).data if main_step else None
+
+    def get_precondition_count(self, obj):
+        return obj.steps.filter(role=ApiInterfaceCaseStep.ROLE_PRECONDITION).count()
+
+    def _get_project_pk(self):
+        view = self.context.get('view')
+        return view.kwargs.get('project_pk') if view else None
+
+    def _get_interface(self, interface_id):
+        from api_interfaces.models import ApiInterface
+
+        project_pk = self._get_project_pk()
+        return ApiInterface.objects.get(id=interface_id, project_id=project_pk)
+
+    def validate(self, attrs):
+        project_pk = self._get_project_pk()
+        if self.instance is None and not attrs.get('interface_id'):
+            raise serializers.ValidationError({'interface_id': '请选择绑定接口'})
+
+        if 'file_ids' in attrs and project_pk:
+            attrs['file_ids'] = validate_file_ids_for_project(
+                attrs.get('file_ids'),
+                project_pk,
+                self.context.get('request').user if self.context.get('request') else None,
+            )
+
+        group = attrs.get('group')
+        if group and project_pk and str(group.project_id) != str(project_pk):
+            raise serializers.ValidationError({'group': '分组不属于当前项目'})
+
+        tags = attrs.get('tags')
+        if tags and project_pk:
+            invalid_tags = [tag for tag in tags if str(tag.project_id) != str(project_pk)]
+            if invalid_tags:
+                raise serializers.ValidationError({'tags': '标签不属于当前项目'})
+
+        for step_data in attrs.get('steps_info') or []:
+            if 'file_ids' in step_data and project_pk:
+                validate_file_ids_for_project(
+                    step_data.get('file_ids'),
+                    project_pk,
+                    self.context.get('request').user if self.context.get('request') else None,
+                )
+            interface_data = step_data.get('interface_data')
+            if isinstance(interface_data, dict) and 'file_ids' in interface_data and project_pk:
+                validate_file_ids_for_project(
+                    interface_data.get('file_ids'),
+                    project_pk,
+                    self.context.get('request').user if self.context.get('request') else None,
+                )
+
+        return attrs
+
+    def _step_data_from_interface(self, interface, step_data):
+        override_data = step_data.pop('interface_data', None)
+        interface_data = build_interface_data_snapshot(interface, override_data)
+        return interface_data
+
+    def _create_step(self, instance, step_data, order, role):
+        step_data = step_data.copy()
+        step_data.pop('id', None)
+        step_data.pop('step_id', None)
+        step_data.pop('order', None)
+        step_data.pop('role', None)
+
+        interface_id = step_data.pop('interface_id', None)
+        origin_interface = None
+
+        if role == ApiInterfaceCaseStep.ROLE_MAIN:
+            origin_interface = instance.interface
+        elif interface_id:
+            origin_interface = self._get_interface(interface_id)
+
+        if origin_interface:
+            interface_data = self._step_data_from_interface(origin_interface, step_data)
+            default_name = origin_interface.name
+        else:
+            interface_data = step_data.pop('interface_data', None)
+            if not isinstance(interface_data, dict):
+                raise serializers.ValidationError({'steps_info': '步骤必须选择接口或提供 interface_data'})
+            default_name = '自定义接口'
+
+        file_ids = step_data.pop('file_ids', interface_data.get('file_ids', []))
+        if file_ids:
+            interface_data['file_ids'] = file_ids
+
+        return ApiInterfaceCaseStep.objects.create(
+            interface_case=instance,
+            order=order,
+            role=role,
+            origin_interface=origin_interface,
+            interface_data=interface_data,
+            file_ids=file_ids,
+            name=step_data.pop('name', default_name),
+            **step_data,
+        )
+
+    def _replace_steps(self, instance, steps_info):
+        with transaction.atomic():
+            instance.steps.all().delete()
+
+            ordered_steps = sorted(
+                [step.copy() for step in steps_info],
+                key=lambda item: item.get('order') or 0,
+            )
+            preconditions = [
+                step for step in ordered_steps
+                if step.get('role') != ApiInterfaceCaseStep.ROLE_MAIN
+            ]
+            main_steps = [
+                step for step in ordered_steps
+                if step.get('role') == ApiInterfaceCaseStep.ROLE_MAIN
+            ]
+
+            order = 1
+            for step_data in preconditions:
+                self._create_step(
+                    instance,
+                    step_data,
+                    order=order,
+                    role=ApiInterfaceCaseStep.ROLE_PRECONDITION,
+                )
+                order += 1
+
+            main_data = main_steps[-1] if main_steps else {}
+            self._create_step(
+                instance,
+                main_data,
+                order=order,
+                role=ApiInterfaceCaseStep.ROLE_MAIN,
+            )
+
+    def create(self, validated_data):
+        interface_id = validated_data.pop('interface_id')
+        steps_info = validated_data.pop('steps_info', [])
+        validated_data['created_by'] = self.context['request'].user
+        validated_data['interface'] = self._get_interface(interface_id)
+
+        instance = super().create(validated_data)
+        self._replace_steps(instance, steps_info)
+        instance.refresh_from_db()
+        sync_file_references(
+            instance.file_ids or [],
+            instance.project,
+            FileReference.REF_API_INTERFACE_CASE,
+            instance.id,
+            self.context.get('request').user if self.context.get('request') else None,
+        )
+        return instance
+
+    def update(self, instance, validated_data):
+        steps_info = validated_data.pop('steps_info', None)
+        interface_id = validated_data.pop('interface_id', None)
+
+        if interface_id:
+            validated_data['interface'] = self._get_interface(interface_id)
+
+        instance = super().update(instance, validated_data)
+
+        if steps_info is not None or interface_id:
+            if steps_info is None:
+                steps_info = []
+                for step in instance.steps.all().order_by('order'):
+                    step_payload = {
+                        'id': step.id,
+                        'name': step.name,
+                        'role': step.role,
+                        'order': step.order,
+                        'interface_id': step.origin_interface_id,
+                        'interface_data': step.interface_data,
+                        'config': step.config,
+                        'file_ids': step.file_ids,
+                        'sync_fields': step.sync_fields,
+                    }
+                    if interface_id and step.role == ApiInterfaceCaseStep.ROLE_MAIN:
+                        step_payload.pop('interface_data', None)
+                    steps_info.append(step_payload)
+            self._replace_steps(instance, steps_info)
+            instance.refresh_from_db()
+
+        sync_file_references(
+            instance.file_ids or [],
+            instance.project,
+            FileReference.REF_API_INTERFACE_CASE,
+            instance.id,
+            self.context.get('request').user if self.context.get('request') else None,
+        )
         return instance
 
 
@@ -485,6 +833,109 @@ class ApiTestReportSerializer(serializers.ModelSerializer):
             'fail_count', 'error_count', 'duration',
             'start_time', 'summary', 'testcase',
             'testcase_name', 'environment', 'environment_info',
+            'executed_by', 'executed_by_info', 'details', 'success_rate'
+        ]
+        read_only_fields = [
+            'name', 'status', 'success_count', 'fail_count',
+            'error_count', 'duration', 'start_time', 'summary',
+            'executed_by', 'success_rate', 'environment_info',
+            'executed_by_info'
+        ]
+
+    def get_success_rate(self, obj):
+        total = obj.success_count + obj.fail_count + obj.error_count
+        if total == 0:
+            return "0"
+        rate = obj.success_count / total
+        return "1" if rate == 1 else f"{rate:.2f}"
+
+    def get_environment_info(self, obj):
+        if obj.environment:
+            return {
+                'id': obj.environment.id,
+                'name': obj.environment.name,
+                'base_url': obj.environment.base_url,
+                'description': obj.environment.description,
+                'project': {
+                    'id': obj.environment.project.id,
+                    'name': obj.environment.project.name
+                }
+            }
+        return None
+
+    def get_executed_by_info(self, obj):
+        if obj.executed_by:
+            return {
+                'id': obj.executed_by.id,
+                'username': obj.executed_by.username,
+                'email': obj.executed_by.email,
+                'first_name': obj.executed_by.first_name,
+                'last_name': obj.executed_by.last_name
+            }
+        return None
+
+
+class ApiInterfaceCaseReportDetailSerializer(serializers.ModelSerializer):
+    step_name = serializers.CharField(source='step.name', read_only=True)
+
+    class Meta:
+        model = ApiInterfaceCaseReportDetail
+        fields = [
+            'id', 'step_name', 'success', 'elapsed',
+            'request', 'response', 'validators',
+            'extracted_variables', 'attachment'
+        ]
+
+
+class ApiInterfaceCaseReportListSerializer(serializers.ModelSerializer):
+    testcase = serializers.IntegerField(source='interface_case_id', read_only=True)
+    testcase_name = serializers.CharField(source='interface_case.name', read_only=True)
+    interface_name = serializers.CharField(source='interface_case.interface.name', read_only=True)
+    success_rate = serializers.SerializerMethodField()
+    environment_name = serializers.CharField(
+        source='environment.name', read_only=True, default=''
+    )
+    executed_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ApiInterfaceCaseReport
+        fields = [
+            'id', 'name', 'testcase', 'testcase_name', 'interface_name', 'status',
+            'success_count', 'fail_count', 'error_count',
+            'success_rate', 'duration', 'start_time',
+            'environment_name', 'executed_by_name'
+        ]
+
+    def get_success_rate(self, obj):
+        total = obj.success_count + obj.fail_count + obj.error_count
+        if total == 0:
+            return "0"
+        rate = obj.success_count / total
+        return "1" if rate == 1 else f"{rate:.2f}"
+
+    def get_executed_by_name(self, obj):
+        if obj.executed_by:
+            return obj.executed_by.username
+        return ""
+
+
+class ApiInterfaceCaseReportSerializer(serializers.ModelSerializer):
+    testcase = serializers.IntegerField(source='interface_case_id', read_only=True)
+    testcase_name = serializers.CharField(source='interface_case.name', read_only=True)
+    interface_name = serializers.CharField(source='interface_case.interface.name', read_only=True)
+    details = ApiInterfaceCaseReportDetailSerializer(many=True, read_only=True)
+    success_rate = serializers.SerializerMethodField()
+    environment_info = serializers.SerializerMethodField()
+    executed_by_info = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ApiInterfaceCaseReport
+        fields = [
+            'id', 'name', 'status', 'success_count',
+            'fail_count', 'error_count', 'duration',
+            'start_time', 'summary', 'interface_case',
+            'testcase', 'testcase_name', 'interface_name',
+            'environment', 'environment_info',
             'executed_by', 'executed_by_info', 'details', 'success_rate'
         ]
         read_only_fields = [

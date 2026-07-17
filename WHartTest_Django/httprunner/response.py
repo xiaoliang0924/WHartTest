@@ -1,3 +1,4 @@
+import json
 from typing import Dict, Text, Any
 
 import jmespath
@@ -8,6 +9,9 @@ from httprunner import exceptions
 from httprunner.exceptions import ValidationFailure, ParamsError
 from httprunner.models import VariablesMapping, Validators
 from httprunner.parser import parse_string_value, Parser
+
+EXPECTED_VALUE_TYPE_META_KEY = "__expected_value_type"
+EXPECTED_VALUE_TYPES = {"string", "number", "boolean", "null", "json"}
 
 
 def get_uniform_comparator(comparator: Text):
@@ -56,6 +60,66 @@ def get_value_type_name(value: Any) -> Text:
     return type(value).__name__
 
 
+def _get_expected_value_type_meta(validator: Dict) -> Text:
+    value_type = validator.get(EXPECTED_VALUE_TYPE_META_KEY)
+    return value_type if value_type in EXPECTED_VALUE_TYPES else ""
+
+
+def _coerce_declared_expected_value(value: Any, value_type: Text) -> Any:
+    if not value_type:
+        return value
+
+    if value_type == "string":
+        return "" if value is None else str(value)
+
+    if value_type == "number":
+        if isinstance(value, bool):
+            raise ValueError("期望值声明为数字，但布尔值不能作为数字使用")
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized == "":
+                raise ValueError("期望值声明为数字，但当前值为空")
+            try:
+                if any(char in normalized for char in [".", "e", "E"]):
+                    return float(normalized)
+                return int(normalized)
+            except ValueError as exc:
+                raise ValueError(f"期望值声明为数字，但当前值无法转换为数字: {value}") from exc
+        raise ValueError(f"期望值声明为数字，但当前值类型是 {get_value_type_name(value)}")
+
+    if value_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+        raise ValueError(f"期望值声明为布尔值，但当前值无法转换为布尔值: {value}")
+
+    if value_type == "null":
+        if value is None:
+            return None
+        if isinstance(value, str) and value.strip().lower() in {"null", "none"}:
+            return None
+        raise ValueError(f"期望值声明为空值，但当前值不是空值: {value}")
+
+    if value_type == "json":
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"期望值声明为 JSON，但当前值不是合法 JSON: {value}") from exc
+        raise ValueError(f"期望值声明为 JSON，但当前值类型是 {get_value_type_name(value)}")
+
+    return value
+
+
 def uniform_validator(validator):
     """unify validator
 
@@ -82,6 +146,8 @@ def uniform_validator(validator):
     if not isinstance(validator, dict):
         raise ParamsError(f"invalid validator: {validator}")
 
+    expected_value_type = _get_expected_value_type_meta(validator)
+
     if "check" in validator and "expect" in validator:
         # format1
         check_item = validator["check"]
@@ -97,9 +163,17 @@ def uniform_validator(validator):
         else:
             message = validator.get("message", "")
 
-    elif len(validator) == 1:
+    else:
         # format2
-        comparator = list(validator.keys())[0]
+        assertion_items = [
+            (key, value)
+            for key, value in validator.items()
+            if key != EXPECTED_VALUE_TYPE_META_KEY
+        ]
+        if len(assertion_items) != 1:
+            raise ParamsError(f"invalid validator: {validator}")
+
+        comparator = assertion_items[0][0]
         compare_values = validator[comparator]
 
         if not isinstance(compare_values, list) or len(compare_values) not in [2, 3]:
@@ -113,9 +187,6 @@ def uniform_validator(validator):
             # len(compare_values) == 2
             message = ""
 
-    else:
-        raise ParamsError(f"invalid validator: {validator}")
-
     # uniform comparator, e.g. lt => less_than, eq => equals
     assert_method = get_uniform_comparator(comparator)
 
@@ -124,6 +195,7 @@ def uniform_validator(validator):
         "expect": expect_value,
         "assert": assert_method,
         "message": message,
+        "expected_value_type": expected_value_type,
     }
 
 
@@ -229,6 +301,16 @@ class ResponseObjectBase(object):
                 logger.warning(f"期望值中的函数调用失败: {str(e)}")
                 expect_value = expect_item
 
+            expected_value_type = u_validator.get("expected_value_type", "")
+            expected_value_type_error = ""
+            try:
+                expect_value = _coerce_declared_expected_value(
+                    expect_value,
+                    expected_value_type,
+                )
+            except ValueError as exc:
+                expected_value_type_error = str(exc)
+
             # message
             message = u_validator["message"]
             # parse message with config/teststep/extracted variables
@@ -248,10 +330,13 @@ class ResponseObjectBase(object):
                 "expect": expect_item,
                 "expect_value": expect_value,
                 "expect_value_type": get_value_type_name(expect_value),
+                "expect_declared_value_type": expected_value_type,
                 "message": message,
             }
 
             try:
+                if expected_value_type_error:
+                    raise AssertionError(expected_value_type_error)
                 assert_func(check_value, expect_value, message)
                 validate_msg += "\t==> pass"
                 logger.info(validate_msg)
@@ -268,6 +353,7 @@ class ResponseObjectBase(object):
                     f"expect_value: {expect_value}({type(expect_value).__name__})"
                 )
                 message = str(ex)
+                validator_dict["message"] = message
                 if message:
                     validate_msg += f"\nmessage: {message}"
 

@@ -3,7 +3,7 @@ import unittest
 import requests
 
 from httprunner.parser import Parser
-from httprunner.response import ResponseObject, uniform_validator
+from httprunner.response import ResponseObject, ResponseObjectBase, uniform_validator
 from httprunner.utils import HTTP_BIN_URL
 
 
@@ -85,6 +85,75 @@ class TestResponse(unittest.TestCase):
             "assert": "equal",
             "expect": 201,
             "message": "test",
+            "expected_value_type": "",
         }
         for validator in validators:
             self.assertEqual(uniform_validator(validator), expected)
+
+        self.assertEqual(
+            uniform_validator({
+                "eq": ["status_code", "${status_code}"],
+                "__expected_value_type": "number",
+            }),
+            {
+                "check": "status_code",
+                "assert": "equal",
+                "expect": "${status_code}",
+                "message": "",
+                "expected_value_type": "number",
+            },
+        )
+
+class TestResponseExpectedValueTypes(unittest.TestCase):
+    def test_uniform_validator_preserves_expected_value_type_meta(self):
+        self.assertEqual(
+            uniform_validator({
+                "eq": ["status_code", "${status_code}"],
+                "__expected_value_type": "number",
+            }),
+            {
+                "check": "status_code",
+                "assert": "equal",
+                "expect": "${status_code}",
+                "message": "",
+                "expected_value_type": "number",
+            },
+        )
+
+    def test_validate_coerces_declared_expected_value_type(self):
+        resp_obj = ResponseObjectBase(
+            {"body": {"count": 5, "message": "OK"}},
+            Parser(functions_mapping={}),
+        )
+
+        resp_obj.validate(
+            [{
+                "eq": ["body.count", "${expected_count}"],
+                "__expected_value_type": "number",
+            }],
+            variables_mapping={"expected_count": "5"},
+        )
+        validator = resp_obj.validation_results["validate_extractor"][0]
+        self.assertTrue(resp_obj.validation_results["success"])
+        self.assertEqual(validator["expect_value"], 5)
+        self.assertEqual(validator["expect_value_type"], "int")
+        self.assertEqual(validator["expect_declared_value_type"], "number")
+
+    def test_validate_fails_when_declared_number_is_not_numeric(self):
+        resp_obj = ResponseObjectBase(
+            {"body": {"message": "OK"}},
+            Parser(functions_mapping={}),
+        )
+
+        resp_obj.validate([
+            {
+                "eq": ["body.message", "OK"],
+                "__expected_value_type": "number",
+            }
+        ])
+
+        validator = resp_obj.validation_results["validate_extractor"][0]
+        self.assertFalse(resp_obj.validation_results["success"])
+        self.assertEqual(validator["check_result"], "fail")
+        self.assertEqual(validator["expect_declared_value_type"], "number")
+        self.assertIn("无法转换为数字", validator["message"])

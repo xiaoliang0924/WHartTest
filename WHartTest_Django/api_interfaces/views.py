@@ -48,6 +48,48 @@ class ApiInterfaceViewSet(BaseModelViewSet):
         project = get_object_or_404(Project, pk=self.kwargs.get('project_pk'))
         serializer.save(created_by=self.request.user, project=project)
 
+
+    @action(detail=True, methods=['post'])
+    def duplicate(self, request, *args, **kwargs):
+        """Duplicate an interface in the same project/module."""
+        source = self.get_object()
+        project_pk = self.kwargs.get('project_pk')
+
+        base_name = request.data.get('name') or f"{source.name} 副本"
+        candidate_name = base_name
+        suffix = 2
+        while ApiInterface.objects.filter(project_id=project_pk, name=candidate_name).exists():
+            candidate_name = f"{base_name} {suffix}"
+            suffix += 1
+
+        duplicate_data = {
+            'name': candidate_name,
+            'type': source.type,
+            'method': source.method,
+            'url': source.url,
+            'headers': deepcopy(source.headers),
+            'params': deepcopy(source.params),
+            'body': deepcopy(source.body),
+            'sql_method': source.sql_method,
+            'sql': source.sql,
+            'sql_params': deepcopy(source.sql_params),
+            'sql_size': source.sql_size,
+            'setup_hooks': deepcopy(source.setup_hooks),
+            'teardown_hooks': deepcopy(source.teardown_hooks),
+            'variables': deepcopy(source.variables),
+            'validators': deepcopy(source.validators),
+            'extract': deepcopy(source.extract),
+            'extract_meta': deepcopy(source.extract_meta),
+            'file_ids': deepcopy(source.file_ids),
+            'module': source.module_id,
+        }
+
+        serializer = self.get_serializer(data=duplicate_data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
     @action(detail=True, methods=['post'])
     def run(self, request, *args, **kwargs):
         """Run an interface with optional environment configuration."""
@@ -250,6 +292,7 @@ class ApiInterfaceViewSet(BaseModelViewSet):
             'variables': request.data.get('variables', {}),
             'validators': request.data.get('validators', []),
             'extract': request.data.get('extract', {}),
+            'file_ids': request.data.get('file_ids', []),
         }
 
         if interface_type == 'http':

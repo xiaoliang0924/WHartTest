@@ -17,12 +17,22 @@ interface Props {
   }
   savingLoading?: boolean
   sendingLoading?: boolean
+  showSaveStep?: boolean
+  saveStepRequiresModule?: boolean
+  saveStepLabel?: string
+  saveInterfaceLabel?: string
+  sendTooltip?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
   modules: () => [],
   savingLoading: false,
-  sendingLoading: false
+  sendingLoading: false,
+  showSaveStep: true,
+  saveStepRequiresModule: true,
+  saveStepLabel: '更新步骤',
+  saveInterfaceLabel: '同步接口',
+  sendTooltip: '运行前自动保存当前配置'
 })
 
 const emit = defineEmits([
@@ -190,7 +200,7 @@ const handleSave = () => {
 }
 
 const handleSaveStep = () => {
-  if (!selectedModule.value) {
+  if (props.saveStepRequiresModule && !selectedModule.value) {
     Message.warning('请选择模块')
     return
   }
@@ -269,11 +279,12 @@ const getCurrentMethodColor = () => {
         >
           <template #icon><icon-send /></template>
           运行调试
-          <a-tooltip content="点击将自动保存接口并添加为用例的引用步骤，然后运行调试">
+          <a-tooltip :content="props.sendTooltip">
             <icon-question-circle class="ml-1 text-xs opacity-70" />
           </a-tooltip>
         </a-button>
         <a-button
+          v-if="props.showSaveStep"
           type="outline"
           size="large"
           :loading="props.savingLoading"
@@ -281,7 +292,7 @@ const getCurrentMethodColor = () => {
           status="success"
         >
           <template #icon><icon-save /></template>
-          保存步骤
+          {{ props.saveStepLabel }}
         </a-button>
         <a-button
           type="outline"
@@ -290,7 +301,7 @@ const getCurrentMethodColor = () => {
           @click="handleSave"
         >
           <template #icon><icon-save /></template>
-          保存接口
+          {{ props.saveInterfaceLabel }}
         </a-button>
       </a-button-group>
     </div>

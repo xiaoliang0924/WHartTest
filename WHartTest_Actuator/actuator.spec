@@ -6,8 +6,7 @@ WHartTest Actuator PyInstaller 打包配置
     pyinstaller actuator.spec
 
 生成文件:
-    dist/WHartTest_Actuator/  - 包含所有依赖的目录
-    dist/WHartTest_Actuator/WHartTest_Actuator.exe  - 主程序
+    dist/WHartTest_Actuator.exe  - 单文件主程序
 """
 
 import sys
@@ -22,9 +21,8 @@ playwright_datas, playwright_binaries, playwright_hiddenimports = collect_all('p
 pydantic_datas, pydantic_binaries, pydantic_hiddenimports = collect_all('pydantic')
 pydantic_core_datas, pydantic_core_binaries, pydantic_core_hiddenimports = collect_all('pydantic_core')
 
-# 收集完整 PySide6（确保 GUI 功能正常）
-pyside6_datas, pyside6_binaries, pyside6_hiddenimports = collect_all('PySide6')
-shiboken6_datas, shiboken6_binaries, shiboken6_hiddenimports = collect_all('shiboken6')
+# 收集 CustomTkinter（GUI 功能）
+customtkinter_datas, customtkinter_binaries, customtkinter_hiddenimports = collect_all('customtkinter')
 
 # 收集 httpx/httpcore 相关（包含 mypyc 编译的模块）
 httpx_datas, httpx_binaries, httpx_hiddenimports = collect_all('httpx')
@@ -40,6 +38,17 @@ for sp in site_packages_list:
     for pyd in glob.glob(f"{sp}/*mypyc*.so"):
         mypyc_binaries.append((pyd, '.'))
 
+spec_dir = Path(SPECPATH)
+logo_candidates = [
+    spec_dir / 'data' / 'WHartTest.png',
+    spec_dir.parent / 'WHartTest_Vue' / 'public' / 'WHartTest.png',
+]
+logo_datas = []
+for logo_path in logo_candidates:
+    if logo_path.exists():
+        logo_datas.append((str(logo_path), 'data'))
+        break
+
 a = Analysis(
     ['main.py'],
     pathex=[],
@@ -47,20 +56,18 @@ a = Analysis(
         playwright_binaries + 
         pydantic_binaries + 
         pydantic_core_binaries + 
-        pyside6_binaries + 
-        shiboken6_binaries + 
+        customtkinter_binaries +
         httpx_binaries +
         httpcore_binaries +
         mypyc_binaries
     ),
     datas=[
         ('config.example.toml', '.'),
-        ('data/WHartTest.png', 'data'),  # 图标文件
+        *logo_datas,
         *playwright_datas,
         *pydantic_datas,
         *pydantic_core_datas,
-        *pyside6_datas,
-        *shiboken6_datas,
+        *customtkinter_datas,
         *httpx_datas,
         *httpcore_datas,
     ],
@@ -79,9 +86,11 @@ a = Analysis(
         *pydantic_hiddenimports,
         *pydantic_core_hiddenimports,
         
-        # PySide6 完整模块
-        *pyside6_hiddenimports,
-        *shiboken6_hiddenimports,
+        # CustomTkinter / tkinter GUI
+        'customtkinter',
+        'tkinter',
+        '_tkinter',
+        *customtkinter_hiddenimports,
         
         # HTTP 相关
         *httpx_hiddenimports,
@@ -116,7 +125,6 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         # 排除不需要的大型模块
-        'tkinter',
         'matplotlib',
         'numpy',
         'pandas',
@@ -133,8 +141,10 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
+    exclude_binaries=False,
     name='WHartTest_Actuator',
     debug=False,
     bootloader_ignore_signals=False,
@@ -147,14 +157,4 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='WHartTest_Actuator',
 )

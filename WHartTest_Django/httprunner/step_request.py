@@ -3,7 +3,9 @@ import re
 import time
 from typing import Any, Dict, List, Text, Union
 
+import jmespath
 import requests
+from jmespath.exceptions import JMESPathError
 from loguru import logger
 
 from httprunner import utils
@@ -346,6 +348,68 @@ def pretty_format(v) -> str:
     return repr(utils.omit_long_data(v))
 
 
+def normalize_extract_source(meta: Any) -> Text:
+    if isinstance(meta, dict):
+        source = meta.get("source") or meta.get("data_source") or meta.get("dataSource")
+    else:
+        source = meta
+    return "request" if str(source or "").lower() == "request" else "response"
+
+
+def search_request_jmespath(
+    expr: Text,
+    request_data: Dict[Text, Any],
+    runner: HttpRunner,
+    variables_mapping: VariablesMapping = None,
+) -> Any:
+    field = expr
+    if isinstance(field, str) and "$" in field:
+        field = runner.parser.parse_data(field, variables_mapping)
+    if not isinstance(field, str):
+        return field
+
+    try:
+        return jmespath.search(field, request_data)
+    except JMESPathError as ex:
+        logger.error(
+            f"failed to search request with jmespath\n"
+            f"expression: {field}\n"
+            f"data: {request_data}\n"
+            f"exception: {ex}"
+        )
+        raise
+
+
+def extract_variables_by_source(
+    resp_obj: ResponseObject,
+    extractors: Dict[Text, Text],
+    extract_meta: Dict[Text, Any],
+    request_data: Dict[Text, Any],
+    runner: HttpRunner,
+    variables_mapping: VariablesMapping = None,
+) -> Dict[Text, Any]:
+    if not extractors:
+        return {}
+
+    response_extractors: Dict[Text, Text] = {}
+    extract_mapping: Dict[Text, Any] = {}
+    for var_name, expr in extractors.items():
+        source = normalize_extract_source((extract_meta or {}).get(var_name))
+        if source == "request":
+            extract_mapping[var_name] = search_request_jmespath(
+                expr,
+                request_data,
+                runner,
+                variables_mapping,
+            )
+        else:
+            response_extractors[var_name] = expr
+
+    extract_mapping.update(resp_obj.extract(response_extractors, variables_mapping))
+    logger.info(f"extract mapping by source: {extract_mapping}")
+    return extract_mapping
+
+
 placeholder_function_regex_compile = re.compile(r"\$\{([a-zA-Z_]\w*)\(")
 placeholder_variable_regex_compile = re.compile(r"\$\{([a-zA-Z_]\w*)\}|\$([a-zA-Z_]\w*)")
 
@@ -552,6 +616,19 @@ def run_step_request(runner: HttpRunner, step: TStep) -> StepResult:
     url = build_url(config.base_url, url_path)
     parsed_request_dict["verify"] = config.verify
     parsed_request_dict["json"] = parsed_request_dict.pop("req_json", {})
+    request_json_body = parsed_request_dict.get("json")
+    request_data_body = parsed_request_dict.get("data")
+    request_body = request_json_body if request_json_body not in (None, {}) else request_data_body
+    request_extract_data = {
+        "method": method,
+        "url": url,
+        "headers": request_headers,
+        "params": parsed_request_dict.get("params", {}),
+        "cookies": parsed_request_dict.get("cookies", {}),
+        "body": request_body,
+        "json": request_json_body,
+        "data": request_data_body,
+    }
 
     # log request
     request_print = "====== request details ======\n"
@@ -596,7 +673,14 @@ def run_step_request(runner: HttpRunner, step: TStep) -> StepResult:
 
     # extract
     extractors = step.extract
-    extract_mapping = resp_obj.extract(extractors, step_variables)
+    extract_mapping = extract_variables_by_source(
+        resp_obj,
+        extractors,
+        getattr(step, "extract_meta", {}),
+        request_extract_data,
+        runner,
+        step_variables,
+    )
     step_result.export_vars = extract_mapping
 
     variables_mapping = step_variables
@@ -784,8 +868,14 @@ class StepRequestExtraction(IStep):
     def __init__(self, step: TStep):
         self.__step = step
 
-    def with_jmespath(self, jmes_path: Text, var_name: Text) -> "StepRequestExtraction":
+    def with_jmespath(
+        self,
+        jmes_path: Text,
+        var_name: Text,
+        source: Text = "response",
+    ) -> "StepRequestExtraction":
         self.__step.extract[var_name] = jmes_path
+        self.__step.extract_meta[var_name] = {"source": normalize_extract_source(source)}
         return self
 
     # def with_regex(self):

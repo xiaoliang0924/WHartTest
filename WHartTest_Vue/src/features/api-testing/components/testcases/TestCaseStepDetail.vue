@@ -3,7 +3,7 @@ import { ref, computed, onMounted, watch, provide } from 'vue'
 import { useEnvironmentStore } from '../../stores/environmentStore'
 import { useProjectStore } from '@/store/projectStore'
 import type { CreateTestCaseData, TestCaseStep } from '../../services/testcaseService'
-import type { ApiInterface } from '../../types/interface'
+import type { ApiExtractPayload, ApiInterface } from '../../types/interface'
 import type { ApiModule } from '../../types/module'
 import { interfaceService } from '../../services/interfaceService'
 import { testcaseService } from '../../services/testcaseService'
@@ -19,6 +19,7 @@ import TestCaseExtractConfig from './TestCaseExtractConfig.vue'
 import TestCaseAssertConfig from './TestCaseAssertConfig.vue'
 import { updateTestCaseStep, addTestCaseSteps, getTestCaseById } from '../../services/testcaseService'
 import { useDraggable } from '@vueuse/core'
+import { showExtractPersistenceNotice } from '../../utils/extractPersistence'
 
 // 定义KeyValuePair类型
 interface KeyValuePair {
@@ -42,11 +43,13 @@ interface Props {
   modules?: ApiModule[]
   readonly?: boolean
   testCaseId?: number
+  interfaceCaseMode?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
   readonly: false,
   testCaseId: 0,
+  interfaceCaseMode: false,
   modules: () => [],
   modelValue: () => ({
     id: 0,
@@ -69,6 +72,7 @@ const props = withDefaults(defineProps<Props>(), {
       body: {},
       validators: [],
       extract: {},
+      extract_meta: {},
       setup_hooks: [],
       teardown_hooks: [],
       variables: {}
@@ -77,6 +81,7 @@ const props = withDefaults(defineProps<Props>(), {
       variables: {},
       validators: [],
       extract: {},
+      extract_meta: {},
       setup_hooks: [],
       teardown_hooks: []
     },
@@ -85,7 +90,24 @@ const props = withDefaults(defineProps<Props>(), {
   })
 })
 
-const emit = defineEmits(['update:modelValue', 'refresh-test-case'])
+const emit = defineEmits(['update:modelValue', 'refresh-test-case', 'save-interface-case-step'])
+
+type RequestHeaderData = {
+  method: string
+  url: string
+  name: string
+  module?: number | string | null
+}
+
+type CurrentStepData = {
+  params: any
+  headers: any
+  body: any
+  setupHooks: any[]
+  teardownHooks: any[]
+  extractPayload: ApiExtractPayload
+  assertRules: any[]
+}
 
 // 获取环境store
 const environmentStore = useEnvironmentStore()
@@ -175,11 +197,86 @@ const findModuleById = (moduleId: number | null | undefined, moduleTree: ApiModu
 
 const savingLoading = ref(false)
 const sendingLoading = ref(false)
+const canSaveStandaloneStep = computed(() => Boolean(props.testCaseId))
+const showSaveStepButton = computed(() => canSaveStandaloneStep.value || props.interfaceCaseMode)
+const sendTooltip = computed(() =>
+  props.interfaceCaseMode
+    ? '运行前自动保存到当前接口用例，不同步到接口管理'
+    : canSaveStandaloneStep.value
+    ? '使用当前配置运行调试；无接口引用时会先保存接口并添加为用例步骤'
+    : '运行当前配置'
+)
+
+const getExtractPayload = (): ApiExtractPayload => {
+  return extractRef.value?.getExtractRules() ?? {
+    extract: props.modelValue.interface_data.extract ?? {},
+    extractMeta: props.modelValue.interface_data.extract_meta ?? {},
+  }
+}
+
+const collectCurrentStepData = (): CurrentStepData => ({
+  params: paramsRef.value?.getParams() ?? props.modelValue.interface_data.params ?? [],
+  headers: headersRef.value?.getHeaders() ?? props.modelValue.interface_data.headers ?? [],
+  body: bodyRef.value?.getBody() ?? props.modelValue.interface_data.body ?? { type: 'none', content: null },
+  setupHooks: setupHooksRef.value?.getHooks() ?? props.modelValue.interface_data.setup_hooks ?? [],
+  teardownHooks: teardownHooksRef.value?.getHooks() ?? props.modelValue.interface_data.teardown_hooks ?? [],
+  extractPayload: getExtractPayload(),
+  assertRules: assertRef.value?.getAssertRules() ?? props.modelValue.interface_data.validators ?? []
+})
 
 const updateStep = (newStep: Step) => {
   console.log('更新步骤数据:', newStep)
   emit('update:modelValue', newStep)
 }
+
+const buildCurrentStepSnapshot = (
+  requestData: RequestHeaderData,
+  currentData: CurrentStepData
+): Step => {
+  const normalizedModuleId = normalizeModuleId(requestData.module)
+  const foundModule = findModuleById(normalizedModuleId, modules.value)
+  const moduleObj = foundModule
+    ? { id: foundModule.id, name: foundModule.name }
+    : normalizedModuleId != null
+      ? { id: normalizedModuleId, name: '' }
+      : { id: 0, name: '' }
+  const defaultProject = {
+    id: Number(projectStore.currentProjectId),
+    name: ''
+  }
+
+  return {
+    ...props.modelValue,
+    name: requestData.name,
+    interface_info: {
+      ...props.modelValue.interface_info,
+      name: requestData.name,
+      method: requestData.method,
+      url: requestData.url,
+      module: moduleObj,
+      module_info: moduleObj,
+      project: props.modelValue.interface_info.project || defaultProject
+    },
+    interface_data: {
+      ...props.modelValue.interface_data,
+      method: requestData.method,
+      url: requestData.url,
+      module: normalizedModuleId,
+      headers: currentData.headers ?? [],
+      params: currentData.params ?? [],
+      body: currentData.body ?? { type: 'none', content: null },
+      setup_hooks: currentData.setupHooks ?? [],
+      teardown_hooks: currentData.teardownHooks ?? [],
+      extract: currentData.extractPayload.extract,
+      extract_meta: currentData.extractPayload.extractMeta,
+      validators: currentData.assertRules ?? []
+    }
+  }
+}
+
+const saveInterfaceCaseStepSnapshot = (step: Step) => new Promise<boolean>((resolve) => {
+  emit('save-interface-case-step', step, (success?: boolean) => resolve(Boolean(success)))
+})
 
 // 组件挂载时获取测试用例名称
 onMounted(async () => {
@@ -296,13 +393,31 @@ const stepInterface = computed({
   }
 })
 
+const getCurrentRequestData = (): RequestHeaderData => ({
+  method: stepInterface.value.method || props.modelValue.interface_data.method || 'GET',
+  url: stepInterface.value.url || props.modelValue.interface_data.url || '',
+  name: stepInterface.value.name || props.modelValue.name || '',
+  module: normalizeModuleId(stepInterface.value.module)
+})
+
+const getCurrentStepSnapshot = () => buildCurrentStepSnapshot(
+  getCurrentRequestData(),
+  collectCurrentStepData()
+)
+
+const flushCurrentStepSnapshot = () => {
+  const snapshot = getCurrentStepSnapshot()
+  updateStep(snapshot)
+  return snapshot
+}
+
 // 处理发送请求
-const handleSend = async (requestData: { method: string, url: string, name: string, module: number }) => {
+const handleSend = async (requestData: RequestHeaderData) => {
   try {
     let currentInterfaceId = props.modelValue.interface_info.id;
 
-    // 如果接口未保存，先保存接口
-    if (!currentInterfaceId) {
+    // 普通测试用例中，如果接口未保存，先保存接口并添加为用例步骤。
+    if (!currentInterfaceId && props.testCaseId) {
       Message.info('正在自动保存接口...');
       savingLoading.value = true;
 
@@ -330,6 +445,8 @@ const handleSend = async (requestData: { method: string, url: string, name: stri
         try {
           Message.info('正在自动添加接口引用步骤...');
 
+          const autoSaveExtractPayload = getExtractPayload()
+
           // 直接使用与TestCaseStepList.vue中相同的代码
           const testCaseData: CreateTestCaseData = {
             name: testCaseName.value,
@@ -355,7 +472,8 @@ const handleSend = async (requestData: { method: string, url: string, name: stri
                 params: paramsRef.value?.getParams() || [],
                 body: bodyRef.value?.getBody() || { type: 'none', content: null },
                 validators: assertRef.value?.getAssertRules() || [],
-                extract: extractRef.value?.getExtractRules() || {},
+                extract: autoSaveExtractPayload.extract,
+                extract_meta: autoSaveExtractPayload.extractMeta,
                 setup_hooks: setupHooksRef.value?.getHooks() || [],
                 teardown_hooks: teardownHooksRef.value?.getHooks() || [],
                 variables: {}
@@ -485,16 +603,33 @@ const handleSend = async (requestData: { method: string, url: string, name: stri
 
     // 开始调试接口
     sendingLoading.value = true;
-    const params = paramsRef.value?.getParams();
-    const headers = headersRef.value?.getHeaders();
-    const body = bodyRef.value?.getBody();
-    const setupHooks = setupHooksRef.value?.getHooks();
-    const teardownHooks = teardownHooksRef.value?.getHooks();
-    const extractRules = extractRef.value?.getExtractRules();
-    const assertRules = assertRef.value?.getAssertRules();
+    const currentData = collectCurrentStepData()
+    const {
+      params,
+      headers,
+      body,
+      setupHooks,
+      teardownHooks,
+      extractPayload,
+      assertRules
+    } = currentData
+
+    if (props.interfaceCaseMode) {
+      Message.info('正在自动保存到接口用例...');
+      savingLoading.value = true;
+      const snapshot = buildCurrentStepSnapshot(requestData, currentData)
+      updateStep(snapshot)
+      const saved = await saveInterfaceCaseStepSnapshot(snapshot)
+      savingLoading.value = false;
+      if (!saved) {
+        Message.error('自动保存到接口用例失败，无法继续调试');
+        return;
+      }
+      Message.success('已保存到接口用例');
+    }
 
     // 再次检查接口ID是否存在
-    if (!currentInterfaceId) {
+    if (!currentInterfaceId && props.testCaseId) {
       console.error('无法获取接口ID，调试失败', {
         propsId: props.modelValue.interface_info.id,
         currentId: currentInterfaceId
@@ -514,18 +649,22 @@ const handleSend = async (requestData: { method: string, url: string, name: stri
       body,
       setup_hooks: setupHooks,
       teardown_hooks: teardownHooks,
-      extract: extractRules,
+      extract: extractPayload.extract,
+      extract_meta: extractPayload.extractMeta,
       validators: assertRules
     };
+    if (currentInterfaceId) {
+      debugData.interface_id = currentInterfaceId
+    }
 
     Message.info('正在调试接口...');
     try {
       const debugRes = await interfaceService.quickDebug(Number(projectStore.currentProjectId), {
-        interface_id: currentInterfaceId,
         ...debugData
       });
       if (debugRes.success && debugRes.data) {
         const data = debugRes.data as any;
+        showExtractPersistenceNotice(data.extract_persistence)
         response.value = {
           status: data.response?.status_code || null,
           time: data.elapsed || null,
@@ -553,8 +692,9 @@ const handleSend = async (requestData: { method: string, url: string, name: stri
 };
 
 // 处理保存用例
-const handleSave = async (requestData: { method: string, url: string, name: string, module: number }) => {
-  if (!requestData.module) {
+const handleSave = async (requestData: RequestHeaderData) => {
+  const moduleId = normalizeModuleId(requestData.module)
+  if (!moduleId) {
     Message.warning('请选择模块')
     return null;
   }
@@ -576,21 +716,22 @@ const handleSave = async (requestData: { method: string, url: string, name: stri
     const body = bodyRef.value?.getBody() ?? props.modelValue.interface_data.body ?? { type: 'none', content: null }
     const setupHooks = setupHooksRef.value?.getHooks() ?? props.modelValue.interface_data.setup_hooks ?? []
     const teardownHooks = teardownHooksRef.value?.getHooks() ?? props.modelValue.interface_data.teardown_hooks ?? []
-    const extractRules = extractRef.value?.getExtractRules() ?? props.modelValue.interface_data.extract ?? {}
+    const extractPayload = getExtractPayload()
     const assertRules = assertRef.value?.getAssertRules() ?? props.modelValue.interface_data.validators ?? []
 
     const interfaceData: any = {
       name: requestData.name,
       method: requestData.method,
       url: requestData.url,
-      module: requestData.module,
+      module: moduleId,
       project: Number(projectStore.currentProjectId),
       headers,
       params,
       body,
       setup_hooks: setupHooks,
       teardown_hooks: teardownHooks,
-      extract: extractRules,
+      extract: extractPayload.extract,
+      extract_meta: extractPayload.extractMeta,
       validators: assertRules,
       variables: props.modelValue.interface_data.variables ?? {}
     }
@@ -624,20 +765,19 @@ const handleSave = async (requestData: { method: string, url: string, name: stri
     // 如果获取到有效的接口数据
     if (savedInterface) {
       console.log('保存成功，接口数据:', savedInterface)
-      const selectedModule = findModuleById(requestData.module, modules.value)
+      const selectedModule = findModuleById(moduleId, modules.value)
 
-      // 更新步骤数据
-      updateStep({
+      const updatedStep = {
         ...props.modelValue,
         name: requestData.name,
         interface_info: {
           ...savedInterface,
           module: {
-            id: requestData.module,
+            id: moduleId,
             name: selectedModule?.name || ''
           },
           module_info: {
-            id: requestData.module,
+            id: moduleId,
             name: selectedModule?.name || ''
           },
           project: {
@@ -647,13 +787,24 @@ const handleSave = async (requestData: { method: string, url: string, name: stri
         },
         interface_data: {
           ...interfaceData,
-          module: requestData.module
+          module: moduleId
         }
-      })
+      }
+
+      // 更新步骤数据
+      updateStep(updatedStep)
+
+      if (props.interfaceCaseMode) {
+        const caseSaved = await saveInterfaceCaseStepSnapshot(updatedStep)
+        if (!caseSaved) {
+          Message.error('接口已同步，但保存到接口用例失败')
+          return null
+        }
+      }
 
       // 显示成功消息
       const operationType = props.modelValue.interface_info.id ? '更新' : '创建'
-      Message.success(`${operationType}接口成功`)
+      Message.success(props.interfaceCaseMode ? `${operationType}接口成功，已保存到当前接口用例` : `${operationType}接口成功`)
       console.log(`${operationType}接口成功消息已显示`)
 
       return result
@@ -729,8 +880,39 @@ const ensureStepId = async (): Promise<boolean> => {
   return false;
 };
 
+const handleSaveToInterfaceCase = async (requestData: RequestHeaderData) => {
+  if (!requestData.name) {
+    Message.warning('请输入步骤名称')
+    return false
+  }
+
+  if (!requestData.url) {
+    Message.warning('请输入请求路径')
+    return false
+  }
+
+  try {
+    savingLoading.value = true
+    const snapshot = buildCurrentStepSnapshot(requestData, collectCurrentStepData())
+    updateStep(snapshot)
+    const saved = await saveInterfaceCaseStepSnapshot(snapshot)
+    if (!saved) {
+      Message.error('保存到接口用例失败')
+      return false
+    }
+    Message.success('已保存到当前接口用例')
+    return true
+  } catch (error: any) {
+    console.error('保存到接口用例失败:', error)
+    Message.error(error.message || '保存到接口用例失败')
+    return false
+  } finally {
+    savingLoading.value = false
+  }
+}
+
 // 处理保存测试用例步骤
-const handleStepSave = async (requestData: { method: string, url: string, name: string, module: number }) => {
+const handleStepSave = async (requestData: RequestHeaderData) => {
   // 确保有测试用例ID
   if (!props.testCaseId) {
     Message.warning('无法获取测试用例ID');
@@ -758,7 +940,7 @@ const handleStepSave = async (requestData: { method: string, url: string, name: 
 
     const setupHooks = setupHooksRef.value?.getHooks() ?? props.modelValue.interface_data.setup_hooks ?? [];
     const teardownHooks = teardownHooksRef.value?.getHooks() ?? props.modelValue.interface_data.teardown_hooks ?? [];
-    const extractRules = extractRef.value?.getExtractRules() ?? props.modelValue.interface_data.extract ?? {};
+    const extractPayload = getExtractPayload();
     const assertRules = assertRef.value?.getAssertRules() ?? props.modelValue.interface_data.validators ?? [];
 
     // 获取当前步骤ID并进行有效性检查
@@ -826,7 +1008,8 @@ const handleStepSave = async (requestData: { method: string, url: string, name: 
             params,
             body,
             validators: assertRules,
-            extract: extractRules,
+            extract: extractPayload.extract,
+            extract_meta: extractPayload.extractMeta,
             setup_hooks: setupHooks,
             teardown_hooks: teardownHooks,
             variables: props.modelValue.interface_data.variables ?? {}
@@ -899,7 +1082,8 @@ const handleStepSave = async (requestData: { method: string, url: string, name: 
           params,
           body,
           validators: assertRules,
-          extract: extractRules,
+          extract: extractPayload.extract,
+          extract_meta: extractPayload.extractMeta,
           setup_hooks: setupHooks,
           teardown_hooks: teardownHooks,
           variables: props.modelValue.interface_data.variables ?? {}
@@ -1028,6 +1212,13 @@ const handleStepSave = async (requestData: { method: string, url: string, name: 
   }
 };
 
+const handleSaveStepAction = async (requestData: RequestHeaderData) => {
+  if (props.interfaceCaseMode) {
+    return handleSaveToInterfaceCase(requestData)
+  }
+  return handleStepSave(requestData)
+}
+
 // 监听 modelValue 变化
 watch(() => props.modelValue, (newValue) => {
   console.log('步骤详情接收到的完整数据:', {
@@ -1148,6 +1339,11 @@ const refreshTestCaseData = async () => {
     return false;
   }
 };
+
+defineExpose({
+  getCurrentStepSnapshot,
+  flushCurrentStepSnapshot
+})
 </script>
 
 <template>
@@ -1160,9 +1356,13 @@ const refreshTestCaseData = async () => {
           :modules="modules"
           :saving-loading="savingLoading"
           :sending-loading="sendingLoading"
+          :show-save-step="showSaveStepButton"
+          :save-step-label="props.interfaceCaseMode ? '保存到用例' : '更新步骤'"
+          :save-step-requires-module="!props.interfaceCaseMode"
+          :send-tooltip="sendTooltip"
           @send="handleSend"
           @save="handleSave"
-          @save-step="handleStepSave"
+          @save-step="handleSaveStepAction"
         />
       </div>
     </div>
@@ -1206,6 +1406,7 @@ const refreshTestCaseData = async () => {
           <test-case-extract-config
             ref="extractRef"
             :extract="modelValue.interface_data.extract"
+            :extract-meta="modelValue.interface_data.extract_meta"
           />
         </a-tab-pane>
         <a-tab-pane key="assert" title="Assert">

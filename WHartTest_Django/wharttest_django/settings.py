@@ -143,6 +143,7 @@ INSTALLED_APPS = [
     'api_testtasks',  # API 测试任务应用。
     'api_sync',  # API 接口同步应用。
     'operation_logs',  # 用户操作日志。
+    'file_management',  # 统一文件管理/附件中心。
 ]
 
 # ASGI 配置（用于 Channels WebSocket）

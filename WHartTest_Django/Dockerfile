@@ -115,6 +115,7 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH="/app" \
     FASTEMBED_CACHE_PATH=/root/.cache/fastembed \
+    USER_AGENT="WHartTest/2.6.0-ce" \
     HF_ENDPOINT=${HF_ENDPOINT} \
     PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST}
 
@@ -236,6 +237,7 @@ COPY api_sync/ /app/api_sync/
 COPY api_testcases/ /app/api_testcases/
 COPY api_testtasks/ /app/api_testtasks/
 COPY httprunner/ /app/httprunner/
+COPY file_management/ /app/file_management/
 COPY knowledge/ /app/knowledge/
 COPY langgraph_integration/ /app/langgraph_integration/
 COPY mcp_tools/ /app/mcp_tools/

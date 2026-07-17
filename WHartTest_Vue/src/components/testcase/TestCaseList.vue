@@ -114,8 +114,9 @@
       class="test-case-table"
       @page-change="onPageChange"
       @page-size-change="onPageSizeChange"
-      @change="handleTableChange"
+@change="handleTableChange"
       @column-resize="handleColumnResize"
+      @sorter-change="onSorterChange"
 
 
     >
@@ -194,6 +195,7 @@
           <a-button type="primary" size="mini" @click.stop="handleEditTestCase(record)">{{ pageText.edit }}</a-button>
           <a-button type="outline" size="mini" @click.stop="openMoveModal([record.id])">{{ pageText.move }}</a-button>
           <a-button type="outline" size="mini" @click.stop="handleExecuteTestCase(record)">{{ pageText.execute }}</a-button>
+          <a-button type="outline" size="mini" @click.stop="handleCopyTestCase(record)">{{ pageText.copy }}</a-button>
           <a-button type="primary" status="danger" size="mini" @click.stop="handleDeleteTestCase(record)">{{ pageText.delete }}</a-button>
         </a-space>
       </template>
@@ -245,6 +247,7 @@ import ExportModal from '@/features/testcase-templates/components/ExportModal.vu
 import {
   getTestCaseList,
   deleteTestCase as deleteTestCaseService,
+  copyTestCase as copyTestCaseService,
   batchDeleteTestCases,
   batchMoveTestCases,
   reorderTestCases,
@@ -269,7 +272,8 @@ const emit = defineEmits<{
   (e: 'editTestCase', testCase: TestCase): void;
   (e: 'viewTestCase', testCase: TestCase): void;
   (e: 'testCaseDeleted'): void;
-  (e: 'testCasesMoved'): void;
+(e: 'testCasesMoved'): void;
+  (e: 'testCaseCopied'): void;
   (e: 'executeTestCase', testCase: TestCase): void;
   (e: 'module-filter-change', moduleId: number | null): void;
   (e: 'requestOptimization', testCase: TestCase): void;
@@ -294,6 +298,7 @@ const pageText = computed(() => (
         reviewStatusFilter: 'Filter review status',
         typeShort: 'Type',
         testTypeFilter: 'Test type',
+        updatedAt: 'Updated at',
         export: 'Export',
         import: 'Import',
         batchDeleteButton: (count: number) => `Batch delete (${count})`,
@@ -314,6 +319,7 @@ const pageText = computed(() => (
         edit: 'Edit',
         execute: 'Run',
         delete: 'Delete',
+        copy: 'Copy',
         select: 'Select',
         caseName: 'Case name',
         precondition: 'Precondition',
@@ -336,6 +342,9 @@ const pageText = computed(() => (
         deleteCaseSuccess: 'Test case deleted successfully',
         deleteCaseFailed: 'Failed to delete test case',
         deleteCaseError: 'An error occurred while deleting the test case',
+        copyCaseSuccess: 'Test case copied successfully',
+        copyCaseFailed: 'Failed to copy test case',
+        copyCaseError: 'An error occurred while copying the test case',
         confirmBatchDeleteTitle: 'Confirm batch deletion',
         confirmBatchDeleteContent: (count: number, names: string) => `Delete ${count} test case(s)? This action cannot be undone.\n\n${names}`,
         confirmBatchDeleteOk: 'Delete',
@@ -351,6 +360,7 @@ const pageText = computed(() => (
         reviewStatusFilter: '筛选审核状态',
         typeShort: '类型',
         testTypeFilter: '筛选测试类型',
+        updatedAt: '修改时间',
         export: '导出',
         import: '导入',
         batchDeleteButton: (count: number) => `批量删除 (${count})`,
@@ -371,6 +381,7 @@ const pageText = computed(() => (
         edit: '编辑',
         execute: '执行',
         delete: '删除',
+        copy: '复制',
         select: '选择',
         caseName: '用例名称',
         precondition: '前置条件',
@@ -393,6 +404,9 @@ const pageText = computed(() => (
         deleteCaseSuccess: '测试用例删除成功',
         deleteCaseFailed: '删除测试用例失败',
         deleteCaseError: '删除测试用例时发生错误',
+        copyCaseSuccess: '测试用例复制成功',
+        copyCaseFailed: '复制测试用例失败',
+        copyCaseError: '复制测试用例时发生错误',
         confirmBatchDeleteTitle: '确认批量删除',
         confirmBatchDeleteContent: (count: number, names: string) => `确定要删除以下 ${count} 个测试用例吗？此操作不可恢复。\n\n${names}`,
         confirmBatchDeleteOk: '确认删除',
@@ -482,6 +496,7 @@ const loading = ref(false);
 const localSearchKeyword = ref('');
 const selectedLevel = ref<string>('');
 const selectedTestType = ref<string>('');
+const selectedOrdering = ref<string>('-created_at');
 // 默认选中除"不可用"之外的所有状态
 const DEFAULT_REVIEW_STATUSES: ReviewStatus[] = ['pending_review', 'approved', 'needs_optimization', 'optimization_pending_review', 'pending_product_confirmation'];
 const selectedReviewStatuses = ref<ReviewStatus[]>([...DEFAULT_REVIEW_STATUSES]);
@@ -505,6 +520,7 @@ const defaultColumnWidths: Record<string, number> = {
   module_detail: 100,
   creator_detail: 80,
   created_at: 130,
+  updated_at: 130,
 };
 
 const getStoredColumnWidths = (): Record<string, number> => {
@@ -546,9 +562,9 @@ const handleResize = () => {
 
 // 表格滚动配置
 const tableScroll = computed(() => ({
-  x: Math.max(
-    900,
-    32 + 36 + Object.keys(defaultColumnWidths).reduce((total, key) => total + getColumnWidth(key), 0) + 200
+x: Math.max(
+    1070,
+    32 + 36 + Object.keys(defaultColumnWidths).reduce((total, key) => total + getColumnWidth(key), 0) + 240
   ),
   y: tableContainerHeight.value,
 }));
@@ -626,6 +642,16 @@ const handleSelectCurrentPage = (checked: boolean) => {
   }
 };
 
+const getSortOrder = (field: string): 'ascend' | 'descend' | '' => {
+  if (selectedOrdering.value === field) {
+    return 'ascend';
+  }
+  if (selectedOrdering.value === `-${field}`) {
+    return 'descend';
+  }
+  return '';
+};
+
 const columns = computed(() => ([
   {
     title: pageText.value.select,
@@ -634,7 +660,13 @@ const columns = computed(() => ([
     titleSlotName: 'selectAll',
     align: 'center'
   },
-  { title: 'ID', dataIndex: 'id', width: getColumnWidth('id'), align: 'center' },
+  {
+    title: 'ID',
+    dataIndex: 'id',
+    width: getColumnWidth('id'),
+    align: 'center',
+    sortable: { sortDirections: ['ascend', 'descend'], sortOrder: getSortOrder('id') },
+  },
   { title: pageText.value.caseName, dataIndex: 'name', slotName: 'name', width: getColumnWidth('name'), ellipsis: true, tooltip: false, align: 'center' },
   { title: pageText.value.precondition, dataIndex: 'precondition', width: getColumnWidth('precondition'), ellipsis: true, tooltip: true, align: 'center' },
   { title: pageText.value.priority, dataIndex: 'level', slotName: 'level', width: getColumnWidth('level'), align: 'center' },
@@ -654,12 +686,21 @@ const columns = computed(() => ([
     render: ({ record }: { record: TestCase }) => formatDate(record.created_at),
     width: getColumnWidth('created_at'),
     align: 'center',
+    sortable: { sortDirections: ['ascend', 'descend'], sortOrder: getSortOrder('created_at') },
   },
-  { title: pageText.value.actions, slotName: 'operations', width: 200, fixed: 'right', align: 'center' },
+  {
+    title: pageText.value.updatedAt,
+    dataIndex: 'updated_at',
+    render: ({ record }: { record: TestCase }) => formatDate(record.updated_at),
+    width: getColumnWidth('updated_at') || 130,
+    align: 'center',
+    sortable: { sortDirections: ['ascend', 'descend'], sortOrder: getSortOrder('updated_at') },
+  },
+  { title: pageText.value.actions, slotName: 'operations', width: 240, fixed: 'right', align: 'center' },
 ]) as TableColumnData[]);
 
 const handleColumnResize = (dataIndex: string, width: number) => {
-  if (!(dataIndex in defaultColumnWidths)) return;
+  if (!(dataIndex in defaultColumnWidths) && dataIndex !== 'updated_at') return;
   columnWidths[dataIndex] = Math.max(40, Math.round(width));
   saveColumnWidths();
 };
@@ -707,6 +748,7 @@ const fetchTestCases = async () => {
       test_type: selectedTestType.value || undefined, // 添加测试类型筛选
       // 多选审核状态筛选：有选中项则传递，否则不限制（显示全部）
       review_status_in: selectedReviewStatuses.value.length > 0 ? selectedReviewStatuses.value : undefined,
+      ordering: selectedOrdering.value || undefined,
     });
     if (response.success && response.data) {
       testCaseData.value = response.data;
@@ -750,6 +792,28 @@ const onReviewStatusChange = (value: ReviewStatus[]) => {
 
 const onTestTypeChange = (value: string) => {
   selectedTestType.value = value;
+  paginationConfig.current = 1;
+  fetchTestCases();
+};
+
+const onSorterChange = (dataIndex: string, direction: string) => {
+  const sortableFields = ['id', 'created_at', 'updated_at'];
+  if (!sortableFields.includes(dataIndex)) {
+    return;
+  }
+
+  // Arco 表格默认会在“升序/降序”后进入清空态。
+  // 用例列表需要更顺手的两态切换：升序 <-> 降序。
+  if (direction === 'ascend') {
+    selectedOrdering.value = dataIndex;
+  } else if (direction === 'descend') {
+    selectedOrdering.value = `-${dataIndex}`;
+  } else if (selectedOrdering.value === `-${dataIndex}`) {
+    selectedOrdering.value = dataIndex;
+  } else {
+    selectedOrdering.value = `-${dataIndex}`;
+  }
+
   paginationConfig.current = 1;
   fetchTestCases();
 };
@@ -818,6 +882,27 @@ const handleViewTestCase = (testCase: TestCase) => {
 
 const handleEditTestCase = (testCase: TestCase) => {
   emit('editTestCase', testCase);
+};
+
+const handleCopyTestCase = async (testCase: TestCase) => {
+  if (!currentProjectId.value) return;
+
+  try {
+    loading.value = true;
+    const response = await copyTestCaseService(currentProjectId.value, testCase.id);
+    if (response.success) {
+      Message.success(pageText.value.copyCaseSuccess);
+      await fetchTestCases();
+      emit('testCaseCopied');
+    } else {
+      Message.error(response.error || pageText.value.copyCaseFailed);
+    }
+  } catch (error) {
+    console.error('复制测试用例出错:', error);
+    Message.error(pageText.value.copyCaseError);
+  } finally {
+    loading.value = false;
+  }
 };
 
 const handleDeleteTestCase = (testCase: TestCase) => {
@@ -977,6 +1062,7 @@ watch(currentProjectId, () => {
   localSearchKeyword.value = '';
   selectedLevel.value = ''; // 项目切换时清空优先级筛选
   selectedTestType.value = ''; // 项目切换时清空测试类型筛选
+  selectedOrdering.value = '-created_at'; // 项目切换时重置排序
   selectedReviewStatuses.value = [...DEFAULT_REVIEW_STATUSES]; // 项目切换时重置审核状态筛选
   fetchTestCases();
 });

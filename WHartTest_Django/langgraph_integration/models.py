@@ -108,6 +108,14 @@ class ChatSession(models.Model):
     prompt = models.ForeignKey('prompts.UserPrompt', on_delete=models.SET_NULL, null=True, blank=True,
                                verbose_name="关联提示词", help_text="该会话使用的提示词")
 
+    # LLM 运行时解析信息。部分历史数据库已通过 bundle 分支迁移把这些列设为 NOT NULL；
+    # 模型层必须提供默认值，否则新建 ChatSession 时 ORM 不会写入这些列，PostgreSQL 会报
+    # resolved_module_key/resolved_source/resolved_runtime_mode 违反非空约束。
+    resolved_module_key = models.CharField(max_length=64, default='llm_chat', verbose_name="解析模块Key")
+    resolved_source = models.CharField(max_length=32, default='legacy', verbose_name="LLM配置来源")
+    resolved_bundle_id = models.BigIntegerField(null=True, blank=True, verbose_name="解析配置包ID")
+    resolved_runtime_mode = models.CharField(max_length=16, default='auto', verbose_name="运行模式")
+
     # Token 使用统计
     total_input_tokens = models.BigIntegerField(default=0, verbose_name="累计输入 Token",
                                                 help_text="该会话累计消耗的输入 Token 数")

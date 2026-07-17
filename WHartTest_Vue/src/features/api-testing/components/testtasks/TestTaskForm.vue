@@ -11,9 +11,12 @@ import {
   createTestTaskSuite, 
   updateTestTaskSuite,
   getTestCases,
+  getInterfaceCasesForTask,
   createTestTaskExecution,
   type TestTaskSuiteForm,
-  type TestCase
+  type TestCase,
+  type InterfaceCase,
+  type TestTaskCaseType
 } from '../../services/testTaskService'
 import { toArray } from '../../services/responseHelpers'
 
@@ -54,8 +57,91 @@ const formData = ref<TestTaskSuiteForm>({
 })
 
 // 测试用例列表
-const testCases = ref<TestCase[]>([])
-const selectedTestCases = ref<number[]>([])
+type TaskCaseOption = (TestCase | InterfaceCase) & {
+  case_type: TestTaskCaseType
+  selectionKey: string
+  interface_name?: string
+}
+
+const testCases = ref<TaskCaseOption[]>([])
+const selectedTestCases = ref<string[]>([])
+const casePagination = ref({
+  current: 1,
+  pageSize: 10,
+  total: 0
+})
+
+const makeCaseKey = (caseType: TestTaskCaseType, id: number) => `${caseType}:${id}`
+
+const mapScenarioCases = (items: TestCase[]): TaskCaseOption[] => items.map((item: TestCase) => ({
+  ...item,
+  case_type: 'scenario',
+  selectionKey: makeCaseKey('scenario', item.id)
+}))
+
+const mapInterfaceCases = (items: InterfaceCase[]): TaskCaseOption[] => items.map((item: InterfaceCase) => ({
+  ...item,
+  case_type: 'interface',
+  selectionKey: makeCaseKey('interface', item.id),
+  interface_name: item.interface_info?.name || ''
+}))
+
+type CaseListFetcher = (params: Record<string, any>) => Promise<any>
+
+const fetchCaseSegment = async (
+  fetcher: CaseListFetcher,
+  params: Record<string, any>,
+  start: number,
+  limit: number
+) => {
+  if (limit <= 0) {
+    return { results: [], count: 0 }
+  }
+
+  const pageSize = casePagination.value.pageSize
+  const firstPage = Math.floor(start / pageSize) + 1
+  const localOffset = start % pageSize
+  const firstResponse = await fetcher({
+    ...params,
+    page: firstPage,
+    page_size: pageSize
+  })
+
+  const count = firstResponse.data.count || 0
+  let results = (firstResponse.data.results || []).slice(localOffset)
+
+  if (results.length < limit && firstPage * pageSize < count) {
+    const secondResponse = await fetcher({
+      ...params,
+      page: firstPage + 1,
+      page_size: pageSize
+    })
+    results = results.concat(secondResponse.data.results || [])
+  }
+
+  return {
+    results: results.slice(0, limit),
+    count
+  }
+}
+
+const splitSelectedCases = () => {
+  const testcaseIds: number[] = []
+  const interfaceCaseIds: number[] = []
+
+  selectedTestCases.value.forEach(key => {
+    const [caseType, rawId] = String(key).split(':')
+    const id = Number(rawId)
+    if (!id) return
+    if (caseType === 'interface') {
+      interfaceCaseIds.push(id)
+    } else {
+      testcaseIds.push(id)
+    }
+  })
+
+  return { testcaseIds, interfaceCaseIds }
+}
 
 // 表单规则
 const rules = {
@@ -112,8 +198,13 @@ const fetchTestTaskSuite = async () => {
         fail_fast: data.fail_fast,
         project: data.project
       }
-      // 更新选中的测试用例，使用 testcase_id 而不是 testcase.id
-      selectedTestCases.value = data.task_cases.map(tc => tc.testcase_id)
+      selectedTestCases.value = data.task_cases
+        .map(tc => {
+          const caseType = (tc.case_type || 'scenario') as TestTaskCaseType
+          const caseId = tc.case_id || tc.testcase_id || tc.interface_case_id
+          return caseId ? makeCaseKey(caseType, Number(caseId)) : ''
+        })
+        .filter(Boolean)
       console.log('已选中的测试用例:', selectedTestCases.value)
     } else {
       throw new Error(response?.message || '获取测试任务详情失败')
@@ -141,6 +232,15 @@ const formatDate = (dateStr: string) => {
 
 // 获取测试用例列表
 const columns = [
+  {
+    title: '类型',
+    dataIndex: 'case_type',
+    align: 'center',
+    width: 110,
+    render: ({ record }) => h(ATag, {
+      color: record.case_type === 'interface' ? 'arcoblue' : 'purple'
+    }, () => record.case_type === 'interface' ? '接口用例' : '场景用例')
+  },
   {
     title: '用例名称',
     dataIndex: 'name',
@@ -182,6 +282,12 @@ const columns = [
     }
   },
   {
+    title: '关联接口',
+    dataIndex: 'interface_name',
+    align: 'center',
+    render: ({ record }) => record.case_type === 'interface' ? (record.interface_name || '-') : '-'
+  },
+  {
     title: '创建时间',
     dataIndex: 'created_at',
     align: 'center',
@@ -200,7 +306,8 @@ const searchForm = ref({
   name: '',
   description: '',
   priority: undefined,
-  group: undefined
+  group: undefined,
+  case_type: undefined as TestTaskCaseType | undefined
 })
 
 // 重置搜索
@@ -209,13 +316,27 @@ const resetSearch = () => {
     name: '',
     description: '',
     priority: undefined,
-    group: undefined
+    group: undefined,
+    case_type: undefined
   }
+  casePagination.value.current = 1
   fetchTestCases()
 }
 
 // 执行搜索
 const handleSearch = () => {
+  casePagination.value.current = 1
+  fetchTestCases()
+}
+
+const handleCasePageChange = (current: number) => {
+  casePagination.value.current = current
+  fetchTestCases()
+}
+
+const handleCasePageSizeChange = (pageSize: number) => {
+  casePagination.value.pageSize = pageSize
+  casePagination.value.current = 1
   fetchTestCases()
 }
 
@@ -228,16 +349,64 @@ const fetchTestCases = async () => {
 
   loading.value = true
   try {
-    const response = await getTestCases({
+    const commonParams = {
       project: projectStore.currentProjectId,
-      page: 1,
-      page_size: 1000,
       name: searchForm.value.name,
       description: searchForm.value.description,
       priority: searchForm.value.priority,
       ordering: '-created_at'
-    })
-    testCases.value = toArray<TestCase>(response.data?.results ?? response.data)
+    }
+
+    if (searchForm.value.case_type === 'scenario') {
+      const response = await getTestCases({
+        ...commonParams,
+        page: casePagination.value.current,
+        page_size: casePagination.value.pageSize
+      })
+      testCases.value = mapScenarioCases(toArray<TestCase>(response.data?.results ?? response.data))
+      casePagination.value.total = response.data.count || 0
+      return
+    }
+
+    if (searchForm.value.case_type === 'interface') {
+      const response = await getInterfaceCasesForTask({
+        ...commonParams,
+        page: casePagination.value.current,
+        page_size: casePagination.value.pageSize
+      })
+      testCases.value = mapInterfaceCases(toArray<InterfaceCase>(response.data?.results ?? response.data))
+      casePagination.value.total = response.data.count || 0
+      return
+    }
+
+    const [scenarioMeta, interfaceMeta] = await Promise.all([
+      getTestCases({ ...commonParams, page: 1, page_size: 1 }),
+      getInterfaceCasesForTask({ ...commonParams, page: 1, page_size: 1 })
+    ])
+    const scenarioTotal = scenarioMeta.data.count || 0
+    const interfaceTotal = interfaceMeta.data.count || 0
+    const start = (casePagination.value.current - 1) * casePagination.value.pageSize
+    const scenarioLimit = Math.max(
+      0,
+      Math.min(casePagination.value.pageSize, scenarioTotal - start)
+    )
+    const interfaceLimit = casePagination.value.pageSize - scenarioLimit
+    const interfaceStart = Math.max(0, start - scenarioTotal)
+
+    const [scenarioSegment, interfaceSegment] = await Promise.all([
+      scenarioLimit > 0
+        ? fetchCaseSegment(getTestCases, commonParams, start, scenarioLimit)
+        : Promise.resolve({ results: [], count: scenarioTotal }),
+      interfaceLimit > 0
+        ? fetchCaseSegment(getInterfaceCasesForTask, commonParams, interfaceStart, interfaceLimit)
+        : Promise.resolve({ results: [], count: interfaceTotal })
+    ])
+
+    testCases.value = [
+      ...mapScenarioCases(scenarioSegment.results),
+      ...mapInterfaceCases(interfaceSegment.results)
+    ]
+    casePagination.value.total = scenarioTotal + interfaceTotal
   } catch (error) {
     console.error('获取测试用例列表失败', error)
     Message.error('获取测试用例列表失败')
@@ -260,16 +429,19 @@ const handleSubmit = async () => {
 
   submitting.value = true
   try {
+    const { testcaseIds, interfaceCaseIds } = splitSelectedCases()
     if (props.mode === 'create') {
       await createTestTaskSuite({
         ...formData.value,
-        test_cases: selectedTestCases.value
+        test_cases: testcaseIds,
+        interface_cases: interfaceCaseIds
       })
       Message.success('创建成功')
     } else {
       await updateTestTaskSuite(Number(props.id), {
         ...formData.value,
-        test_cases: selectedTestCases.value
+        test_cases: testcaseIds,
+        interface_cases: interfaceCaseIds
       })
       Message.success('更新成功')
     }
@@ -296,10 +468,12 @@ const handleCreateAndExecute = async () => {
 
   creatingAndExecuting.value = true
   try {
+    const { testcaseIds, interfaceCaseIds } = splitSelectedCases()
     // 1. 创建测试任务
     const createResponse = await createTestTaskSuite({
       ...formData.value,
-      test_cases: selectedTestCases.value
+      test_cases: testcaseIds,
+      interface_cases: interfaceCaseIds
     })
     
     if (createResponse.status !== 'success' || !createResponse.data) {
@@ -532,7 +706,7 @@ onMounted(async () => {
           </div>
 
           <!-- 测试用例选择部分 -->
-          <a-divider>测试用例选择</a-divider>
+          <a-divider>测试用例选择（场景用例 / 接口用例）</a-divider>
           
           <!-- 搜索表单 -->
           <a-form layout="inline" :model="searchForm" class="mb-4">
@@ -561,6 +735,17 @@ onMounted(async () => {
                 </a-option>
               </a-select>
             </a-form-item>
+            <a-form-item field="case_type" label="用例类型">
+              <a-select
+                v-model="searchForm.case_type"
+                placeholder="全部类型"
+                allow-clear
+                class="w-36"
+              >
+                <a-option value="scenario">场景用例</a-option>
+                <a-option value="interface">接口用例</a-option>
+              </a-select>
+            </a-form-item>
             <a-form-item>
               <a-space>
                 <a-button type="primary" @click="handleSearch">
@@ -579,7 +764,7 @@ onMounted(async () => {
             :data="testCases"
             :loading="loading"
             :pagination="false"
-            row-key="id"
+            row-key="selectionKey"
             v-model:selectedKeys="selectedTestCases"
             :row-selection="{
               type: 'checkbox',
@@ -598,6 +783,23 @@ onMounted(async () => {
               </a-tooltip>
             </template>
           </a-table>
+
+          <div class="case-pagination-shell flex items-center justify-between mt-4">
+            <div class="case-selection-count">
+              已选择 {{ selectedTestCases.length }} 个用例
+            </div>
+            <a-pagination
+              :total="casePagination.total"
+              :current="casePagination.current"
+              :page-size="casePagination.pageSize"
+              :page-size-options="[10, 20, 30, 50]"
+              show-total
+              show-jumper
+              show-page-size
+              @change="handleCasePageChange"
+              @page-size-change="handleCasePageSizeChange"
+            />
+          </div>
         </a-form>
       </div>
     </div>
@@ -645,6 +847,10 @@ onMounted(async () => {
 
 .section-title {
   color: var(--ttf-text);
+}
+
+.case-selection-count {
+  color: var(--ttf-text-subtle);
 }
 
 :deep(.arco-form-item-label),
@@ -757,4 +963,4 @@ onMounted(async () => {
     box-shadow: 0 1px 2px rgba(16, 185, 129, 0.1) !important;
   }
 }
-</style> 
+</style>

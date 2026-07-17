@@ -22,6 +22,9 @@ export const interfaceService = {
   delete: (projectId: number, id: number) =>
     request<void>({ url: `${base(projectId)}/${id}/`, method: 'DELETE' }),
 
+  duplicate: (projectId: number, id: number, data?: { name?: string }) =>
+    request<ApiInterface>({ url: `${base(projectId)}/${id}/duplicate/`, method: 'POST', data }),
+
   run: (projectId: number, id: number, data?: { environment_id?: number }) =>
     request<any>({ url: `${base(projectId)}/${id}/run/`, method: 'POST', data }),
 
@@ -134,4 +137,10 @@ export async function getInterfaceById(id: number) {
 export async function deleteInterface(id: number) {
   const pid = useProjectStore().currentProjectId ?? 0;
   return _wrapOne(await interfaceService.delete(pid, id));
+}
+
+
+export async function duplicateInterface(id: number, data?: { name?: string }) {
+  const pid = useProjectStore().currentProjectId ?? 0;
+  return _wrapOne(await interfaceService.duplicate(pid, id, data));
 }

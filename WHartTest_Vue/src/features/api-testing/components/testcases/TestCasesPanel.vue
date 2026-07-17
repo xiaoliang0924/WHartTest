@@ -283,6 +283,26 @@ const formatDeleteCaseContent = (caseName: string) => {
     : `确定要删除测试用例「${caseName}」吗？删除后将同时删除所有测试步骤和执行记录，且无法恢复。`
 }
 
+const handleCopy = async (testcase: ApiTestCase) => {
+  if (!projectStore.currentProjectId || !testcase.id) return
+
+  try {
+    loading.value = true
+    const res = await testcaseService.copy(projectStore.currentProjectId, testcase.id)
+    if (res.success) {
+      Message.success(tl('测试用例复制成功'))
+      await fetchTestCases(pagination.current)
+    } else {
+      throw new Error(res.error || tl('复制测试用例失败'))
+    }
+  } catch (error) {
+    console.error('复制测试用例失败:', error)
+    Message.error(error instanceof Error ? error.message : tl('复制测试用例失败'))
+  } finally {
+    loading.value = false
+  }
+}
+
 const handleDelete = async (testcase: ApiTestCase) => {
   if (!projectStore.currentProjectId) return
 
@@ -368,6 +388,7 @@ fetchTestCases(pagination.current)
           @link="handleLink"
           @report="handleReport"
           @edit="handleEdit"
+          @copy="handleCopy"
           @delete="handleDelete"
         />
       </div>

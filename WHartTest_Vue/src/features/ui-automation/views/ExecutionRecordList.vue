@@ -103,7 +103,7 @@
 
         <template v-if="currentRecord.error_message">
           <a-divider>{{ pageText.errorInfo }}</a-divider>
-          <a-alert type="error" :title="formatDynamicText(currentRecord.error_message)" />
+          <a-alert class="record-error-alert" type="error" :title="formatDynamicText(currentRecord.error_message)" />
         </template>
 
         <template v-if="currentRecord.log">
@@ -126,7 +126,7 @@
               </template>
               <div class="step-detail">
                 <div v-if="getStepMessage(step)" class="step-message">
-                  <a-alert :type="getStepStatus(step) === 'failed' ? 'error' : 'info'" :title="formatDynamicText(getStepMessage(step))" />
+                  <a-alert class="step-message-alert" :type="getStepStatus(step) === 'failed' ? 'error' : 'info'" :title="formatDynamicText(getStepMessage(step))" />
                 </div>
                 <div v-if="getStepScreenshot(step)" class="step-screenshot">
                   <a-image :src="formatScreenshotUrl(getStepScreenshot(step))" width="100%" fit="contain" />
@@ -487,6 +487,7 @@ watch(projectId, () => {
   max-height: 200px;
   font-size: 12px;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-all;
 }
 
@@ -497,15 +498,25 @@ watch(projectId, () => {
   font-size: 12px;
   overflow: auto;
   max-height: 200px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .step-header {
   display: flex;
   align-items: center;
+  min-width: 0;
+}
+.step-header > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .step-duration {
   margin-left: auto;
   font-size: 12px;
   color: var(--color-text-3);
+  flex-shrink: 0;
 }
 .step-detail {
   display: flex;
@@ -514,6 +525,18 @@ watch(projectId, () => {
 }
 .step-message {
   margin-bottom: 8px;
+}
+.record-error-alert :deep(.arco-alert-body),
+.step-message-alert :deep(.arco-alert-body) {
+  min-width: 0;
+}
+.record-error-alert :deep(.arco-alert-title),
+.record-error-alert :deep(.arco-alert-content),
+.step-message-alert :deep(.arco-alert-title),
+.step-message-alert :deep(.arco-alert-content) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .step-screenshot {
   max-width: 100%;

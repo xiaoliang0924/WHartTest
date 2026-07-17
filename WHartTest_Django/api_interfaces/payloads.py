@@ -48,12 +48,25 @@ def normalize_key_value_pairs(value: Any, field_name: str) -> list[dict[str, Any
         if key in (None, ''):
             raise ValueError(f'{field_name}[{index}].key is required.')
 
-        normalized.append({
+        normalized_item = {
             'key': str(key),
             'value': stringify_pair_value(item.get('value', '')),
             'description': stringify_pair_value(item.get('description', '')),
             'enabled': bool(item.get('enabled', True)),
-        })
+        }
+        value_type = item.get('value_type') or item.get('type')
+        if value_type:
+            normalized_item['value_type'] = str(value_type)
+        if item.get('file_id') not in (None, ''):
+            try:
+                normalized_item['file_id'] = int(item.get('file_id'))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f'{field_name}[{index}].file_id must be an integer.') from exc
+        if item.get('file_name'):
+            normalized_item['file_name'] = stringify_pair_value(item.get('file_name'))
+        if item.get('mime_type'):
+            normalized_item['mime_type'] = stringify_pair_value(item.get('mime_type'))
+        normalized.append(normalized_item)
 
     return normalized
 

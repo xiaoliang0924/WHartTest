@@ -8,7 +8,13 @@ from rest_framework.test import APIClient
 from rest_framework import status
 
 from projects.models import Project, ProjectMember
-from api_testcases.models import ApiTestCase, ApiTestReport
+from api_interfaces.models import ApiInterface
+from api_testcases.models import (
+    ApiInterfaceCase,
+    ApiInterfaceCaseReport,
+    ApiTestCase,
+    ApiTestReport,
+)
 from .models import (
     ApiTestTaskSuite, ApiTestTaskCase,
     ApiTestTaskExecution, ApiTestTaskCaseResult,
@@ -268,6 +274,22 @@ class ApiTestTaskAPITest(TestCase):
         self.suite_url = f'/api/projects/{self.project.pk}/api-task-suites/'
         self.exec_url = f'/api/projects/{self.project.pk}/api-task-executions/'
 
+    def _create_interface_case(self, name='IC'):
+        interface = ApiInterface.objects.create(
+            name=f'{name} Interface',
+            type='http',
+            method='GET',
+            url='/api/demo',
+            project=self.project,
+            created_by=self.user,
+        )
+        return ApiInterfaceCase.objects.create(
+            name=name,
+            project=self.project,
+            interface=interface,
+            created_by=self.user,
+        )
+
     # --- Suite CRUD ---
 
     def test_list_suites(self):
@@ -333,6 +355,20 @@ class ApiTestTaskAPITest(TestCase):
         suite = ApiTestTaskSuite.objects.get(name='Suite with TCs')
         self.assertEqual(suite.api_task_cases.count(), 1)
 
+    def test_create_suite_with_interface_cases(self):
+        interface_case = self._create_interface_case('IC1')
+        data = {
+            'name': 'Suite with ICs',
+            'interface_cases': [interface_case.pk],
+            'project': self.project.pk,
+        }
+        response = self.client.post(self.suite_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        suite = ApiTestTaskSuite.objects.get(name='Suite with ICs')
+        task_case = suite.api_task_cases.get()
+        self.assertEqual(task_case.case_type, ApiTestTaskCase.CASE_TYPE_INTERFACE)
+        self.assertEqual(task_case.interface_case, interface_case)
+
     # --- add-testcases / remove-testcase ---
 
     def test_add_testcases_action(self):
@@ -351,6 +387,20 @@ class ApiTestTaskAPITest(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(suite.api_task_cases.count(), 2)
+
+    def test_add_testcases_action_accepts_interface_cases(self):
+        suite = ApiTestTaskSuite.objects.create(
+            name='Suite', project=self.project, created_by=self.user,
+        )
+        interface_case = self._create_interface_case('IC2')
+        data = {'interface_case_ids': [interface_case.pk]}
+        response = self.client.post(
+            f'{self.suite_url}{suite.pk}/add-testcases/', data, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(suite.api_task_cases.count(), 1)
+        self.assertEqual(response.data[0]['case_type'], 'interface')
+        self.assertEqual(response.data[0]['interface_case_id'], interface_case.pk)
 
     def test_add_testcases_skip_duplicates(self):
         suite = ApiTestTaskSuite.objects.create(
@@ -377,6 +427,23 @@ class ApiTestTaskAPITest(TestCase):
         ApiTestTaskCase.objects.create(task_suite=suite, testcase=tc, order=1)
         response = self.client.delete(
             f'{self.suite_url}{suite.pk}/remove-testcase/{tc.pk}/',
+        )
+        self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_204_NO_CONTENT])
+        self.assertEqual(suite.api_task_cases.count(), 0)
+
+    def test_remove_case_action_removes_interface_case(self):
+        suite = ApiTestTaskSuite.objects.create(
+            name='Suite', project=self.project, created_by=self.user,
+        )
+        interface_case = self._create_interface_case('IC3')
+        ApiTestTaskCase.objects.create(
+            task_suite=suite,
+            case_type=ApiTestTaskCase.CASE_TYPE_INTERFACE,
+            interface_case=interface_case,
+            order=1,
+        )
+        response = self.client.delete(
+            f'{self.suite_url}{suite.pk}/remove-case/interface/{interface_case.pk}/',
         )
         self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_204_NO_CONTENT])
         self.assertEqual(suite.api_task_cases.count(), 0)
@@ -425,6 +492,27 @@ class ApiTestTaskAPITest(TestCase):
         self.assertEqual(execution.total_count, 1)
         self.assertEqual(execution.executed_by, self.user)
         mock_task.delay.assert_called_once_with(execution.id)
+
+    @patch('api_testtasks.views.execute_api_task_async')
+    def test_create_execution_with_interface_case(self, mock_task):
+        mock_task.delay.return_value = MagicMock(id='celery-task-id')
+        suite = ApiTestTaskSuite.objects.create(
+            name='Suite', project=self.project, created_by=self.user,
+        )
+        interface_case = self._create_interface_case('IC4')
+        ApiTestTaskCase.objects.create(
+            task_suite=suite,
+            case_type=ApiTestTaskCase.CASE_TYPE_INTERFACE,
+            interface_case=interface_case,
+            order=1,
+        )
+        response = self.client.post(self.exec_url, {'task_suite_id': suite.pk}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        execution = ApiTestTaskExecution.objects.first()
+        self.assertEqual(execution.total_count, 1)
+        result = execution.api_case_results.get()
+        self.assertEqual(result.case_type, ApiTestTaskCase.CASE_TYPE_INTERFACE)
+        self.assertEqual(result.interface_case, interface_case)
 
     def test_create_execution_empty_suite(self):
         empty = ApiTestTaskSuite.objects.create(
@@ -560,6 +648,22 @@ class ApiTestTaskCeleryTest(TestCase):
         ApiTestTaskCase.objects.create(task_suite=self.suite, testcase=self.tc1, order=1)
         ApiTestTaskCase.objects.create(task_suite=self.suite, testcase=self.tc2, order=2)
         ApiTestTaskCase.objects.create(task_suite=self.suite, testcase=self.tc3, order=3)
+
+    def _create_interface_case(self, name='IC'):
+        interface = ApiInterface.objects.create(
+            name=f'{name} Interface',
+            type='http',
+            method='GET',
+            url='/api/demo',
+            project=self.project,
+            created_by=self.user,
+        )
+        return ApiInterfaceCase.objects.create(
+            name=name,
+            project=self.project,
+            interface=interface,
+            created_by=self.user,
+        )
 
     @patch('api_testcases.services.TestExecutionService')
     def test_all_success(self, mock_exec_svc):
@@ -778,6 +882,47 @@ class ApiTestTaskCeleryTest(TestCase):
             self.assertGreaterEqual(cr.duration, 0)
             self.assertIsNotNone(cr.start_time)
             self.assertIsNotNone(cr.end_time)
+
+    @patch('api_testcases.services.InterfaceCaseExecutionService')
+    def test_execute_interface_case_result(self, mock_interface_exec_svc):
+        interface_case = self._create_interface_case('IC Task')
+        suite = ApiTestTaskSuite.objects.create(
+            name='Interface Suite', project=self.project, created_by=self.user,
+        )
+        ApiTestTaskCase.objects.create(
+            task_suite=suite,
+            case_type=ApiTestTaskCase.CASE_TYPE_INTERFACE,
+            interface_case=interface_case,
+            order=1,
+        )
+
+        def make_report(case_obj, environment, user):
+            return ApiInterfaceCaseReport.objects.create(
+                name='Interface Report',
+                status='success',
+                success_count=1,
+                fail_count=0,
+                error_count=0,
+                duration=0.5,
+                summary={},
+                interface_case=case_obj,
+                executed_by=user,
+            )
+
+        mock_interface_exec_svc.run_interface_case.side_effect = make_report
+
+        execution = ApiTestTaskExecutionService.create_execution(
+            task_suite=suite, user=self.user,
+        )
+        ApiTestTaskExecutionService.execute_task(execution)
+
+        execution.refresh_from_db()
+        result = execution.api_case_results.get()
+        self.assertEqual(result.case_type, ApiTestTaskCase.CASE_TYPE_INTERFACE)
+        self.assertEqual(result.status, 'success')
+        self.assertIsNone(result.report)
+        self.assertIsNotNone(result.interface_report)
+        self.assertEqual(execution.success_count, 1)
 
 
 class ApiTestTaskSerializerFieldTest(TestCase):

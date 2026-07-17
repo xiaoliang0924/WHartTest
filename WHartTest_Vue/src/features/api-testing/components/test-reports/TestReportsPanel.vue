@@ -5,13 +5,23 @@
       <div class="flex items-center gap-4">
         <a-input-search
           v-model="searchQuery"
-          placeholder="搜索报告名称或用例名称"
+          placeholder="搜索报告名称、用例名称或接口名称"
           class="w-64"
           allow-clear
           @search="handleSearch"
           @press-enter="handleSearch"
           @clear="handleSearch"
         />
+        <a-select
+          v-model="filterReportType"
+          placeholder="用例类型"
+          allow-clear
+          @change="handleFilterChange"
+          class="w-32"
+        >
+          <a-option value="testcase">场景用例</a-option>
+          <a-option value="interface_case">接口用例</a-option>
+        </a-select>
         <a-select
           v-model="filterStatus"
           placeholder="执行状态"
@@ -68,15 +78,25 @@
                 <template #cell="{ record }">
                   <div class="flex items-center justify-center gap-2">
                     <icon-file class="text-blue-500 flex-shrink-0" />
-                    <a-link @click="viewReport(record.id)" class="report-link truncate">{{ record.name }}</a-link>
+                    <a-link @click="viewReport(record)" class="report-link truncate">{{ record.name }}</a-link>
                   </div>
+                </template>
+              </a-table-column>
+              <a-table-column title="用例类型" data-index="report_type" :width="110" align="center">
+                <template #cell="{ record }">
+                  <a-tag :color="getReportTypeColor(record.report_type)" size="small">
+                    {{ getReportTypeText(record.report_type) }}
+                  </a-tag>
                 </template>
               </a-table-column>
               <a-table-column title="用例名称" data-index="testcase_name" :width="250" align="center">
                 <template #cell="{ record }">
-                  <div class="flex items-center justify-center gap-2">
+                  <div class="report-case-cell flex items-center justify-center gap-2">
                     <icon-code class="report-row-icon" />
-                    <span class="report-muted-text">{{ record.testcase_name }}</span>
+                    <div class="report-case-text">
+                      <div class="report-muted-text truncate">{{ record.testcase_name }}</div>
+                      <div v-if="record.interface_name" class="report-subtle-text truncate">{{ record.interface_name }}</div>
+                    </div>
                   </div>
                 </template>
               </a-table-column>
@@ -169,6 +189,7 @@ import { useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
 import { getTestReports } from '../../services/testReportService'
 import { toArray } from '../../services/responseHelpers'
+import type { ReportListItem, ReportType } from '../../services/testReportService'
 import { formatDateTime, formatDuration } from '@/utils/formatters'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
@@ -182,9 +203,10 @@ import {
 const router = useRouter()
 const projectStore = useProjectStore()
 const themeStore = useThemeStore()
-const reports = ref([])
+const reports = ref<ReportListItem[]>([])
 const loading = ref(false)
 const searchQuery = ref('')
+const filterReportType = ref<ReportType | ''>('')
 const filterStatus = ref('')
 const isDarkTheme = computed(() => themeStore.isBlack)
 const REPORTS_TAB_QUERY = { tab: 'reports', returnTo: 'reports' } as const
@@ -225,6 +247,22 @@ const getStatusText = (status: string) => {
   return statusMap[status] || '未知'
 }
 
+const getReportTypeText = (type?: ReportType) => {
+  const typeMap: Record<ReportType, string> = {
+    testcase: '场景用例',
+    interface_case: '接口用例',
+  }
+  return type ? typeMap[type] : '未知'
+}
+
+const getReportTypeColor = (type?: ReportType) => {
+  const typeMap: Record<ReportType, string> = {
+    testcase: 'purple',
+    interface_case: 'arcoblue',
+  }
+  return type ? typeMap[type] : 'gray'
+}
+
 const getProgressColor = (rate: number) => {
   if (rate >= 0.9) return '#00B42A'
   if (rate >= 0.7) return '#FF7D00'
@@ -245,6 +283,7 @@ const fetchReports = async () => {
       page: pagination.value.current,
       page_size: pagination.value.page_size,
       search: searchQuery.value,
+      report_type: filterReportType.value || undefined,
       status: filterStatus.value || undefined,
       project: currentProjectId.value, // 添加项目ID过滤
     })
@@ -278,10 +317,19 @@ const onPageSizeChange = (size: number) => {
   fetchReports()
 }
 
-const viewReport = (id: number) => {
+const viewReport = (report: ReportListItem) => {
+  if (report.report_type === 'interface_case') {
+    router.push({
+      name: 'ApiInterfaceCaseReportDetail',
+      params: { id: report.id },
+      query: REPORTS_TAB_QUERY
+    })
+    return
+  }
+
   router.push({
     name: 'ApiTestReportDetail',
-    params: { id },
+    params: { id: report.id },
     query: REPORTS_TAB_QUERY
   })
 }
@@ -291,6 +339,7 @@ watch(currentProjectId, (newProjectId, oldProjectId) => {
   if (newProjectId !== oldProjectId) {
     // 重置过滤条件
     searchQuery.value = ''
+    filterReportType.value = ''
     filterStatus.value = ''
     
     // 重置分页
@@ -503,6 +552,15 @@ onUnmounted(() => {
 .execution-results-label {
   white-space: nowrap;
   line-height: 1.2;
+}
+
+.report-case-cell {
+  min-width: 0;
+}
+
+.report-case-text {
+  min-width: 0;
+  max-width: 190px;
 }
 
 .empty-title {

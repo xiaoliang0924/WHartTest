@@ -5,6 +5,9 @@ import { IconDelete, IconPlus, IconUpload } from '@arco-design/web-vue/es/icon'
 import type { KeyValuePair } from '../../services/interfaceService'
 import MonacoEditor from '@guolao/vue-monaco-editor'
 import { useThemeStore } from '@/store/themeStore'
+import { Message } from '@arco-design/web-vue'
+import { useProjectStore } from '@/store/projectStore'
+import { fileService } from '@/features/file-management/services/fileService'
 
 interface Props {
   body?: {
@@ -16,6 +19,14 @@ interface Props {
 const props = defineProps<Props>()
 const emit = defineEmits(['update:body'])
 const themeStore = useThemeStore()
+const projectStore = useProjectStore()
+const uploadingRows = ref<Record<number, boolean>>({})
+const fileChooseVisible = ref(false)
+const fileChooseLoading = ref(false)
+const fileChooseKeyword = ref('')
+const fileChooseFiles = ref<any[]>([])
+const currentFileItem = ref<KeyValuePair | null>(null)
+const currentFileIndex = ref<number>(-1)
 
 // 请求体类型
 type BodyType = 'none' | 'form-data' | 'x-www-form-urlencoded' | 'raw' | 'binary'
@@ -175,6 +186,113 @@ const removeKeyValuePair = (list: KeyValuePair[], index: number) => {
   emit('update:body', getBody())
 }
 
+const ensureFormDataItemMeta = (item: KeyValuePair) => {
+  if (!item.value_type) item.value_type = 'text'
+  return item
+}
+
+const handleFormDataValueTypeChange = (item: KeyValuePair) => {
+  ensureFormDataItemMeta(item)
+  if (item.value_type === 'file') {
+    item.value = item.file_id ? `file_id:${item.file_id}` : ''
+  } else {
+    delete item.file_id
+    delete item.file_name
+    delete item.mime_type
+    item.value = ''
+  }
+  emit('update:body', getBody())
+}
+
+const handleFormDataFileChange = async (event: Event, item: KeyValuePair, index: number) => {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  if (!projectStore.currentProjectId) {
+    Message.warning('请先选择项目')
+    input.value = ''
+    return
+  }
+  uploadingRows.value[index] = true
+  try {
+    const res: any = await fileService.upload(projectStore.currentProjectId, [file])
+    const payload = res?.data?.data || res?.data || res
+    const uploaded = Array.isArray(payload) ? payload[0] : payload
+    const fileId = uploaded.file_id || uploaded.id
+    item.value_type = 'file'
+    item.file_id = fileId
+    item.file_name = uploaded.name || uploaded.original_name || file.name
+    item.mime_type = uploaded.mime_type || file.type
+    item.value = `file_id:${fileId}`
+    emit('update:body', getBody())
+    Message.success('文件已上传')
+  } catch (error: any) {
+    Message.error(error?.message || '文件上传失败')
+  } finally {
+    uploadingRows.value[index] = false
+    input.value = ''
+  }
+}
+
+const loadManagedFilesForChoose = async () => {
+  if (!projectStore.currentProjectId) return
+  fileChooseLoading.value = true
+  try {
+    const res: any = await fileService.list(projectStore.currentProjectId, {
+      page: 1,
+      page_size: 50,
+      search: fileChooseKeyword.value || undefined,
+      ordering: '-created_at',
+    })
+    const payload = res?.data?.data || res?.data || res
+    fileChooseFiles.value = Array.isArray(payload) ? payload : (payload.results || payload.data || [])
+  } catch (error: any) {
+    Message.error(error?.message || '加载文件失败')
+  } finally {
+    fileChooseLoading.value = false
+  }
+}
+
+const openManagedFileChoose = async (item: KeyValuePair, index: number) => {
+  if (!projectStore.currentProjectId) {
+    Message.warning('请先选择项目')
+    return
+  }
+  currentFileItem.value = item
+  currentFileIndex.value = index
+  fileChooseVisible.value = true
+  await loadManagedFilesForChoose()
+}
+
+const chooseManagedFile = (file: any) => {
+  const item = currentFileItem.value
+  if (!item) return
+  const fileId = file.file_id || file.id
+  item.value_type = 'file'
+  item.file_id = fileId
+  item.file_name = file.name || file.original_name
+  item.mime_type = file.mime_type || ''
+  item.value = `file_id:${fileId}`
+  emit('update:body', getBody())
+  fileChooseVisible.value = false
+}
+
+const openLocalFormDataFilePicker = (index: number) => {
+  globalThis.document?.getElementById(`form-file-${index}`)?.click()
+}
+
+const openFormDataFilePicker = (index: number) => {
+  openLocalFormDataFilePicker(index)
+}
+
+const removeFormDataFile = (item: KeyValuePair) => {
+  delete item.file_id
+  delete item.file_name
+  delete item.mime_type
+  item.value = ''
+  emit('update:body', getBody())
+}
+
 // 处理文件选择
 const handleFileSelect = (fileList: FileItem[], fileItem: FileItem) => {
   if (fileItem.file) {
@@ -192,7 +310,7 @@ const getBody = () => {
 
   switch (bodyType.value) {
     case 'form-data':
-      body.content = formDataList.value.filter(item => item.key || item.value)
+      body.content = formDataList.value.map(item => ensureFormDataItemMeta(item)).filter(item => item.key || item.value || item.file_id)
       break
     case 'x-www-form-urlencoded':
       body.content = urlEncodedList.value.filter(item => item.key || item.value)
@@ -245,11 +363,43 @@ defineExpose({
               allow-clear
               class="!w-[200px]"
             />
-            <a-input 
-              v-model="item.value" 
-              placeholder="Value" 
+            <a-select
+              v-model="item.value_type"
+              class="!w-[96px]"
+              @change="handleFormDataValueTypeChange(item)"
+            >
+              <a-option value="text">Text</a-option>
+              <a-option value="file">File</a-option>
+            </a-select>
+            <template v-if="item.value_type === 'file'">
+              <input
+                :id="`form-file-${index}`"
+                type="file"
+                class="hidden-file-input"
+                @change="handleFormDataFileChange($event, item, index)"
+              />
+              <a-dropdown trigger="click">
+                <a-button
+                  type="outline"
+                  class="!w-[220px]"
+                  :loading="uploadingRows[index]"
+                >
+                  <template #icon><icon-upload /></template>
+                  {{ item.file_name || '选择文件' }}
+                </a-button>
+                <template #content>
+                  <a-doption @click="openManagedFileChoose(item, index)">文件管理选择</a-doption>
+                  <a-doption @click="openLocalFormDataFilePicker(index)">上传本地文件</a-doption>
+                </template>
+              </a-dropdown>
+              <a-button v-if="item.file_id" type="text" status="danger" @click="removeFormDataFile(item)">清除</a-button>
+            </template>
+            <a-input
+              v-else
+              v-model="item.value"
+              placeholder="Value"
               allow-clear
-              class="!w-[200px]"
+              class="!w-[220px]"
             />
             <a-input 
               v-model="item.description" 
@@ -360,6 +510,32 @@ defineExpose({
         </div>
       </div>
     </div>
+
+    <a-modal v-model:visible="fileChooseVisible" title="文件管理选择" :footer="false" width="720px">
+      <a-input-search
+        v-model="fileChooseKeyword"
+        placeholder="搜索文件名/类型"
+        allow-clear
+        class="mb-3"
+        @search="loadManagedFilesForChoose"
+        @clear="loadManagedFilesForChoose"
+      />
+      <a-table :loading="fileChooseLoading" :data="fileChooseFiles" row-key="id" :pagination="false" size="small">
+        <template #columns>
+          <a-table-column title="文件名" data-index="name">
+            <template #cell="{ record }">{{ record.name || record.original_name }}</template>
+          </a-table-column>
+          <a-table-column title="类型" data-index="mime_type" :width="160" />
+          <a-table-column title="引用" data-index="reference_count" :width="80" />
+          <a-table-column title="操作" :width="90">
+            <template #cell="{ record }">
+              <a-button size="mini" type="primary" @click="chooseManagedFile(record)">选择</a-button>
+            </template>
+          </a-table-column>
+        </template>
+      </a-table>
+    </a-modal>
+
   </div>
 </template>
 
@@ -437,4 +613,7 @@ defineExpose({
 .editor-shell :deep(.monaco-editor .margin) {
   border-radius: 8px;
 }
+
+.hidden-file-input { display: none; }
+.mb-3 { margin-bottom: 12px; }
 </style>

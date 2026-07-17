@@ -217,6 +217,20 @@
                 :placeholder="getParamPlaceholder(param)"
                 :auto-size="{ minRows: 2, maxRows: 5 }"
               />
+              <div v-else-if="param.type === 'file'" class="upload-param-row">
+                <input id="ui-upload-file-input" type="file" class="hidden-file-input" @change="handleUploadFileChange" />
+                <a-dropdown trigger="click">
+                  <a-button type="outline" :loading="uploadingFile">
+                    <template #icon><icon-upload /></template>
+                    {{ opeParams.file_name || stepText.chooseUploadFile }}
+                  </a-button>
+                  <template #content>
+                    <a-doption @click="openManagedFileChoose">{{ stepText.chooseFromFileManagement }}</a-doption>
+                    <a-doption @click="openUploadFilePicker">{{ stepText.uploadLocalFile }}</a-doption>
+                  </template>
+                </a-dropdown>
+                <a-button v-if="opeParams.file_id" type="text" status="danger" @click="clearUploadFile">{{ stepText.clearUploadFile }}</a-button>
+              </div>
             </a-form-item>
           </template>
         </template>
@@ -340,25 +354,52 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <a-modal v-model:visible="managedFileChooseVisible" :title="stepText.chooseFromFileManagement" :footer="false" width="720px">
+      <a-input-search
+        v-model="managedFileKeyword"
+        :placeholder="stepText.searchFilePlaceholder"
+        allow-clear
+        class="managed-file-search"
+        @search="loadManagedFilesForChoose"
+        @clear="loadManagedFilesForChoose"
+      />
+      <a-table :loading="managedFileLoading" :data="managedFileOptions" row-key="id" :pagination="false" size="small">
+        <template #columns>
+          <a-table-column :title="stepText.fileNameColumn" data-index="name">
+            <template #cell="{ record }">{{ record.name || record.original_name }}</template>
+          </a-table-column>
+          <a-table-column :title="stepText.fileTypeColumn" data-index="mime_type" :width="160" />
+          <a-table-column :title="stepText.fileRefsColumn" data-index="reference_count" :width="80" />
+          <a-table-column :title="stepText.actionColumn" :width="90">
+            <template #cell="{ record }">
+              <a-button size="mini" type="primary" @click="chooseManagedFile(record)">{{ stepText.selectFileAction }}</a-button>
+            </template>
+          </a-table-column>
+        </template>
+      </a-table>
+    </a-modal>
+
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, watch, computed, onMounted, onUnmounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
-import { IconPlus, IconEdit, IconDelete, IconDragDotVertical, IconPlayArrow } from '@arco-design/web-vue/es/icon'
+import { IconPlus, IconEdit, IconDelete, IconDragDotVertical, IconPlayArrow, IconUpload } from '@arco-design/web-vue/es/icon'
 import draggable from 'vuedraggable'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { pageStepsDetailedApi, elementApi, actuatorApi, envConfigApi, moduleApi, pageApi, type ActuatorInfo } from '../api'
 import type { UiPageStepsDetailed, UiPageSteps, UiElement, UiModule, UiPage, StepType, UiEnvironmentConfig } from '../types'
 import { STEP_TYPE_LABELS, extractListData, extractResponseData } from '../types'
 import { uiWebSocket, UiSocketEnum } from '../services/websocket'
+import { fileService } from '@/features/file-management/services/fileService'
 
 /** 操作参数定义 */
 interface OpeParamDef {
   field: string
   label: string
-  type: 'input' | 'number' | 'textarea'
+  type: 'input' | 'number' | 'textarea' | 'file'
   placeholder: string
   required?: boolean
   min?: number
@@ -374,7 +415,7 @@ const OPE_PARAMS_MAP: Record<string, OpeParamDef[]> = {
   screenshot: [{ field: 'name', label: '截图文件名', type: 'input', placeholder: '可选，留空自动生成' }],
   select_option: [{ field: 'value', label: '选项值', type: 'input', placeholder: '请输入要选择的选项值', required: true }],
   press: [{ field: 'key', label: '按键值', type: 'input', placeholder: '例如 Enter, Tab, Escape 等', required: true }],
-  upload: [{ field: 'value', label: '文件路径', type: 'input', placeholder: '请输入要上传的文件绝对路径', required: true }],
+  upload: [{ field: 'file_id', label: '上传文件', type: 'file', placeholder: '请选择要上传的文件', required: true }],
   goto: [{ field: 'url', label: '目标 URL', type: 'input', placeholder: '请输入完整的网页地址，例如 https://www.google.com', required: true }],
   switch_tab: [{ field: 'value', label: '页签索引或关键字', type: 'input', placeholder: '请输入页签索引(从0开始)或URL/标题关键字', required: true }],
   // 断言操作
@@ -424,7 +465,8 @@ const OPE_KEY_LABELS: Record<string, string> = {
 
 /** 格式化操作值显示 */
 const formatOpeValue = (opeValue: Record<string, any>) => {
-  const entries = Object.entries(opeValue).filter(([, v]) => v !== null && v !== undefined && v !== '')
+  if (opeValue.file_name) return `file: ${opeValue.file_name}`
+  const entries = Object.entries(opeValue).filter(([k, v]) => !['file_id', 'mime_type'].includes(k) && v !== null && v !== undefined && v !== '')
   if (entries.length === 0) return ''
   return entries.map(([k, v]) => `${k}: ${typeof v === 'string' && v.length > 30 ? v.slice(0, 30) + '...' : v}`).join(', ')
 }
@@ -480,6 +522,20 @@ const stepText = computed(() => isEnglish.value
       checkOption: 'Check (check)',
       uncheckOption: 'Uncheck (uncheck)',
       uploadOption: 'Upload file (upload)',
+      chooseUploadFile: 'Choose file',
+      chooseFromFileManagement: 'Choose from file management',
+      uploadLocalFile: 'Upload local file',
+      searchFilePlaceholder: 'Search file name/type',
+      loadFilesFailed: 'Failed to load files',
+      fileNameColumn: 'File name',
+      fileTypeColumn: 'Type',
+      fileRefsColumn: 'Refs',
+      actionColumn: 'Action',
+      selectFileAction: 'Select',
+      clearUploadFile: 'Clear',
+      uploadSuccess: 'File uploaded',
+      uploadFailed: 'File upload failed',
+      selectProjectFirst: 'Please select a project first',
       gotoOption: 'Navigate to URL (goto)',
       reloadOption: 'Reload page (reload)',
       goBackOption: 'Go back (go_back)',
@@ -580,6 +636,20 @@ const stepText = computed(() => isEnglish.value
       checkOption: '勾选 (check)',
       uncheckOption: '取消勾选 (uncheck)',
       uploadOption: '上传文件 (upload)',
+      chooseUploadFile: '选择文件',
+      chooseFromFileManagement: '文件管理选择',
+      uploadLocalFile: '上传本地文件',
+      searchFilePlaceholder: '搜索文件名/类型',
+      loadFilesFailed: '加载文件失败',
+      fileNameColumn: '文件名',
+      fileTypeColumn: '类型',
+      fileRefsColumn: '引用',
+      actionColumn: '操作',
+      selectFileAction: '选择',
+      clearUploadFile: '清除',
+      uploadSuccess: '文件已上传',
+      uploadFailed: '文件上传失败',
+      selectProjectFirst: '请先选择项目',
       gotoOption: '访问网页 (goto)',
       reloadOption: '刷新页面 (reload)',
       goBackOption: '页面后退 (go_back)',
@@ -688,6 +758,7 @@ const paramLabelMap: Record<string, string> = {
   '选项值': 'Option value',
   '按键值': 'Key value',
   '文件路径': 'File path',
+  '上传文件': 'Upload file',
   '目标 URL': 'Target URL',
   '页签索引或关键字': 'Tab index or keyword',
   '期望文本': 'Expected text',
@@ -706,6 +777,7 @@ const paramPlaceholderMap: Record<string, string> = {
   '请输入要选择的选项值': 'Enter the option value to select',
   '例如 Enter, Tab, Escape 等': 'e.g. Enter, Tab, Escape etc.',
   '请输入要上传的文件绝对路径': 'Enter the absolute path to upload',
+  '请选择要上传的文件': 'Choose a file to upload',
   '请输入完整的网页地址，例如 https://www.google.com': 'Enter full URL, e.g. https://www.google.com',
   '请输入页签索引(从0开始)或URL/标题关键字': 'Enter tab index (0-based) or URL/title keyword',
   '请输入期望的文本内容': 'Enter the expected text',
@@ -760,6 +832,11 @@ const formData = reactive<Partial<UiPageStepsDetailed>>({
 })
 
 const opeParams = reactive<Record<string, any>>({})
+const uploadingFile = ref(false)
+const managedFileChooseVisible = ref(false)
+const managedFileLoading = ref(false)
+const managedFileKeyword = ref('')
+const managedFileOptions = ref<any[]>([])
 const sqlExecuteStr = ref('{}')
 const customStr = ref('{}')
 const conditionValueStr = ref('{}')
@@ -772,6 +849,7 @@ const currentOpeParams = computed(() => {
 /** 操作方法变更时重置参数 */
 const onOpeKeyChange = () => {
   Object.keys(opeParams).forEach(k => delete opeParams[k])
+  uploadingFile.value = false
 }
 
 const rules = {
@@ -1071,6 +1149,84 @@ const parseJson = (str: string, defaultVal: Record<string, unknown> = {}) => {
   }
 }
 
+
+const loadManagedFilesForChoose = async () => {
+  if (!props.pageStep.project) return
+  managedFileLoading.value = true
+  try {
+    const res: any = await fileService.list(props.pageStep.project, {
+      page: 1,
+      page_size: 50,
+      search: managedFileKeyword.value || undefined,
+      ordering: '-created_at',
+    })
+    const payload = res?.data?.data || res?.data || res
+    managedFileOptions.value = Array.isArray(payload) ? payload : (payload.results || payload.data || [])
+  } catch (error: any) {
+    Message.error(error?.message || stepText.value.loadFilesFailed)
+  } finally {
+    managedFileLoading.value = false
+  }
+}
+
+const openManagedFileChoose = async () => {
+  if (!props.pageStep.project) {
+    Message.warning(stepText.value.selectProjectFirst)
+    return
+  }
+  managedFileChooseVisible.value = true
+  await loadManagedFilesForChoose()
+}
+
+const chooseManagedFile = (file: any) => {
+  const fileId = file.file_id || file.id
+  opeParams.file_id = fileId
+  opeParams.file_name = file.name || file.original_name
+  opeParams.mime_type = file.mime_type || ''
+  opeParams.value = `file_id:${fileId}`
+  managedFileChooseVisible.value = false
+}
+
+const openUploadFilePicker = () => {
+  const input = globalThis.document?.getElementById('ui-upload-file-input') as HTMLInputElement | null
+  input?.click()
+}
+
+const handleUploadFileChange = async (event: Event) => {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  if (!props.pageStep.project) {
+    Message.warning(stepText.value.selectProjectFirst)
+    input.value = ''
+    return
+  }
+  uploadingFile.value = true
+  try {
+    const res: any = await fileService.upload(props.pageStep.project, [file])
+    const payload = res?.data?.data || res?.data || res
+    const uploaded = Array.isArray(payload) ? payload[0] : payload
+    const fileId = uploaded.file_id || uploaded.id
+    opeParams.file_id = fileId
+    opeParams.file_name = uploaded.name || uploaded.original_name || file.name
+    opeParams.mime_type = uploaded.mime_type || file.type
+    opeParams.value = `file_id:${fileId}`
+    Message.success(stepText.value.uploadSuccess)
+  } catch (error: any) {
+    Message.error(error?.message || stepText.value.uploadFailed)
+  } finally {
+    uploadingFile.value = false
+    input.value = ''
+  }
+}
+
+const clearUploadFile = () => {
+  delete opeParams.file_id
+  delete opeParams.file_name
+  delete opeParams.mime_type
+  delete opeParams.value
+}
+
 /** 构建 ope_value：从 opeParams 中过滤空值 */
 const buildOpeValue = () => {
   const result: Record<string, any> = {}
@@ -1106,6 +1262,11 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
       done(false)
       return
     }
+  }
+  if (formData.ope_key === 'upload' && !opeParams.file_id) {
+    Message.warning(stepText.value.chooseUploadFile)
+    done(false)
+    return
   }
   submitting.value = true
   try {
@@ -1335,4 +1496,8 @@ onUnmounted(() => {
   gap: 4px;
   flex-shrink: 0;
 }
+
+.hidden-file-input { display: none; }
+.upload-param-row { display: flex; align-items: center; gap: 8px; }
+.managed-file-search { margin-bottom: 12px; }
 </style>

@@ -72,7 +72,10 @@ interface TestReport {
 
 interface CaseResult {
   id: number
-  testcase: number
+  case_type: 'scenario' | 'interface'
+  case_id: number
+  testcase: number | null
+  interface_case?: number | null
   testcase_name: string
   status: string
   start_time: string
@@ -152,6 +155,36 @@ const formatDuration = (seconds: number) => {
     console.error('持续时间格式化错误:', error)
     return '-'
   }
+}
+
+const getCaseTypeText = (caseType: string) => {
+  return caseType === 'interface' ? '接口用例' : '场景用例'
+}
+
+const getCaseStatusText = (status: string) => {
+  const statusMap: Record<string, string> = {
+    success: '成功',
+    fail: '失败',
+    failure: '失败',
+    error: '错误',
+    skipped: '跳过',
+    pending: '等待中',
+    running: '执行中'
+  }
+  return statusMap[status] || '未知'
+}
+
+const getCaseStatusColor = (status: string) => {
+  const colorMap: Record<string, string> = {
+    success: 'green',
+    fail: 'orange',
+    failure: 'orange',
+    error: 'red',
+    skipped: 'gray',
+    pending: 'blue',
+    running: 'arcoblue'
+  }
+  return colorMap[status] || 'gray'
 }
 
 // 展开行渲染函数
@@ -332,6 +365,18 @@ onMounted(() => {
                     :width="80"
                     align="center"
                   />
+                  <a-table-column
+                    title="类型"
+                    data-index="case_type"
+                    :width="110"
+                    align="center"
+                  >
+                    <template #cell="{ record }">
+                      <a-tag :color="record.case_type === 'interface' ? 'arcoblue' : 'purple'">
+                        {{ getCaseTypeText(record.case_type) }}
+                      </a-tag>
+                    </template>
+                  </a-table-column>
                   <a-table-column 
                     title="用例名称" 
                     data-index="testcase_name"
@@ -362,8 +407,8 @@ onMounted(() => {
                     :sort-field="(record: any) => record.status"
                   >
                     <template #cell="{ record }">
-                      <a-tag :color="record.status === 'success' ? 'green' : (record.status === 'fail' || record.status === 'failure') ? 'orange' : 'red'">
-                        {{ record.status === 'success' ? '成功' : (record.status === 'fail' || record.status === 'failure') ? '失败' : '错误' }}
+                      <a-tag :color="getCaseStatusColor(record.status)">
+                        {{ getCaseStatusText(record.status) }}
                       </a-tag>
                     </template>
                   </a-table-column>
@@ -752,4 +797,4 @@ pre {
 :global(.task-case-expand-error-message) {
   color: #dc2626 !important;
 }
-</style> 
+</style>

@@ -28,6 +28,7 @@ from typing import Any
 if getattr(sys, 'frozen', False):
     # 打包后的 exe
     _base_path = Path(sys.executable).parent
+    os.chdir(_base_path)
 else:
     _base_path = Path(__file__).parent
 sys.path.insert(0, str(_base_path))
@@ -45,6 +46,77 @@ except ImportError:
         import tomli as tomllib  # fallback for older Python
     except ImportError:
         tomllib = None
+
+
+def get_resource_path(relative_path: str) -> Path:
+    """获取源码或 PyInstaller onefile 临时目录中的资源路径。"""
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        return Path(sys._MEIPASS) / relative_path
+    return _base_path / relative_path
+
+
+def resolve_config_path(config_path: str) -> Path:
+    """解析配置文件路径；打包后默认落在 exe 同级目录。"""
+    path = Path(config_path)
+    if path.is_absolute():
+        return path
+    if getattr(sys, 'frozen', False):
+        return _base_path / path
+    return path
+
+
+def ensure_config_file(config_path: Path) -> None:
+    """首次启动时生成配置文件。"""
+    if config_path.exists():
+        return
+
+    example_path = get_resource_path('config.example.toml')
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    if example_path.exists():
+        config_path.write_bytes(example_path.read_bytes())
+        return
+
+    config_path.write_text(
+        """# UI自动化执行器配置文件
+
+[server]
+ws_url = "ws://127.0.0.1:8000/ws/ui/actuator/"
+api_url = "http://127.0.0.1:8000"
+use_gui = true
+api_username = "admin"
+api_password = "admin123"
+
+[actuator]
+
+[browser]
+browser_type = "chromium"
+headless = false
+persistent = true
+user_data_dir = "./data/browser"
+launch_timeout = 30
+action_timeout = 30
+
+[execution]
+retry_count = 3
+step_interval = 500
+screenshot_dir = "./data/screenshots"
+max_concurrent = 3
+
+[trace]
+enabled = true
+trace_dir = "./data/traces"
+screenshots = true
+snapshots = true
+sources = false
+
+[logging]
+level = "INFO"
+
+[gui]
+language = "zh"
+""",
+        encoding='utf-8',
+    )
 
 
 class Config:
@@ -179,6 +251,16 @@ def setup_logging(level: str = 'INFO', log_file: str | None = None):
     )
 
 
+def ensure_runtime_dirs(config: Config) -> None:
+    """创建运行时目录。"""
+    for dir_path in (
+        config.user_data_dir,
+        config.screenshot_dir,
+        config.trace_dir,
+    ):
+        Path(dir_path).mkdir(parents=True, exist_ok=True)
+
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='UI自动化执行器')
@@ -232,14 +314,17 @@ def parse_args():
 async def main():
     """主函数"""
     args = parse_args()
-    
+    config_path = resolve_config_path(args.config)
+    ensure_config_file(config_path)
+
     # 加载配置
     config = Config()
-    config.load_from_toml(args.config)
+    config.load_from_toml(str(config_path))
     config.apply_args(args)
-    
+
     # 配置日志
     setup_logging(config.log_level, config.log_file)
+    ensure_runtime_dirs(config)
     logger = logging.getLogger('actuator')
     
     # 检查并安装浏览器（首次运行时需要）
@@ -255,13 +340,13 @@ async def main():
         try:
             from gui import show_login_dialog
         except ImportError as e:
-            logger.error(f"GUI 模式需要安装 PySide6: pip install PySide6")
+            logger.error("GUI 模式需要安装 CustomTkinter: pip install customtkinter")
             logger.error(f"或者设置 use_gui = false 使用配置文件中的账号密码")
             logger.error(f"导入错误: {e}")
             sys.exit(1)
-        
+
         logger.info("启动 GUI 登录窗口...")
-        login_result = show_login_dialog(args.config)
+        login_result = show_login_dialog(str(config_path))
         
         if not login_result:
             logger.info("用户取消登录")
@@ -350,6 +435,8 @@ async def main():
     except Exception as e:
         logger.error(f"执行器异常: {e}", exc_info=True)
     finally:
+        # close_executor already logs failures internally
+        await consumer.close_executor()
         await ws_client.disconnect()
         logger.info("执行器已停止")
 

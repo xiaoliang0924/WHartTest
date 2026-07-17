@@ -98,7 +98,7 @@
       :data="testcaseData"
       :pagination="pagination"
       :loading="loading"
-      :scroll="{ x: 1100 }"
+      :scroll="{ x: 1260 }"
       :row-selection="{ type: 'checkbox', showCheckedAll: true }"
       v-model:selectedKeys="selectedRowKeys"
       row-key="id"
@@ -138,6 +138,10 @@
           <a-button type="text" size="mini" @click="editTestCase(record)">
             <template #icon><icon-edit /></template>
             {{ pageText.edit }}
+          </a-button>
+          <a-button type="text" size="mini" @click="copyTestCase(record)">
+            <template #icon><icon-copy /></template>
+            {{ pageText.copy }}
           </a-button>
           <a-popconfirm :content="pageText.deleteCaseConfirm" @ok="deleteTestCase(record)">
             <a-button type="text" status="danger" size="mini">
@@ -185,7 +189,15 @@
         <a-form-item field="description" :label="pageText.caseDescription">
           <a-textarea v-model="formData.description" :placeholder="pageText.enterCaseDescription" :auto-size="{ minRows: 2, maxRows: 4 }" />
         </a-form-item>
-      </a-form>
+      
+          <a-form-item label="附件">
+            <FileAttachmentPicker
+              v-model="formData.file_ids"
+              :project-id="projectStore.currentProjectId || 0"
+              button-text="上传附件"
+            />
+          </a-form-item>
+</a-form>
     </a-modal>
 
     <!-- 步骤管理抽屉 -->
@@ -201,9 +213,10 @@
 </template>
 
 <script setup lang="ts">
+import FileAttachmentPicker from '@/features/file-management/components/FileAttachmentPicker.vue'
 import { ref, reactive, computed, onMounted, watch, onUnmounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
-import { IconPlus, IconEdit, IconDelete, IconOrderedList, IconPlayArrow, IconThunderbolt } from '@arco-design/web-vue/es/icon'
+import { IconPlus, IconEdit, IconDelete, IconOrderedList, IconPlayArrow, IconThunderbolt, IconCopy } from '@arco-design/web-vue/es/icon'
 import { useProjectStore } from '@/store/projectStore'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { testCaseApi, moduleApi, actuatorApi, envConfigApi, type ActuatorInfo } from '../api'
@@ -241,6 +254,7 @@ const pageText = computed(() => (
         running: 'Running',
         edit: 'Edit',
         delete: 'Delete',
+        copy: 'Copy',
         deleteCaseConfirm: 'Delete this case?',
         editCase: 'Edit case',
         module: 'Module',
@@ -269,6 +283,8 @@ const pageText = computed(() => (
         createFailed: 'Creation failed',
         deleteSuccess: 'Deleted successfully',
         deleteFailed: 'Delete failed',
+        copySuccess: 'Copied successfully',
+        copyFailed: 'Copy failed',
         noActuatorAvailable: 'No actuator is available. Start the actuator service first.',
         selectOnlineActuator: 'Select an online actuator',
         websocketConnectFailed: 'WebSocket connection failed',
@@ -306,6 +322,7 @@ const pageText = computed(() => (
         running: '执行中',
         edit: '编辑',
         delete: '删除',
+        copy: '复制',
         deleteCaseConfirm: '确定删除该用例？',
         editCase: '编辑用例',
         module: '所属模块',
@@ -334,6 +351,8 @@ const pageText = computed(() => (
         createFailed: '创建失败',
         deleteSuccess: '删除成功',
         deleteFailed: '删除失败',
+        copySuccess: '复制成功',
+        copyFailed: '复制失败',
         noActuatorAvailable: '没有可用的执行器，请先启动执行器服务',
         selectOnlineActuator: '请选择一个在线的执行器',
         websocketConnectFailed: 'WebSocket 连接失败',
@@ -382,6 +401,7 @@ const filters = reactive({
 const pagination = reactive({ current: 1, pageSize: 10, total: 0, showTotal: true, showPageSize: true })
 
 const formData = reactive<UiTestCaseForm>({
+  file_ids: [],
   project: 0,
   module: undefined as unknown as number,
   name: '',
@@ -412,7 +432,7 @@ const columns = computed(() => [
   { title: pageText.value.tableStepCount, slotName: 'step_count', width: 110, align: 'center' as const },
   { title: pageText.value.tableCreatedBy, dataIndex: 'creator_name', width: 110, align: 'center' as const },
   { title: pageText.value.tableCreatedAt, slotName: 'created_at', width: 180, align: 'center' as const },
-  { title: pageText.value.tableActions, slotName: 'operations', width: isEnglish.value ? 340 : 290, fixed: 'right' as const, align: 'center' as const },
+  { title: pageText.value.tableActions, slotName: 'operations', width: isEnglish.value ? 440 : 360, fixed: 'right' as const, align: 'center' as const },
 ])
 
 const levelOptions = computed(() => (
@@ -618,6 +638,20 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
 
 const handleCancel = () => {
   modalVisible.value = false
+}
+
+const copyTestCase = async (record: UiTestCase) => {
+  try {
+    loading.value = true
+    await testCaseApi.copy(record.id)
+    Message.success(pageText.value.copySuccess)
+    fetchTestCases()
+  } catch (error: unknown) {
+    const err = error as { error?: string }
+    Message.error(err?.error || pageText.value.copyFailed)
+  } finally {
+    loading.value = false
+  }
 }
 
 const deleteTestCase = async (record: UiTestCase) => {

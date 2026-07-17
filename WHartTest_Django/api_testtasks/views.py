@@ -41,7 +41,12 @@ class ApiTestTaskSuiteViewSet(BaseModelViewSet):
         project_pk = self.kwargs.get('project_pk')
         return ApiTestTaskSuite.objects.filter(
             project_id=project_pk
-        ).prefetch_related('api_task_cases', 'api_task_cases__testcase')
+        ).prefetch_related(
+            'api_task_cases',
+            'api_task_cases__testcase',
+            'api_task_cases__interface_case',
+            'api_task_cases__interface_case__interface',
+        )
 
     def perform_create(self, serializer):
         from projects.models import Project
@@ -58,11 +63,38 @@ class ApiTestTaskSuiteViewSet(BaseModelViewSet):
         )
         serializer.is_valid(raise_exception=True)
 
-        testcase_ids = serializer.validated_data['testcase_ids']
-        task_cases = ApiTestTaskService.add_testcases(task_suite, testcase_ids, project_pk)
+        testcase_ids = serializer.validated_data.get('testcase_ids', [])
+        interface_case_ids = serializer.validated_data.get('interface_case_ids', [])
+        task_cases = ApiTestTaskService.add_cases(
+            task_suite,
+            testcase_ids=testcase_ids,
+            interface_case_ids=interface_case_ids,
+            project_pk=project_pk,
+        )
 
         result_serializer = ApiTestTaskCaseSimpleSerializer(task_cases, many=True)
         return Response(result_serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(
+        detail=True,
+        methods=['delete'],
+        url_path='remove-case/(?P<case_type>[^/.]+)/(?P<case_id>[^/.]+)',
+    )
+    def remove_case(self, request, case_type=None, case_id=None, *args, **kwargs):
+        task_suite = self.get_object()
+        if case_type not in ['scenario', 'interface']:
+            return Response(
+                {'detail': 'Case type must be scenario or interface.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        success = ApiTestTaskService.remove_case(task_suite, case_type, case_id)
+        if success:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response(
+            {'detail': 'Case not found in this suite.'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
     @action(
         detail=True,
@@ -92,6 +124,16 @@ class ApiTestTaskExecutionViewSet(BaseModelViewSet):
         project_pk = self.kwargs.get('project_pk')
         queryset = ApiTestTaskExecution.objects.filter(
             task_suite__project_id=project_pk,
+        ).select_related(
+            'task_suite',
+            'environment',
+            'executed_by',
+        ).prefetch_related(
+            'api_case_results',
+            'api_case_results__testcase',
+            'api_case_results__interface_case',
+            'api_case_results__report',
+            'api_case_results__interface_report',
         )
         task_suite_id = self.request.query_params.get('task_suite_id')
         if task_suite_id:

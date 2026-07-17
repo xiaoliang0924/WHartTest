@@ -155,7 +155,7 @@ onMounted(() => {
       :model-value="modelValue"
       @update:model-value="val => emit('update:modelValue', val)"
       placeholder="选择分组"
-      class="!w-60"
+      class="group-manager-select"
       :disabled="readonly"
       :loading="groupLoading"
       :fallback-option="false"
@@ -383,6 +383,9 @@ onMounted(() => {
 <style scoped>
 .empty-text {
   color: var(--color-text-3);
+}
+.group-manager-select {
+  width: var(--testcase-group-select-width, 240px);
 }
 .expand-icon {
   color: var(--color-text-3) !important;

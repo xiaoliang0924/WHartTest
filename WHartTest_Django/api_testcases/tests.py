@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -12,9 +13,11 @@ from api_interfaces.models import ApiInterface
 from .models import (
     ApiTestCaseTag, ApiTestCaseGroup, ApiTestCase,
     ApiTestCaseStep, ApiTestReport, ApiTestReportDetail,
+    ApiInterfaceCase, ApiInterfaceCaseStep,
+    ApiInterfaceCaseReport, ApiInterfaceCaseReportDetail,
 )
 from .runner import TestCaseRunner
-from .services import TestCaseService, TestExecutionService
+from .services import TestCaseService, TestExecutionService, InterfaceCaseExecutionService
 
 
 def _grant_model_perms(user, model_class):
@@ -29,6 +32,8 @@ def _grant_all_testcase_perms(user):
     for model_cls in [
         ApiTestCaseTag, ApiTestCaseGroup, ApiTestCase,
         ApiTestCaseStep, ApiTestReport, ApiTestReportDetail,
+        ApiInterfaceCase, ApiInterfaceCaseStep,
+        ApiInterfaceCaseReport, ApiInterfaceCaseReportDetail,
     ]:
         _grant_model_perms(user, model_cls)
     _grant_model_perms(user, ApiInterface)
@@ -683,6 +688,38 @@ class TestExecutionConfigSslTest(TestCase):
 
         self.assertTrue(runner.config.struct().verify)
         mock_test_start.assert_called_once()
+
+    @patch('api_testcases.runner.TestCaseRunner.test_start')
+    def test_runner_preserves_validator_expected_value_type_meta(self, mock_test_start):
+        testcase = ApiTestCase.objects.create(
+            name='Validator Meta Test',
+            project=self.project,
+            created_by=self.user,
+            config={},
+        )
+        ApiTestCaseStep.objects.create(
+            name='Step 1',
+            order=1,
+            interface_data={
+                'method': 'GET',
+                'url': '/oauth/token',
+                'validators': [{
+                    'gt': ['body.count', '${min_count}'],
+                    '__expected_value_type': 'number',
+                }],
+            },
+            testcase=testcase,
+        )
+
+        runner = TestCaseRunner(testcase)
+
+        self.assertEqual(
+            runner.teststeps[0].struct().validators,
+            [{
+                'gt': ['body.count', '${min_count}'],
+                '__expected_value_type': 'number',
+            }],
+        )
 
 
 class TestCaseRunnerSummaryTest(TestCase):
@@ -1929,6 +1966,94 @@ class TestExecutionServiceTest(TestCase):
         self.assertEqual(stats['success_rate'], '100.00%')
 
 
+class TestExecutionServiceBinaryResponseTest(TestCase):
+    """Binary response persistence tests for API testcase execution."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='binaryuser', password='testpass')
+        self.project = Project.objects.create(name='Binary Project', creator=self.user)
+
+    @patch('api_testcases.services.TestCaseRunner')
+    def test_run_testcase_persists_binary_response_summary(self, mock_runner_class):
+        testcase = ApiTestCase.objects.create(
+            name='Export Test', project=self.project, created_by=self.user,
+        )
+        step = ApiTestCaseStep.objects.create(
+            name='Export Step',
+            order=1,
+            interface_data={'method': 'GET', 'url': '/export'},
+            testcase=testcase,
+        )
+
+        binary_body = {
+            'type': 'binary',
+            'binary': True,
+            'omitted': True,
+            'message': 'Binary response body omitted from execution report.',
+            'content_type': (
+                'application/vnd.openxmlformats-officedocument.'
+                'spreadsheetml.sheet'
+            ),
+            'content_length': 27,
+            'sha256': 'ec87bf8d16798a742b068101b3e49f5daa206ee3cee6f7d29234b81df367d1a0',
+            'preview_hex': '504b030414000000080066616b652d786c7378',
+            'filename': 'report.xlsx',
+        }
+        step_results = [{
+            'name': step.name,
+            'success': True,
+            'elapsed': 0.12,
+            'step_type': 'request',
+            'data': {
+                'request': {
+                    'method': 'GET',
+                    'url': 'http://example.com/export',
+                    'headers': {},
+                    'body': None,
+                },
+                'response': {
+                    'status_code': 200,
+                    'headers': {
+                        'Content-Type': binary_body['content_type'],
+                        'Content-Disposition': 'attachment; filename=report.xlsx',
+                    },
+                    'body': binary_body,
+                    'content_size': 27,
+                    'response_time_ms': 120,
+                },
+                'validators': {
+                    'success': True,
+                    'validate_extractor': [{'check_result': 'pass'}],
+                },
+                'extracted_variables': {},
+            },
+            'attachment': '',
+        }]
+        summary = {
+            'success': True,
+            'name': testcase.name,
+            'time': {'start_at': '2026-07-08T00:00:00', 'duration': 0.12},
+            'in_out': {'config_vars': {}, 'export_vars': {}},
+            'log': '',
+            'step_results': step_results,
+        }
+
+        mock_runner = MagicMock()
+        mock_runner.run_testcase.return_value = mock_runner
+        mock_runner.get_summary.return_value = summary
+        mock_runner.get_step_results.return_value = step_results
+        mock_runner_class.return_value = mock_runner
+
+        report = TestExecutionService.run_testcase(testcase, user=self.user)
+        detail = report.details.get()
+
+        self.assertEqual(report.status, 'success')
+        self.assertTrue(detail.response['body']['binary'])
+        self.assertEqual(detail.response['body']['filename'], 'report.xlsx')
+        self.assertNotIn('\x00', json.dumps(report.summary, ensure_ascii=False))
+        self.assertNotIn('\x00', json.dumps(detail.response, ensure_ascii=False))
+
+
 class ApiTestCaseFilterTest(TestCase):
     """ApiTestCase 过滤和搜索测试"""
 
@@ -1999,3 +2124,228 @@ class ApiTestCaseFilterTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         results = response.data.get('results', response.data)
         self.assertGreaterEqual(len(results), 2)
+
+
+class ApiInterfaceCaseAPITest(TestCase):
+    """ApiInterfaceCase API tests."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username='interfacecaseuser', password='testpass')
+        self.project = Project.objects.create(name='Interface Case Project', creator=self.user)
+        ProjectMember.objects.create(project=self.project, user=self.user, role='admin')
+        _grant_all_testcase_perms(self.user)
+        self.client.force_authenticate(user=self.user)
+        self.base_url = f'/api/projects/{self.project.pk}/api-interface-cases/'
+
+        self.login_interface = ApiInterface.objects.create(
+            name='Login API',
+            type='http',
+            method='POST',
+            url='/login',
+            headers=[],
+            params=[],
+            body={'type': 'raw', 'content': '{"username":"demo"}'},
+            extract={'token': 'body.token'},
+            extract_meta={'token': {'variable_type': 'temporary'}},
+            validators=[],
+            project=self.project,
+            created_by=self.user,
+        )
+        self.target_interface = ApiInterface.objects.create(
+            name='Profile API',
+            type='http',
+            method='GET',
+            url='/profile',
+            headers=[{'key': 'Authorization', 'value': 'Bearer $token', 'enabled': True}],
+            params=[],
+            body={'type': 'none', 'content': None},
+            validators=[],
+            project=self.project,
+            created_by=self.user,
+        )
+
+    def test_create_interface_case_creates_precondition_and_main_steps(self):
+        data = {
+            'name': 'Profile happy path',
+            'description': 'single interface case with login precondition',
+            'priority': 'P1',
+            'interface_id': self.target_interface.pk,
+            'steps_info': [
+                {
+                    'name': 'Login precondition',
+                    'role': 'precondition',
+                    'order': 1,
+                    'interface_id': self.login_interface.pk,
+                    'interface_data': {
+                        'extract': {'token': 'body.data.token'},
+                        'extract_meta': {'token': {'variable_type': 'temporary'}},
+                    },
+                }
+            ],
+        }
+
+        response = self.client.post(self.base_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        interface_case = ApiInterfaceCase.objects.get(name='Profile happy path')
+        self.assertEqual(interface_case.interface, self.target_interface)
+        steps = list(interface_case.steps.order_by('order'))
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(steps[0].role, ApiInterfaceCaseStep.ROLE_PRECONDITION)
+        self.assertEqual(steps[0].origin_interface, self.login_interface)
+        self.assertEqual(steps[0].interface_data['extract']['token'], 'body.data.token')
+        self.assertEqual(steps[1].role, ApiInterfaceCaseStep.ROLE_MAIN)
+        self.assertEqual(steps[1].origin_interface, self.target_interface)
+        self.assertEqual(response.data['precondition_count'], 1)
+
+    def test_filter_interface_cases_by_interface_id(self):
+        case = ApiInterfaceCase.objects.create(
+            name='Profile filter case',
+            project=self.project,
+            interface=self.target_interface,
+            created_by=self.user,
+        )
+        ApiInterfaceCaseStep.objects.create(
+            interface_case=case,
+            name='Main',
+            role=ApiInterfaceCaseStep.ROLE_MAIN,
+            order=1,
+            origin_interface=self.target_interface,
+            interface_data=self.target_interface.get_interface_data(),
+        )
+        other_interface = ApiInterface.objects.create(
+            name='Other API',
+            type='http',
+            method='GET',
+            url='/other',
+            project=self.project,
+            created_by=self.user,
+        )
+        other_case = ApiInterfaceCase.objects.create(
+            name='Other filter case',
+            project=self.project,
+            interface=other_interface,
+            created_by=self.user,
+        )
+        ApiInterfaceCaseStep.objects.create(
+            interface_case=other_case,
+            name='Main',
+            role=ApiInterfaceCaseStep.ROLE_MAIN,
+            order=1,
+            origin_interface=other_interface,
+            interface_data=other_interface.get_interface_data(),
+        )
+
+        response = self.client.get(f'{self.base_url}?interface_id={self.target_interface.pk}')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data.get('results', response.data)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['name'], 'Profile filter case')
+
+    @patch('api_testcases.services.TestCaseRunner')
+    def test_run_interface_case_records_precondition_extract_variables(self, mock_runner_class):
+        environment = ApiEnvironment.objects.create(
+            name='Interface Case Env',
+            base_url='http://example.com',
+            project=self.project,
+            created_by=self.user,
+        )
+        interface_case = ApiInterfaceCase.objects.create(
+            name='Profile with token',
+            project=self.project,
+            interface=self.target_interface,
+            created_by=self.user,
+        )
+        precondition = ApiInterfaceCaseStep.objects.create(
+            interface_case=interface_case,
+            name='Login precondition',
+            role=ApiInterfaceCaseStep.ROLE_PRECONDITION,
+            order=1,
+            origin_interface=self.login_interface,
+            interface_data={
+                'method': 'POST',
+                'url': '/login',
+                'extract': {'token': 'body.data.token'},
+                'extract_meta': {'token': {'variable_type': 'project'}},
+            },
+        )
+        main_step = ApiInterfaceCaseStep.objects.create(
+            interface_case=interface_case,
+            name='Profile main',
+            role=ApiInterfaceCaseStep.ROLE_MAIN,
+            order=2,
+            origin_interface=self.target_interface,
+            interface_data={
+                'method': 'GET',
+                'url': '/profile',
+                'headers': [{'key': 'Authorization', 'value': 'Bearer $token', 'enabled': True}],
+            },
+        )
+        step_results = [
+            {
+                'name': precondition.name,
+                'success': True,
+                'elapsed': 0.1,
+                'step_type': 'request',
+                'data': {
+                    'request': {'method': 'POST', 'url': 'http://example.com/login'},
+                    'response': {'status_code': 200, 'headers': {}, 'body': {'token': 'abc123'}},
+                    'validators': {'success': True},
+                    'extracted_variables': {'token': 'abc123'},
+                },
+                'attachment': '',
+            },
+            {
+                'name': main_step.name,
+                'success': True,
+                'elapsed': 0.08,
+                'step_type': 'request',
+                'data': {
+                    'request': {
+                        'method': 'GET',
+                        'url': 'http://example.com/profile',
+                        'headers': {'Authorization': 'Bearer abc123'},
+                    },
+                    'response': {'status_code': 200, 'headers': {}, 'body': {'id': 1}},
+                    'validators': {'success': True},
+                    'extracted_variables': {},
+                },
+                'attachment': '',
+            },
+        ]
+        summary = {
+            'success': True,
+            'name': interface_case.name,
+            'time': {'start_at': '2026-07-06T00:00:00', 'duration': 0.18},
+            'in_out': {'config_vars': {}, 'export_vars': {'token': 'abc123'}},
+            'log': '',
+            'step_results': step_results,
+        }
+
+        mock_runner = MagicMock()
+        mock_runner.trace_id = 'tc-interface-case-test'
+        mock_runner.run_testcase.return_value = mock_runner
+        mock_runner.get_summary.return_value = summary
+        mock_runner.get_step_results.return_value = step_results
+        mock_runner_class.return_value = mock_runner
+
+        report = InterfaceCaseExecutionService.run_interface_case(
+            interface_case,
+            environment={
+                'id': environment.id,
+                'base_url': environment.base_url,
+                'verify_ssl': True,
+                'variables': {},
+            },
+            user=self.user,
+        )
+
+        variable = ApiEnvironmentVariable.objects.get(environment=environment, name='token')
+        self.assertEqual(variable.value, 'abc123')
+        self.assertEqual(report.summary['extract_persistence']['created_count'], 1)
+        details = list(report.details.order_by('id'))
+        self.assertEqual(len(details), 2)
+        self.assertEqual(details[0].step, precondition)
+        self.assertEqual(details[0].extracted_variables['token'], 'abc123')
+        self.assertEqual(details[1].step, main_step)

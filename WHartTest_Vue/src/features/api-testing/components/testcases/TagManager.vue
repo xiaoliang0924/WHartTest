@@ -145,7 +145,7 @@ onMounted(() => {
       :model-value="modelValue"
       @update:model-value="val => emit('update:modelValue', val)"
       placeholder="选择标签"
-      class="!w-60"
+      class="tag-manager-select"
       :disabled="readonly"
       :loading="tagLoading"
       multiple
@@ -252,6 +252,9 @@ onMounted(() => {
 <style scoped>
 .empty-text {
   color: var(--color-text-3);
+}
+.tag-manager-select {
+  width: var(--testcase-tag-select-width, 240px);
 }
 .stat-count {
   color: var(--color-text-3);

@@ -17,15 +17,18 @@ from wharttest_django.api_permissions import IsProjectMemberForResource
 
 from .models import (
     ApiTestCase, ApiTestCaseStep, ApiTestReport, ApiTestReportDetail,
-    ApiTestCaseTag, ApiTestCaseGroup
+    ApiTestCaseTag, ApiTestCaseGroup,
+    ApiInterfaceCase, ApiInterfaceCaseStep, ApiInterfaceCaseReport
 )
 from .serializers import (
     ApiTestCaseSerializer, ApiTestCaseStepSerializer,
     ApiTestReportSerializer, ApiTestReportDetailSerializer,
     ApiTestCaseTagSerializer, ApiTestCaseGroupSerializer,
-    InterfaceOptionSerializer, ApiTestReportListSerializer
+    InterfaceOptionSerializer, ApiTestReportListSerializer,
+    ApiInterfaceCaseSerializer, ApiInterfaceCaseStepSerializer,
+    ApiInterfaceCaseReportSerializer, ApiInterfaceCaseReportListSerializer
 )
-from .services import TestCaseService, TestExecutionService
+from .services import TestCaseService, TestExecutionService, InterfaceCaseExecutionService
 
 
 class ApiTestCaseFilter(django_filters.FilterSet):
@@ -54,6 +57,34 @@ class ApiTestCaseFilter(django_filters.FilterSet):
         }
 
 
+class ApiInterfaceCaseFilter(django_filters.FilterSet):
+    name = django_filters.CharFilter(lookup_expr='icontains')
+    description = django_filters.CharFilter(lookup_expr='icontains')
+    interface_id = django_filters.NumberFilter(field_name='interface_id')
+    tags = django_filters.ModelMultipleChoiceFilter(
+        field_name='tags',
+        queryset=ApiTestCaseTag.objects.all(),
+        conjoined=False
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.request:
+            project_pk = self.request.parser_context.get('kwargs', {}).get('project_pk')
+            if project_pk:
+                self.filters['tags'].queryset = ApiTestCaseTag.objects.filter(
+                    project_id=project_pk
+                )
+
+    class Meta:
+        model = ApiInterfaceCase
+        fields = {
+            'priority': ['exact'],
+            'group': ['exact'],
+            'interface': ['exact'],
+        }
+
+
 class ApiTestReportFilter(django_filters.FilterSet):
     project = django_filters.NumberFilter(field_name='testcase__project')
     project_id = django_filters.NumberFilter(field_name='testcase__project')
@@ -66,6 +97,21 @@ class ApiTestReportFilter(django_filters.FilterSet):
             'environment': ['exact'],
             'executed_by': ['exact'],
             'testcase__project': ['exact']
+        }
+
+
+class ApiInterfaceCaseReportFilter(django_filters.FilterSet):
+    project = django_filters.NumberFilter(field_name='interface_case__project')
+    project_id = django_filters.NumberFilter(field_name='interface_case__project')
+
+    class Meta:
+        model = ApiInterfaceCaseReport
+        fields = {
+            'status': ['exact'],
+            'interface_case': ['exact'],
+            'environment': ['exact'],
+            'executed_by': ['exact'],
+            'interface_case__project': ['exact'],
         }
 
 
@@ -231,23 +277,42 @@ class ApiTestCaseViewSet(BaseModelViewSet):
 
     @action(detail=True, methods=['post'])
     def copy(self, request, pk=None, **kwargs):
-        testcase = self.get_object()
+        source = self.get_object()
+        project_pk = self.kwargs.get('project_pk')
 
         with transaction.atomic():
-            original_pk = testcase.pk
-            testcase.pk = None
-            testcase.name = f"{testcase.name}_copy"
-            testcase.created_by = request.user
-            testcase.save()
+            base_name = request.data.get('name') or f"{source.name}_copy"
+            candidate_name = base_name
+            suffix = 2
+            while ApiTestCase.objects.filter(project_id=project_pk, name=candidate_name).exists():
+                candidate_name = f"{base_name}{suffix}"
+                suffix += 1
 
-            original = ApiTestCase.objects.get(pk=original_pk)
-            testcase.tags.set(original.tags.all())
+            testcase = ApiTestCase.objects.create(
+                name=candidate_name,
+                description=source.description,
+                priority=source.priority,
+                config=source.config,
+                file_ids=source.file_ids,
+                project=source.project,
+                group=source.group,
+                created_by=request.user,
+            )
+            testcase.tags.set(source.tags.all())
 
-            steps = ApiTestCaseStep.objects.filter(testcase_id=original_pk)
+            steps = ApiTestCaseStep.objects.filter(testcase=source).order_by('order')
             for step in steps:
-                step.pk = None
-                step.testcase = testcase
-                step.save()
+                ApiTestCaseStep.objects.create(
+                    name=step.name,
+                    order=step.order,
+                    interface_data=step.interface_data,
+                    config=step.config,
+                    file_ids=step.file_ids,
+                    testcase=testcase,
+                    origin_interface=step.origin_interface,
+                    sync_fields=step.sync_fields,
+                    last_sync_time=step.last_sync_time,
+                )
 
         serializer = self.get_serializer(testcase)
         return Response(serializer.data)
@@ -545,6 +610,156 @@ class ApiTestCaseViewSet(BaseModelViewSet):
             )
 
 
+class ApiInterfaceCaseViewSet(BaseModelViewSet):
+    queryset = ApiInterfaceCase.objects.all()
+    serializer_class = ApiInterfaceCaseSerializer
+    pagination_class = StandardPagination
+    filterset_class = ApiInterfaceCaseFilter
+    ordering_fields = ['created_at', 'updated_at']
+    ordering = ['-created_at']
+
+    def get_permissions(self):
+        return [IsAuthenticated(), HasModelPermission(), IsProjectMemberForResource()]
+
+    def get_queryset(self):
+        project_pk = self.kwargs.get('project_pk')
+        queryset = ApiInterfaceCase.objects.filter(project_id=project_pk).select_related(
+            'interface', 'interface__module', 'group', 'created_by'
+        ).prefetch_related('tags', 'steps', 'steps__origin_interface')
+
+        interface_id = self.request.query_params.get('interface_id')
+        if interface_id:
+            queryset = queryset.filter(interface_id=interface_id)
+
+        module_id = self.request.query_params.get('module_id')
+        if module_id:
+            queryset = queryset.filter(interface__module_id=module_id)
+
+        no_module = self.request.query_params.get('no_module')
+        if no_module and no_module.lower() in ('true', '1', 'yes'):
+            queryset = queryset.filter(interface__module__isnull=True)
+
+        return queryset
+
+    def perform_create(self, serializer):
+        from projects.models import Project
+        project = get_object_or_404(Project, pk=self.kwargs.get('project_pk'))
+        serializer.save(created_by=self.request.user, project=project)
+
+    @action(detail=True, methods=['post'])
+    def copy(self, request, pk=None, **kwargs):
+        source = self.get_object()
+        project_pk = self.kwargs.get('project_pk')
+
+        with transaction.atomic():
+            base_name = request.data.get('name') or f"{source.name}_copy"
+            candidate_name = base_name
+            suffix = 2
+            while ApiInterfaceCase.objects.filter(project_id=project_pk, name=candidate_name).exists():
+                candidate_name = f"{base_name}{suffix}"
+                suffix += 1
+
+            interface_case = ApiInterfaceCase.objects.create(
+                name=candidate_name,
+                description=source.description,
+                priority=source.priority,
+                config=source.config,
+                file_ids=source.file_ids,
+                project=source.project,
+                interface=source.interface,
+                group=source.group,
+                created_by=request.user,
+            )
+            interface_case.tags.set(source.tags.all())
+
+            steps = ApiInterfaceCaseStep.objects.filter(interface_case=source).order_by('order')
+            for step in steps:
+                ApiInterfaceCaseStep.objects.create(
+                    name=step.name,
+                    role=step.role,
+                    order=step.order,
+                    interface_data=step.interface_data,
+                    config=step.config,
+                    file_ids=step.file_ids,
+                    interface_case=interface_case,
+                    origin_interface=step.origin_interface,
+                    sync_fields=step.sync_fields,
+                    last_sync_time=step.last_sync_time,
+                )
+
+        serializer = self.get_serializer(interface_case)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def run(self, request, pk=None, **kwargs):
+        interface_case = self.get_object()
+        environment_id = request.data.get('environment_id') or request.data.get('environment')
+
+        environment_config = None
+        if environment_id is not None:
+            try:
+                from api_environments.models import ApiEnvironment
+                project_pk = self.kwargs.get('project_pk')
+                env = ApiEnvironment.objects.get(id=environment_id, project_id=project_pk)
+                environment_config = {
+                    'id': env.id,
+                    'base_url': env.base_url,
+                    'verify_ssl': env.verify_ssl,
+                    'variables': env.get_all_variables()
+                }
+                db_config = env.get_database_config()
+                if db_config:
+                    environment_config['db_config'] = _database_config_payload(db_config)
+            except Exception:
+                return Response(
+                    {'detail': f'Environment ID {environment_id} not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+        try:
+            report = InterfaceCaseExecutionService.run_interface_case(
+                interface_case=interface_case,
+                environment=environment_config,
+                user=request.user,
+            )
+
+            extract_persistence = {}
+            if isinstance(getattr(report, 'summary', None), dict):
+                extract_persistence = report.summary.get('extract_persistence', {})
+
+            return Response({
+                'report_id': report.id,
+                'status': report.status,
+                'success_count': report.success_count,
+                'fail_count': report.fail_count,
+                'error_count': report.error_count,
+                'duration': report.duration,
+                'config': environment_config,
+                'extract_persistence': extract_persistence,
+            })
+
+        except Exception as e:
+            return Response(
+                {'detail': f'Interface case execution failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True)
+    def history_reports(self, request, pk=None, **kwargs):
+        interface_case = self.get_object()
+        reports = interface_case.api_reports.all().select_related(
+            'interface_case', 'interface_case__interface', 'environment', 'executed_by'
+        ).order_by('-start_time')
+
+        page = self.paginate_queryset(reports)
+        if page is not None:
+            serializer = ApiInterfaceCaseReportListSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = ApiInterfaceCaseReportListSerializer(reports, many=True)
+        return Response(serializer.data)
+
+
 class ApiTestReportViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = ApiTestReport.objects.all()
     serializer_class = ApiTestReportSerializer
@@ -574,4 +789,38 @@ class ApiTestReportViewSet(viewsets.ReadOnlyModelViewSet):
 
         return queryset.select_related(
             'testcase', 'environment', 'environment__project', 'executed_by'
+        ).prefetch_related('details', 'details__step')
+
+
+class ApiInterfaceCaseReportViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = ApiInterfaceCaseReport.objects.all()
+    serializer_class = ApiInterfaceCaseReportSerializer
+    pagination_class = StandardPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_class = ApiInterfaceCaseReportFilter
+    search_fields = ['name', 'interface_case__name', 'interface_case__interface__name']
+    ordering_fields = ['start_time', 'duration', 'success_count', 'fail_count', 'error_count']
+    ordering = ['-start_time']
+
+    def get_permissions(self):
+        return [IsAuthenticated(), HasModelPermission(), IsProjectMemberForResource()]
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return ApiInterfaceCaseReportListSerializer
+        return ApiInterfaceCaseReportSerializer
+
+    def get_queryset(self):
+        project_pk = self.kwargs.get('project_pk')
+        queryset = ApiInterfaceCaseReport.objects.filter(interface_case__project_id=project_pk)
+
+        if self.action == 'list':
+            return queryset.select_related(
+                'interface_case', 'interface_case__interface',
+                'environment', 'executed_by'
+            )
+
+        return queryset.select_related(
+            'interface_case', 'interface_case__interface',
+            'environment', 'environment__project', 'executed_by'
         ).prefetch_related('details', 'details__step')

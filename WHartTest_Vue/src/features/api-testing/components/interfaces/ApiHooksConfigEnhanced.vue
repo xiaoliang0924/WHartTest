@@ -271,8 +271,6 @@ watch(() => projectStore.currentProjectId, () => {
 
 // 监听 hooks 变化
 watch(() => props.hooks, (newHooks) => {
-  console.log('钩子数据变化:', newHooks);
-
   if (newHooks && newHooks.length > 0) {
     // 确保函数列表已加载
     if (state.value.functions.length === 0) {
@@ -644,7 +642,6 @@ const handleSqlEditorConfirm = (value: any) => {
 // SQL编辑器值（添加计算属性，避免类型错误）
 const sqlEditorValue = computed({
   get: () => {
-    console.log('获取编辑器值:', state.value.editingSqlHook);
     return state.value.editingSqlHook || '';
   },
   set: (val) => {

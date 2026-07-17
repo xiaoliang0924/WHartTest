@@ -65,6 +65,10 @@
             <template #icon><icon-edit /></template>
             {{ pageText.edit }}
           </a-button>
+          <a-button type="text" size="mini" @click="copyPageStep(record)">
+            <template #icon><icon-copy /></template>
+            {{ pageText.copy }}
+          </a-button>
           <a-popconfirm :content="pageText.deleteStepConfirm" @ok="deletePageStep(record)">
             <a-button type="text" status="danger" size="mini">
               <template #icon><icon-delete /></template>
@@ -110,7 +114,15 @@
         <a-form-item field="description" :label="pageText.description">
           <a-textarea v-model="formData.description" :placeholder="pageText.enterDescription" :auto-size="{ minRows: 2 }" />
         </a-form-item>
-      </a-form>
+      
+          <a-form-item label="附件">
+            <FileAttachmentPicker
+              v-model="formData.file_ids"
+              :project-id="projectStore.currentProjectId || 0"
+              button-text="上传附件"
+            />
+          </a-form-item>
+</a-form>
     </a-modal>
 
     <!-- 步骤详情抽屉 -->
@@ -126,9 +138,10 @@
 </template>
 
 <script setup lang="ts">
+import FileAttachmentPicker from '@/features/file-management/components/FileAttachmentPicker.vue'
 import { ref, reactive, computed, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
-import { IconPlus, IconEdit, IconDelete, IconSettings } from '@arco-design/web-vue/es/icon'
+import { IconPlus, IconEdit, IconDelete, IconSettings, IconCopy } from '@arco-design/web-vue/es/icon'
 import { useProjectStore } from '@/store/projectStore'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { pageStepsApi, pageApi, moduleApi } from '../api'
@@ -153,6 +166,7 @@ const pageText = computed(() => (
         manageStepDetails: 'Add step',
         edit: 'Edit',
         delete: 'Delete',
+        copy: 'Copy',
         deleteStepConfirm: 'Delete this step?',
         editPageStep: 'Edit page step',
         addPageStep: 'Create page step',
@@ -182,6 +196,8 @@ const pageText = computed(() => (
         createFailed: 'Creation failed',
         deleteSuccess: 'Deleted successfully',
         deleteBlocked: 'Linked data prevents deletion. Remove the associations first',
+        copySuccess: 'Copied successfully',
+        copyFailed: 'Copy failed',
       }
     : {
         selectPage: '选择页面',
@@ -190,6 +206,7 @@ const pageText = computed(() => (
         manageStepDetails: '添加步骤',
         edit: '编辑',
         delete: '删除',
+        copy: '复制',
         deleteStepConfirm: '确定删除该步骤？',
         editPageStep: '编辑页面步骤',
         addPageStep: '新增页面步骤',
@@ -219,6 +236,8 @@ const pageText = computed(() => (
         createFailed: '创建失败',
         deleteSuccess: '删除成功',
         deleteBlocked: '存在关联，无法删除。请先解除关联',
+        copySuccess: '复制成功',
+        copyFailed: '复制失败',
       }
 ))
 
@@ -243,6 +262,7 @@ const filters = reactive({ page: undefined as number | undefined, module: undefi
 const pagination = reactive({ current: 1, pageSize: 10, total: 0, showTotal: true, showPageSize: true })
 
 const formData = reactive<UiPageStepsForm>({
+  file_ids: [],
   project: 0,
   page: undefined as unknown as number,
   module: undefined as unknown as number,
@@ -268,7 +288,7 @@ const columns = computed(() => [
   { title: pageText.value.actionCount, slotName: 'step_count', width: 100, align: 'center' as const },
   { title: pageText.value.createdBy, dataIndex: 'creator_name', width: 110, align: 'center' as const },
   { title: pageText.value.createdAt, slotName: 'created_at', width: 180, align: 'center' as const },
-  { title: pageText.value.operations, slotName: 'operations', width: isEnglish.value ? 260 : 220, fixed: 'right' as const, align: 'center' as const },
+  { title: pageText.value.operations, slotName: 'operations', width: isEnglish.value ? 320 : 270, fixed: 'right' as const, align: 'center' as const },
 ])
 
 const pageStepModalTitle = computed(() => (
@@ -361,7 +381,7 @@ const onPageSizeChange = (pageSize: number) => {
 }
 
 const resetForm = () => {
-  Object.assign(formData, { project: projectId.value || 0, page: undefined, module: undefined, name: '', description: '', run_flow: '', flow_data: {} })
+  Object.assign(formData, { project: projectId.value || 0, page: undefined, module: undefined, name: '', description: '', run_flow: '', flow_data: {}, file_ids: [] })
   formRef.value?.clearValidate()
 }
 
@@ -449,6 +469,20 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
 
 const handleCancel = () => {
   modalVisible.value = false
+}
+
+const copyPageStep = async (record: UiPageSteps) => {
+  try {
+    loading.value = true
+    await pageStepsApi.copy(record.id)
+    Message.success(pageText.value.copySuccess)
+    fetchPageSteps()
+  } catch (error: unknown) {
+    const err = error as { error?: string }
+    Message.error(err?.error || pageText.value.copyFailed)
+  } finally {
+    loading.value = false
+  }
 }
 
 const deletePageStep = async (record: UiPageSteps) => {

@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "updated_at": "2026-05-21T14:38:43Z",
+  "updated_at": "2026-07-07T05:43:48Z",
   "skills": [
     {
       "id": "agent-browser-skill",
@@ -19,6 +19,15 @@
       "author": "mgdaas-lab",
       "tags": ["api", "automation", "wharttest"],
       "zip_path": "api-automation-skill.zip"
+    },
+    {
+      "id": "url-reader",
+      "name": "url-reader",
+      "description": "读取和分析任意在线 URL，提取网页标题、正文、链接、结构化数据；遇到 Swagger/OpenAPI/Redoc 时自动解析接口规格。",
+      "version": "1.0.0",
+      "author": "duanxiangchun",
+      "tags": ["url", "web", "docs", "openapi"],
+      "zip_path": "url-reader.zip"
     },
     {
       "id": "drawio",
@@ -69,7 +78,7 @@
     {
       "id": "whart-test",
       "name": "whart-test",
-      "description": "WHartTest 测试管理平台工具集。用于管理项目、模块、测试用例的增删改查，以及测试截图上传。当用户需要操作测试用例、查询项目信息或上传截图时使用。",
+      "description": "WHartTest 测试管理平台工具集。用于管理项目、模块、测试用例、测试截图和项目文件附件的增删改查。当用户需要操作测试用例、查询项目信息、上传截图、上传/下载/预览/删除项目文件、校验 file_ids 或管理文件清理设置时使用。",
       "version": "1.0.0",
       "author": "mgdaas-lab",
       "tags": ["wharttest", "test-management"],

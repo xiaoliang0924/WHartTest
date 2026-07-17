@@ -26,7 +26,7 @@ const filteredInterfaces = computed(() => {
 </script>
 
 <template>
-  <div class="interface-list-panel flex-1 rounded-lg border overflow-hidden">
+  <div class="interface-list-panel flex-1 rounded-lg border overflow-hidden flex flex-col min-h-0">
     <div class="interface-list-header p-4 border-b">
       <div class="flex items-center justify-between mb-2">
         <div class="flex items-center gap-2">
@@ -53,7 +53,7 @@ const filteredInterfaces = computed(() => {
         </a-input-search>
       </div>
     </div>
-    <div class="overflow-y-auto hide-scrollbar" style="height: 400px">
+    <div class="interface-list-body flex-1 min-h-0 overflow-y-auto hide-scrollbar">
       <div class="p-2">
         <a-table
           v-if="interfaces.length > 0"
@@ -119,8 +119,13 @@ const filteredInterfaces = computed(() => {
   border-color: var(--asd-panel-border);
 }
 
+.interface-list-body {
+  min-height: 0;
+}
+
 .interface-list-header {
   border-color: var(--asd-panel-border);
+  flex-shrink: 0;
 }
 
 .interface-list-title,

@@ -155,6 +155,7 @@ class TStep(BaseModel):
     teardown_hooks: Hooks = []
     # used to extract request's response field
     extract: VariablesMapping = {}
+    extract_meta: VariablesMapping = {}
     # used to export session variables from referenced testcase
     export: Export = []
     validators: Validators = Field([], alias="validate")
