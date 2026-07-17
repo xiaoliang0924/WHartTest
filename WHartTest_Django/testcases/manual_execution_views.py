@@ -169,8 +169,22 @@ class ManualTestRunViewSet(viewsets.ModelViewSet):
         run = self.get_object()
         testcase_id = request.data.get("testcase_id")
         try:
-            assignment = run.assignments.get(testcase_id=int(testcase_id))
-        except (TypeError, ValueError, ManualTestAssignment.DoesNotExist):
+            tid = int(testcase_id)
+        except (TypeError, ValueError):
+            return Response({"error": "The assigned test case does not exist."}, status=status.HTTP_404_NOT_FOUND)
+
+        assignment = run.assignments.filter(testcase_id=tid).first()
+        if assignment is None:
+            # 用例被删除后 FK 会置空，仍可通过快照里的 id 定位执行记录
+            assignment = next(
+                (
+                    item
+                    for item in run.assignments.filter(testcase__isnull=True)
+                    if (item.testcase_snapshot or {}).get("id") == tid
+                ),
+                None,
+            )
+        if assignment is None:
             return Response({"error": "The assigned test case does not exist."}, status=status.HTTP_404_NOT_FOUND)
         assignment.delete()
         run.refresh_statistics()
