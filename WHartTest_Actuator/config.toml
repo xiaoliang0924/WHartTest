@@ -14,7 +14,7 @@ headless = false
 persistent = false
 user_data_dir = "./data/browser"
 launch_timeout = 30
-action_timeout = 10
+action_timeout = 30
 
 [execution]
 retry_count = 3

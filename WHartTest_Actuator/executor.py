@@ -119,6 +119,67 @@ class PlaywrightExecutor:
         Path(self.screenshot_dir).mkdir(parents=True, exist_ok=True)
         if self.trace_enabled:
             Path(self.trace_dir).mkdir(parents=True, exist_ok=True)
+
+    _ALLOWED_WAIT_UNTIL = frozenset({'load', 'domcontentloaded', 'networkidle', 'commit'})
+
+    def _parse_extra_config(self, env_config: Optional[dict]) -> dict:
+        """Normalize env_config.extra_config into a dict."""
+        if not env_config:
+            return {}
+        extra = env_config.get('extra_config') or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return {}
+        return extra if isinstance(extra, dict) else {}
+
+    def _get_nav_timeout_ms(self, env_config: Optional[dict] = None) -> int:
+        """Resolve navigation timeout (ms): env.timeout > action_timeout."""
+        if env_config is not None:
+            raw = env_config.get('timeout')
+            if raw is not None and raw != '':
+                try:
+                    return max(1000, int(raw))
+                except (TypeError, ValueError):
+                    pass
+        return max(1000, int(self.action_timeout))
+
+    def _get_wait_until(self, env_config: Optional[dict] = None) -> str:
+        """
+        Resolve Playwright wait_until from env extra_config.
+        Default to domcontentloaded (networkidle often hangs on long-polling sites).
+        """
+        extra = self._parse_extra_config(env_config)
+        candidate = extra.get('wait_until') or extra.get('waitUntil') or extra.get('wait_until_state')
+        if isinstance(candidate, str):
+            normalized = candidate.strip().lower()
+            if normalized in self._ALLOWED_WAIT_UNTIL:
+                return normalized
+        return 'domcontentloaded'
+
+    async def _goto_with_env(
+        self,
+        page: Page,
+        url: str,
+        env_config: Optional[dict] = None,
+    ) -> None:
+        """Navigate with env timeout / wait_until; fallback when networkidle times out."""
+        if not url:
+            return
+        wait_until = self._get_wait_until(env_config)
+        timeout = self._get_nav_timeout_ms(env_config)
+        logger.info(f"导航到 {url} (wait_until={wait_until}, timeout={timeout}ms)")
+        try:
+            await page.goto(url, wait_until=wait_until, timeout=timeout)
+        except Exception as exc:
+            if wait_until == 'networkidle':
+                logger.warning(
+                    f"networkidle 导航超时，降级为 domcontentloaded: {exc}"
+                )
+                await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+            else:
+                raise
     
     async def init_browser(self) -> None:
         """初始化浏览器"""
@@ -704,8 +765,12 @@ class PlaywrightExecutor:
             except ValueError:
                 return 1000
 
+        if operation == 'goto':
+            await self._goto_with_env(page, step.input_value, env_config)
+            logger.debug(f"步骤 {step.step_id}: goto 耗时 {time.time() - op_start:.2f}s")
+            return True, "页面操作 goto 执行成功", None
+
         page_operations = {
-            'goto': lambda: page.goto(step.input_value),
             'reload': lambda: page.reload(),
             'go_back': lambda: page.go_back(),
             'go_forward': lambda: page.go_forward(),
@@ -840,7 +905,7 @@ class PlaywrightExecutor:
         try:
             async with self.browser_session() as page:
                 if page_url:
-                    await page.goto(page_url)
+                    await self._goto_with_env(page, page_url)
                 
                 success, message, step_screenshot = await self._execute_step(page, step)
                 duration = time.time() - start_time
@@ -889,9 +954,10 @@ class PlaywrightExecutor:
                 base_url = ''
                 if config.env_config:
                     base_url = config.env_config.get('base_url', '') or ''
+                    # 用环境超时覆盖本页默认操作超时，避免仍沿用执行器本地 10s
+                    self._page.set_default_timeout(self._get_nav_timeout_ms(config.env_config))
                 if base_url:
-                    logger.info(f"导航到环境 base_url: {base_url}")
-                    await self._page.goto(base_url, wait_until="networkidle")
+                    await self._goto_with_env(self._page, base_url, config.env_config)
 
                 for page_step in config.page_steps:
                     if self._stop_requested:
@@ -1051,11 +1117,12 @@ class PlaywrightExecutor:
                 self._page_errors = []
                 self._setup_page_listeners(page)
                 
-                # 导航到页面
+                # 导航到页面（读取环境 timeout / wait_until）
+                if config.env_config:
+                    page.set_default_timeout(self._get_nav_timeout_ms(config.env_config))
                 if config.page_url:
                     nav_start = time.time()
-                    await page.goto(config.page_url)
-                    await page.wait_for_load_state("domcontentloaded")
+                    await self._goto_with_env(page, config.page_url, config.env_config)
                     logger.debug(f"页面导航 {config.page_name} 耗时 {time.time() - nav_start:.2f}s")
                 
                 # 执行页面内的所有步骤
@@ -1164,9 +1231,10 @@ class PlaywrightExecutor:
             base_url = ''
             if config.env_config:
                 base_url = config.env_config.get('base_url', '') or ''
+                page.set_default_timeout(self._get_nav_timeout_ms(config.env_config))
             if base_url:
                 logger.info(f"[并发] 导航到环境 base_url: {base_url}")
-                await page.goto(base_url, wait_until="domcontentloaded")
+                await self._goto_with_env(page, base_url, config.env_config)
 
             for page_step in config.page_steps:
                 if self._stop_requested:
