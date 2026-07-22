@@ -717,7 +717,7 @@ onMounted(async () => {
 
   // 加载项目列表
   await projectStore.fetchProjects();
-  
+
   // 检查版本更新（后台执行，不阻塞页面）
   checkVersion();
 });
@@ -1273,5 +1273,11 @@ onMounted(async () => {
   background-color: var(--theme-surface-soft) !important;
   border-radius: 6px;
   padding: 2px;
+}
+
+.menu-link-with-badge {
+  display: inline-block;
+  color: inherit;
+  text-decoration: none;
 }
 </style>

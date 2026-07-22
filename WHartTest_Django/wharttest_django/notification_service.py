@@ -229,3 +229,37 @@ def notify_test_suite_execution(execution) -> None:
     if detail_url:
         lines.append(f"> 详情：[查看执行历史]({detail_url})")
     _send_markdown("测试任务执行结果", lines)
+
+
+def notify_manual_test_assignment(run, assignee, creator) -> None:
+    project = getattr(run, "project", None)
+    detail_url = _frontend_url("/manual-test-executions")
+    lines = [
+        f"> 项目：{_safe_name(project)}",
+        f"> 执行批次：{run.name}",
+        f"> 分派人员：{getattr(creator, 'username', '-') or '-'}",
+        f"> 测试人员：{getattr(assignee, 'username', '-') or '-'}",
+        f"> 用例数量：{run.total_count}",
+        f"> 状态：{_status_label(run.status)}",
+    ]
+    if detail_url:
+        lines.append(f"> 详情：[查看用例执行]({detail_url})")
+    _send_markdown("人工用例执行任务分派", lines)
+
+
+def notify_manual_test_completion(run) -> None:
+    project = getattr(run, "project", None)
+    detail_url = _frontend_url("/manual-test-executions")
+    executed = run.passed_count + run.failed_count
+    pass_rate = round(run.passed_count / run.total_count * 100, 1) if run.total_count else 0
+    lines = [
+        f"> 项目：{_safe_name(project)}",
+        f"> 执行批次：{run.name}",
+        f"> 状态：已完成",
+        f"> 统计：总数 {run.total_count} / 通过 {run.passed_count} / 不通过 {run.failed_count} / 待执行 {run.pending_count}",
+        f"> 通过率：{pass_rate}%",
+        f"> 已执行：{executed}/{run.total_count}",
+    ]
+    if detail_url:
+        lines.append(f"> 详情：[查看执行结果]({detail_url})")
+    _send_markdown("人工用例执行任务完成", lines)

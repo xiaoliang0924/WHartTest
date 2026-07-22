@@ -711,13 +711,22 @@ class ManualTestAssignmentSerializer(serializers.ModelSerializer):
     testcase_detail = serializers.SerializerMethodField()
     assignee_detail = UserDetailSerializer(source="assignee", read_only=True)
     run_name = serializers.CharField(source="run.name", read_only=True)
+    run_status = serializers.CharField(source="run.status", read_only=True)
+    run_total_count = serializers.IntegerField(source="run.total_count", read_only=True)
+    run_pending_count = serializers.IntegerField(source="run.pending_count", read_only=True)
+    run_passed_count = serializers.IntegerField(source="run.passed_count", read_only=True)
+    run_failed_count = serializers.IntegerField(source="run.failed_count", read_only=True)
+    run_created_at = serializers.DateTimeField(source="run.created_at", read_only=True)
 
     class Meta:
         model = ManualTestAssignment
         fields = [
-            "id", "run", "run_name", "testcase", "testcase_detail", "assignee",
-            "assignee_detail", "status", "failure_reason", "comment", "executed_at",
-            "created_at", "updated_at",
+            "id", "run", "run_name", "run_status", "run_total_count", "run_pending_count",
+            "run_passed_count", "run_failed_count", "run_created_at",
+            "testcase", "testcase_detail", "assignee", "assignee_detail", "status",
+            "failure_reason", "comment", "step_results", "evidence_files",
+            "defect_title", "defect_url",
+            "executed_at", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "run", "testcase", "assignee", "status", "failure_reason", "comment",
@@ -738,36 +747,113 @@ class ManualTestAssignmentSerializer(serializers.ModelSerializer):
         return representation
 
 
-class ManualTestRunSerializer(serializers.ModelSerializer):
+class ManualTestRunListSerializer(serializers.ModelSerializer):
     creator_detail = UserDetailSerializer(source="creator", read_only=True)
-    assignments = ManualTestAssignmentSerializer(many=True, read_only=True)
+    assignee_detail = serializers.SerializerMethodField()
+    pass_rate = serializers.SerializerMethodField()
+    test_suite_name = serializers.CharField(source="test_suite.name", read_only=True, default=None)
+    is_overdue = serializers.SerializerMethodField()
 
     class Meta:
         model = ManualTestRun
         fields = [
-            "id", "project", "name", "description", "status", "creator", "creator_detail",
-            "total_count", "passed_count", "failed_count", "pending_count", "assignments",
-            "created_at", "updated_at",
+            "id", "project", "name", "description", "environment", "version", "deadline",
+            "test_suite", "test_suite_name", "is_overdue",
+            "status", "creator", "creator_detail",
+            "assignee_detail", "total_count", "passed_count", "failed_count",
+            "blocked_count", "skip_count", "pending_count",
+            "pass_rate", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_assignee_detail(self, obj):
+        assignment = obj.assignments.all().first()
+        if assignment is None:
+            return None
+        return UserDetailSerializer(assignment.assignee).data
+
+    def get_pass_rate(self, obj):
+        if not obj.total_count:
+            return 0
+        return round(obj.passed_count / obj.total_count * 100, 1)
+
+    def get_is_overdue(self, obj):
+        if not obj.deadline or not obj.pending_count:
+            return False
+        from django.utils import timezone
+        deadline = obj.deadline
+        if isinstance(deadline, str):
+            from django.utils.dateparse import parse_datetime
+            deadline = parse_datetime(deadline)
+            if deadline is None:
+                return False
+        return deadline < timezone.now()
+
+
+class ManualTestRunSerializer(serializers.ModelSerializer):
+    creator_detail = UserDetailSerializer(source="creator", read_only=True)
+    assignments = ManualTestAssignmentSerializer(many=True, read_only=True)
+    test_suite_name = serializers.CharField(source="test_suite.name", read_only=True, default=None)
+    is_overdue = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ManualTestRun
+        fields = [
+            "id", "project", "name", "description", "environment", "version", "deadline",
+            "test_suite", "test_suite_name", "is_overdue",
+            "status", "creator", "creator_detail",
+            "total_count", "passed_count", "failed_count", "blocked_count", "skip_count",
+            "pending_count", "assignments", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "project", "status", "creator", "creator_detail", "total_count",
-            "passed_count", "failed_count", "pending_count", "assignments", "created_at", "updated_at",
+            "passed_count", "failed_count", "blocked_count", "skip_count", "pending_count",
+            "assignments", "created_at", "updated_at",
         ]
+
+    def get_is_overdue(self, obj):
+        if not obj.deadline or not obj.pending_count:
+            return False
+        from django.utils import timezone
+        deadline = obj.deadline
+        if isinstance(deadline, str):
+            from django.utils.dateparse import parse_datetime
+            deadline = parse_datetime(deadline)
+            if deadline is None:
+                return False
+        return deadline < timezone.now()
 
 
 class ManualTestRunCreateSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
     description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    testcase_ids = serializers.ListField(child=serializers.IntegerField(), allow_empty=False)
+    environment = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    version = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    deadline = serializers.DateTimeField(required=False, allow_null=True)
+    testsuite_id = serializers.IntegerField(required=False, allow_null=True)
+    testcase_ids = serializers.ListField(child=serializers.IntegerField(), required=False)
     assignee_id = serializers.IntegerField()
+
+    def validate(self, attrs):
+        testsuite_id = attrs.get("testsuite_id")
+        testcase_ids = attrs.get("testcase_ids") or []
+        if not testsuite_id and not testcase_ids:
+            raise serializers.ValidationError({"testcase_ids": "请选择测试用例或测试套件"})
+        return attrs
 
 
 class ManualTestResultSerializer(serializers.Serializer):
-    status = serializers.ChoiceField(choices=["pending", "pass", "fail"])
+    status = serializers.ChoiceField(choices=["pending", "pass", "fail", "blocked", "skip"])
     failure_reason = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     comment = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    step_results = serializers.ListField(child=serializers.DictField(), required=False)
+    evidence_files = serializers.ListField(child=serializers.DictField(), required=False)
+    defect_title = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    defect_url = serializers.URLField(required=False, allow_blank=True, allow_null=True)
 
     def validate(self, attrs):
         if attrs["status"] == "fail" and not (attrs.get("failure_reason") or "").strip():
             raise serializers.ValidationError({"failure_reason": "标记为不通过时必须填写失败原因"})
+        if attrs["status"] == "blocked" and not (attrs.get("comment") or "").strip():
+            raise serializers.ValidationError({"comment": "标记为阻塞时请填写阻塞原因"})
         return attrs

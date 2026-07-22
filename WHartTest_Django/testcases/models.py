@@ -500,13 +500,26 @@ class ManualTestRun(models.Model):
     ]
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="manual_test_runs", verbose_name=_("所属项目"))
+    test_suite = models.ForeignKey(
+        "TestSuite",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="manual_test_runs",
+        verbose_name=_("来源测试套件"),
+    )
     name = models.CharField(_("执行批次名称"), max_length=255)
     description = models.TextField(_("说明"), blank=True, null=True)
+    environment = models.CharField(_("执行环境"), max_length=100, blank=True, default="")
+    version = models.CharField(_("版本号"), max_length=100, blank=True, default="")
+    deadline = models.DateTimeField(_("截止日期"), blank=True, null=True)
     status = models.CharField(_("执行状态"), max_length=20, choices=STATUS_CHOICES, default="pending")
     creator = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="created_manual_test_runs", verbose_name=_("创建人"))
     total_count = models.PositiveIntegerField(_("用例总数"), default=0)
     passed_count = models.PositiveIntegerField(_("通过数"), default=0)
     failed_count = models.PositiveIntegerField(_("不通过数"), default=0)
+    blocked_count = models.PositiveIntegerField(_("阻塞数"), default=0)
+    skip_count = models.PositiveIntegerField(_("跳过数"), default=0)
     pending_count = models.PositiveIntegerField(_("待执行数"), default=0)
     created_at = models.DateTimeField(_("创建时间"), auto_now_add=True)
     updated_at = models.DateTimeField(_("更新时间"), auto_now=True)
@@ -526,18 +539,24 @@ class ManualTestRun(models.Model):
         total_count = assignments.count()
         passed_count = assignments.filter(status="pass").count()
         failed_count = assignments.filter(status="fail").count()
+        blocked_count = assignments.filter(status="blocked").count()
+        skip_count = assignments.filter(status="skip").count()
         pending_count = assignments.filter(status="pending").count()
         status = "completed" if total_count and not pending_count else "in_progress" if total_count != pending_count else "pending"
         ManualTestRun.objects.filter(pk=self.pk).update(
             total_count=total_count,
             passed_count=passed_count,
             failed_count=failed_count,
+            blocked_count=blocked_count,
+            skip_count=skip_count,
             pending_count=pending_count,
             status=status,
         )
         self.total_count = total_count
         self.passed_count = passed_count
         self.failed_count = failed_count
+        self.blocked_count = blocked_count
+        self.skip_count = skip_count
         self.pending_count = pending_count
         self.status = status
 
@@ -549,6 +568,8 @@ class ManualTestAssignment(models.Model):
         ("pending", _("待执行")),
         ("pass", _("通过")),
         ("fail", _("不通过")),
+        ("blocked", _("阻塞")),
+        ("skip", _("跳过")),
     ]
 
     run = models.ForeignKey(ManualTestRun, on_delete=models.CASCADE, related_name="assignments", verbose_name=_("执行批次"))
@@ -565,6 +586,10 @@ class ManualTestAssignment(models.Model):
     status = models.CharField(_("执行结果"), max_length=20, choices=STATUS_CHOICES, default="pending")
     failure_reason = models.TextField(_("失败原因"), blank=True, null=True)
     comment = models.TextField(_("执行备注"), blank=True, null=True)
+    step_results = models.JSONField(_("步骤执行结果"), default=list, blank=True)
+    evidence_files = models.JSONField(_("失败证据"), default=list, blank=True)
+    defect_title = models.CharField(_("关联缺陷标题"), max_length=255, blank=True, default="")
+    defect_url = models.URLField(_("关联缺陷链接"), max_length=500, blank=True, default="")
     executed_at = models.DateTimeField(_("执行时间"), blank=True, null=True)
     created_at = models.DateTimeField(_("分派时间"), auto_now_add=True)
     updated_at = models.DateTimeField(_("更新时间"), auto_now=True)

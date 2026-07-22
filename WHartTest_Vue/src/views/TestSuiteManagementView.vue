@@ -68,6 +68,9 @@
               </template>
               {{ pageText.execute }}
             </a-button>
+            <a-button type="outline" size="small" @click="handleManualExecute(record)">
+              {{ pageText.manualExecute }}
+            </a-button>
             <a-button type="outline" size="small" @click="handleEdit(record)">
               {{ pageText.edit }}
             </a-button>
@@ -113,6 +116,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, watch } from 'vue';
+import { useRouter } from 'vue-router';
 import { Message, Modal } from '@arco-design/web-vue';
 import { IconPlus, IconPlayArrow, IconFolder } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
@@ -128,6 +132,7 @@ import TestExecutionConfirmModal from '@/components/testcase/TestExecutionConfir
 import TestSuiteDetailModal from '@/components/testcase/TestSuiteDetailModal.vue';
 
 const projectStore = useProjectStore();
+const router = useRouter();
 const { isEnglish } = useAppI18n();
 const currentProjectId = computed(() => projectStore.currentProjectId);
 
@@ -138,6 +143,7 @@ const pageText = computed(() => (
         searchPlaceholder: 'Search suite name',
         createSuite: 'Create suite',
         execute: 'Run',
+        manualExecute: 'Manual run',
         edit: 'Edit',
         delete: 'Delete',
         caseUnit: 'cases',
@@ -162,6 +168,7 @@ const pageText = computed(() => (
         searchPlaceholder: '搜索套件名称',
         createSuite: '创建测试套件',
         execute: '执行',
+        manualExecute: '人工执行',
         edit: '编辑',
         delete: '删除',
         caseUnit: '用例',
@@ -215,7 +222,7 @@ const columns = computed(() => [
     align: 'center' as const,
   },
   { title: pageText.value.createdAt, dataIndex: 'created_at', slotName: 'created_at', width: 180, align: 'center' as const },
-  { title: pageText.value.actions, slotName: 'operations', width: 280, fixed: 'right' as const, align: 'center' as const },
+  { title: pageText.value.actions, slotName: 'operations', width: 360, fixed: 'right' as const, align: 'center' as const },
 ]);
 
 const formatCaseCount = (count: number) => (
@@ -298,6 +305,15 @@ const handleExecute = (suite: TestSuite) => {
   }
   selectedSuite.value = suite;
   showExecutionConfirm.value = true;
+};
+
+// 发起人工执行
+const handleManualExecute = (suite: TestSuite) => {
+  if ((suite.testcase_count || 0) === 0) {
+    Message.warning(pageText.value.suiteWithoutCases);
+    return;
+  }
+  router.push({ name: 'ManualTestExecution', query: { suite_id: String(suite.id) } });
 };
 
 // 删除测试套件
