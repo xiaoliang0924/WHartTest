@@ -759,3 +759,11 @@ SKILL_STORE_ALLOW_CUSTOM_SOURCE = os.environ.get(
 SKILL_STORE_MAX_ZIP_SIZE = int(os.environ.get("SKILL_STORE_MAX_ZIP_SIZE", str(10 * 1024 * 1024)))
 # 通过 zip URL 下载的超时时间（秒）
 SKILL_STORE_DOWNLOAD_TIMEOUT = int(os.environ.get("SKILL_STORE_DOWNLOAD_TIMEOUT", "60"))
+
+# LLM 对话图片以 base64 放入 JSON 请求体，默认 2.5MB 不足以承载截图
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.environ.get("DATA_UPLOAD_MAX_MEMORY_SIZE", str(50 * 1024 * 1024))
+)
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.environ.get("FILE_UPLOAD_MAX_MEMORY_SIZE", str(50 * 1024 * 1024))
+)

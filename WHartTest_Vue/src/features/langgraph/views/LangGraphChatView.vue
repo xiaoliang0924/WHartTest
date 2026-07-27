@@ -2022,8 +2022,9 @@ const handleStreamMessage = async (requestData: ChatRequest, userMessage: string
     abortController.signal
   );
 
-  // sendChatMessageStream 现在是异步的，但我们不在这里等待它完成
-  // 使用 watch 监视 isComplete 状态
+  if (isLoading.value && !sessionId.value) {
+    isLoading.value = false;
+  }
 };
 
 // 处理非流式消息（使用统一的 Agent Loop 接口）

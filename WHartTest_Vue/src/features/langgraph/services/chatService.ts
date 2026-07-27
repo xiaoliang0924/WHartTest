@@ -374,6 +374,22 @@ async function refreshAccessToken(): Promise<string | null> {
   }
 }
 
+async function readHttpErrorMessage(response: Response, fallback: string) {
+  let detail = fallback;
+  try {
+    const errBody = await response.json();
+    detail = errBody.message || errBody.detail || errBody.error || detail;
+  } catch {
+    // ignore non-json error bodies
+  }
+  if (response.status === 400 || response.status === 413) {
+    if (detail.includes('DATA_UPLOAD') || detail.includes('too large') || detail.includes('Request body exceeded')) {
+      return '图片或附件过大，请压缩后重试（建议单张小于 5MB）';
+    }
+  }
+  return detail;
+}
+
 /**
  * 发送流式对话消息
  */
@@ -406,8 +422,9 @@ export async function sendChatMessageStream(
 
     // 真正的错误
     console.error('Stream error:', error);
+    const message = error?.message || '流式请求失败';
     if (sessionId && activeStreams.value[sessionId]) {
-      activeStreams.value[sessionId].error = error.message || '流式请求失败';
+      activeStreams.value[sessionId].error = message;
       activeStreams.value[sessionId].isComplete = true;
     }
   };
@@ -450,7 +467,7 @@ export async function sendChatMessageStream(
     }
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      throw new Error(await readHttpErrorMessage(response, `HTTP error! status: ${response.status}`));
     }
 
     const reader = response.body?.getReader();
