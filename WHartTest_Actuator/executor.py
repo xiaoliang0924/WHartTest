@@ -31,6 +31,7 @@ class StepConfig:
     locator_value: str
     step_type: int = 0       # 0元素操作, 1断言操作, 2 SQL操作
     input_value: str = ''
+    ope_params: dict = field(default_factory=dict)
     description: str = ''
     wait_time: float = 0
     is_iframe: bool = False
@@ -685,6 +686,80 @@ class PlaywrightExecutor:
         file_chooser = await file_chooser_info.value
         await file_chooser.set_files(file_path)
         logger.info(f"步骤 {step.step_id}: 已通过 file chooser 设置上传文件")
+
+    async def _execute_drag(
+        self,
+        page: Page,
+        locator,
+        step: StepConfig,
+        target: Union[Page, FrameLocator],
+    ) -> tuple[bool, str]:
+        """拖动元素（用于滑块验证等场景）"""
+        params = step.ope_params or {}
+        mode = str(params.get('mode') or 'relative').lower()
+        steps = max(int(params.get('steps') or 20), 1)
+        delay_ms = max(int(params.get('delay_ms') or 0), 0)
+
+        box = await locator.bounding_box()
+        if not box:
+            return False, '无法获取拖动元素的位置信息'
+
+        start_x = box['x'] + box['width'] / 2
+        start_y = box['y'] + box['height'] / 2
+
+        if mode == 'to_element':
+            target_type = str(params.get('target_locator_type') or 'xpath').lower()
+            target_value = str(params.get('target_locator_value') or '').strip()
+            if not target_value:
+                return False, '拖到元素模式需要填写目标定位器'
+
+            target_locator = self._get_locator(target, target_type, target_value)
+            try:
+                await target_locator.wait_for(state='visible', timeout=5000)
+            except Exception as exc:
+                return False, f'目标元素不可见: {exc}'
+
+            target_box = await target_locator.bounding_box()
+            if not target_box:
+                return False, '无法获取目标元素的位置信息'
+
+            end_x = target_box['x'] + target_box['width'] / 2
+            end_y = target_box['y'] + target_box['height'] / 2
+            drag_desc = f'拖到元素 [{target_type}={target_value}]'
+        else:
+            direction = str(params.get('direction') or 'right').lower()
+            try:
+                distance = float(params.get('distance') or 100)
+            except (TypeError, ValueError):
+                return False, '拖动距离必须是数字'
+
+            direction_delta = {
+                'right': (distance, 0),
+                'left': (-distance, 0),
+                'up': (0, -distance),
+                'down': (0, distance),
+            }
+            if direction not in direction_delta:
+                return False, f'不支持的拖动方向: {direction}'
+
+            dx, dy = direction_delta[direction]
+            end_x = start_x + dx
+            end_y = start_y + dy
+            drag_desc = f'相对拖动 {direction} {distance}px'
+
+        await page.mouse.move(start_x, start_y)
+        await page.mouse.down()
+        if delay_ms > 0:
+            await page.wait_for_timeout(delay_ms)
+        await page.mouse.move(end_x, end_y, steps=steps)
+        if delay_ms > 0:
+            await page.wait_for_timeout(delay_ms)
+        await page.mouse.up()
+
+        logger.info(
+            f"步骤 {step.step_id}: drag 完成 ({drag_desc}, steps={steps}, delay_ms={delay_ms})"
+        )
+        return True, f'拖动操作执行成功 ({drag_desc})'
     
     async def _execute_step(
         self,
@@ -868,6 +943,13 @@ class PlaywrightExecutor:
             action_time = time.time() - action_start
             logger.debug(f"步骤 {step.step_id}: {operation} 操作耗时 {action_time:.2f}s (总计 {time.time() - op_start:.2f}s)")
             return True, f"元素操作 {operation} 执行成功", None
+
+        if operation == 'drag':
+            action_start = time.time()
+            success, message = await self._execute_drag(page, locator, step, target)
+            action_time = time.time() - action_start
+            logger.debug(f"步骤 {step.step_id}: drag 操作耗时 {action_time:.2f}s (总计 {time.time() - op_start:.2f}s)")
+            return success, message, None
 
         if operation in element_operations:
             action_start = time.time()

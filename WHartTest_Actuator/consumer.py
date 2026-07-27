@@ -1213,6 +1213,17 @@ class TaskConsumer:
                     locator_value_3 = str(locator_value_3)
             else:
                 logger.warning(f"data_processor 为 None，跳过变量替换")
+
+            ope_params: dict = {}
+            if isinstance(ope_value, dict):
+                ope_params = dict(ope_value)
+                if data_processor:
+                    for key, val in list(ope_params.items()):
+                        if isinstance(val, str):
+                            replaced = data_processor.replace(val)
+                            if replaced != val:
+                                logger.info(f"变量替换 (ope_params.{key}): '{val}' -> '{replaced}'")
+                            ope_params[key] = replaced
             
             # iframe 定位器也可能包含变量
             is_iframe = detail.get('is_iframe', False)
@@ -1262,6 +1273,7 @@ class TaskConsumer:
                 locator_value=locator_value or '',  # 定位表达式
                 step_type=step_type,
                 input_value=input_value,  # 输入值
+                ope_params=ope_params,
                 description=detail.get('description') or detail.get('element_name') or ('SQL操作' if step_type == 2 else ''),
                 wait_time=detail.get('wait_time', 0),
                 is_iframe=is_iframe,

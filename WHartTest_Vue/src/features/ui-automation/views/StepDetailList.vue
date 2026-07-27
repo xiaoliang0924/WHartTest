@@ -162,6 +162,7 @@
                 <a-option value="dblclick">{{ stepText.dblclickOption }}</a-option>
                 <a-option value="hover">{{ stepText.hoverOption }}</a-option>
                 <a-option value="focus">{{ stepText.focusOption }}</a-option>
+                <a-option value="drag">{{ stepText.dragOption }}</a-option>
               </a-optgroup>
               <a-optgroup :label="stepText.groupKeyboard">
                 <a-option value="fill">{{ stepText.fillOption }}</a-option>
@@ -211,6 +212,19 @@
                 :min="param.min"
                 :max="param.max"
               />
+              <a-select
+                v-else-if="param.type === 'select'"
+                v-model="opeParams[param.field]"
+                :placeholder="getParamPlaceholder(param)"
+              >
+                <a-option
+                  v-for="opt in param.options || []"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ isEnglish ? (opt.labelEn || opt.label) : opt.label }}
+                </a-option>
+              </a-select>
               <a-textarea
                 v-else-if="param.type === 'textarea'"
                 v-model="opeParams[param.field]"
@@ -399,12 +413,64 @@ import { fileService } from '@/features/file-management/services/fileService'
 interface OpeParamDef {
   field: string
   label: string
-  type: 'input' | 'number' | 'textarea' | 'file'
+  type: 'input' | 'number' | 'textarea' | 'file' | 'select'
   placeholder: string
   required?: boolean
   min?: number
   max?: number
+  options?: { value: string; label: string; labelEn?: string }[]
 }
+
+const DRAG_MODE_PARAMS: OpeParamDef[] = [
+  {
+    field: 'mode',
+    label: '拖动模式',
+    type: 'select',
+    placeholder: '请选择拖动模式',
+    required: true,
+    options: [
+      { value: 'relative', label: '相对拖动', labelEn: 'Relative drag' },
+      { value: 'to_element', label: '拖到元素', labelEn: 'Drag to element' },
+    ],
+  },
+]
+
+const DRAG_RELATIVE_PARAMS: OpeParamDef[] = [
+  {
+    field: 'direction',
+    label: '拖动方向',
+    type: 'select',
+    placeholder: '请选择拖动方向',
+    required: true,
+    options: [
+      { value: 'right', label: '向右', labelEn: 'Right' },
+      { value: 'left', label: '向左', labelEn: 'Left' },
+      { value: 'up', label: '向上', labelEn: 'Up' },
+      { value: 'down', label: '向下', labelEn: 'Down' },
+    ],
+  },
+  { field: 'distance', label: '拖动距离(像素)', type: 'number', placeholder: '例如 262', required: true, min: 1, max: 5000 },
+  { field: 'steps', label: '移动步数', type: 'number', placeholder: '默认 20', min: 1, max: 200 },
+  { field: 'delay_ms', label: '按下/释放延迟(毫秒)', type: 'number', placeholder: '默认 0', min: 0, max: 5000 },
+]
+
+const DRAG_TO_ELEMENT_PARAMS: OpeParamDef[] = [
+  {
+    field: 'target_locator_type',
+    label: '目标定位方式',
+    type: 'select',
+    placeholder: '请选择目标定位方式',
+    required: true,
+    options: [
+      { value: 'xpath', label: 'XPath', labelEn: 'XPath' },
+      { value: 'css', label: 'CSS', labelEn: 'CSS' },
+      { value: 'id', label: 'ID', labelEn: 'ID' },
+    ],
+  },
+  { field: 'target_locator_value', label: '目标定位表达式', type: 'input', placeholder: '请输入目标元素定位表达式', required: true },
+  { field: 'steps', label: '移动步数', type: 'number', placeholder: '默认 20', min: 1, max: 200 },
+  { field: 'delay_ms', label: '按下/释放延迟(毫秒)', type: 'number', placeholder: '默认 0', min: 0, max: 5000 },
+]
 
 /** 操作方法与参数的映射 */
 const OPE_PARAMS_MAP: Record<string, OpeParamDef[]> = {
@@ -433,6 +499,7 @@ const OPE_KEY_LABELS: Record<string, string> = {
   dblclick: '双击',
   hover: '悬停',
   focus: '聚焦',
+  drag: '拖动',
   fill: '填充',
   type: '输入',
   clear: '清空',
@@ -514,6 +581,7 @@ const stepText = computed(() => isEnglish.value
       dblclickOption: 'Double click (dblclick)',
       hoverOption: 'Hover (hover)',
       focusOption: 'Focus (focus)',
+      dragOption: 'Drag (drag)',
       fillOption: 'Fill (fill)',
       typeOption: 'Type (type)',
       clearOption: 'Clear (clear)',
@@ -580,6 +648,8 @@ const stepText = computed(() => isEnglish.value
       fetchElementsFailed: 'Failed to fetch element list',
       fillRequired: 'Fill in the required fields',
       enterContent: 'Enter content',
+      enterDragDistance: 'Enter a valid drag distance',
+      enterDragTargetLocator: 'Enter the target element locator',
       updateSuccess: 'Updated successfully',
       addSuccess: 'Added successfully',
       updateFailed: 'Update failed',
@@ -628,6 +698,7 @@ const stepText = computed(() => isEnglish.value
       dblclickOption: '双击 (dblclick)',
       hoverOption: '悬停 (hover)',
       focusOption: '聚焦 (focus)',
+      dragOption: '拖动 (drag)',
       fillOption: '填充 (fill)',
       typeOption: '输入 (type)',
       clearOption: '清空 (clear)',
@@ -694,6 +765,8 @@ const stepText = computed(() => isEnglish.value
       fetchElementsFailed: '获取元素列表失败',
       fillRequired: '请填写必填项',
       enterContent: '请输入内容',
+      enterDragDistance: '请输入有效的拖动距离',
+      enterDragTargetLocator: '请输入目标元素定位表达式',
       updateSuccess: '更新成功',
       addSuccess: '添加成功',
       updateFailed: '更新失败',
@@ -721,6 +794,7 @@ const opeKeyLabelsEn: Record<string, string> = {
   dblclick: 'Double click',
   hover: 'Hover',
   focus: 'Focus',
+  drag: 'Drag',
   fill: 'Fill',
   type: 'Type',
   clear: 'Clear',
@@ -767,6 +841,19 @@ const paramLabelMap: Record<string, string> = {
   '期望数量': 'Expected count',
   '期望 URL': 'Expected URL',
   '期望页面标题': 'Expected title',
+  '拖动模式': 'Drag mode',
+  '拖动方向': 'Drag direction',
+  '拖动距离(像素)': 'Drag distance (px)',
+  '移动步数': 'Move steps',
+  '按下/释放延迟(毫秒)': 'Press/release delay (ms)',
+  '目标定位方式': 'Target locator type',
+  '目标定位表达式': 'Target locator expression',
+  '相对拖动': 'Relative drag',
+  '拖到元素': 'Drag to element',
+  '向右': 'Right',
+  '向左': 'Left',
+  '向上': 'Up',
+  '向下': 'Down',
 }
 
 const paramPlaceholderMap: Record<string, string> = {
@@ -786,6 +873,13 @@ const paramPlaceholderMap: Record<string, string> = {
   '请输入期望的元素数量': 'Enter the expected element count',
   '例如 https://example.com/dashboard': 'e.g. https://example.com/dashboard',
   '例如 首页': 'e.g. Home',
+  '请选择拖动模式': 'Select drag mode',
+  '请选择拖动方向': 'Select drag direction',
+  '例如 262': 'e.g. 262',
+  '默认 20': 'Default 20',
+  '默认 0': 'Default 0',
+  '请选择目标定位方式': 'Select target locator type',
+  '请输入目标元素定位表达式': 'Enter target element locator',
 }
 
 const getStepTypeLabel = (stepType: StepType) => stepTypeLabels.value[stepType] || String(stepType)
@@ -843,13 +937,33 @@ const conditionValueStr = ref('{}')
 
 /** 当前操作方法的参数定义 */
 const currentOpeParams = computed(() => {
-  return OPE_PARAMS_MAP[formData.ope_key || ''] || []
+  const key = formData.ope_key || ''
+  if (key === 'drag') {
+    const mode = opeParams.mode || 'relative'
+    if (mode === 'to_element') {
+      return [...DRAG_MODE_PARAMS, ...DRAG_TO_ELEMENT_PARAMS]
+    }
+    return [...DRAG_MODE_PARAMS, ...DRAG_RELATIVE_PARAMS]
+  }
+  return OPE_PARAMS_MAP[key] || []
 })
+
+const applyDragDefaults = () => {
+  opeParams.mode = opeParams.mode || 'relative'
+  opeParams.direction = opeParams.direction || 'right'
+  opeParams.distance = opeParams.distance ?? 262
+  opeParams.steps = opeParams.steps ?? 20
+  opeParams.delay_ms = opeParams.delay_ms ?? 0
+  opeParams.target_locator_type = opeParams.target_locator_type || 'xpath'
+}
 
 /** 操作方法变更时重置参数 */
 const onOpeKeyChange = () => {
   Object.keys(opeParams).forEach(k => delete opeParams[k])
   uploadingFile.value = false
+  if (formData.ope_key === 'drag') {
+    applyDragDefaults()
+  }
 }
 
 const rules = {
@@ -1134,6 +1248,9 @@ const editStep = async (step: UiPageStepsDetailed) => {
       // 将 value 字段的内容复制到 text 字段，以兼容前端表单
       opeParams.text = step.ope_value.value
     }
+    if (step.ope_key === 'drag') {
+      applyDragDefaults()
+    }
   }
   sqlExecuteStr.value = JSON.stringify(step.sql_execute || {}, null, 2)
   customStr.value = JSON.stringify(step.custom || {}, null, 2)
@@ -1235,6 +1352,17 @@ const buildOpeValue = () => {
       result[k] = v
     }
   }
+
+  if (formData.ope_key === 'drag') {
+    const mode = result.mode || 'relative'
+    if (mode === 'to_element') {
+      delete result.direction
+      delete result.distance
+    } else {
+      delete result.target_locator_type
+      delete result.target_locator_value
+    }
+  }
   
   // 兼容性处理：对于 fill 操作，如果存在 text 字段，也同步到 value 字段
   // 这样后端执行器可以正确识别两种格式
@@ -1267,6 +1395,20 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
     Message.warning(stepText.value.chooseUploadFile)
     done(false)
     return
+  }
+  if (formData.ope_key === 'drag') {
+    const mode = opeParams.mode || 'relative'
+    if (mode === 'to_element') {
+      if (!opeParams.target_locator_value || String(opeParams.target_locator_value).trim() === '') {
+        Message.warning(stepText.value.enterDragTargetLocator)
+        done(false)
+        return
+      }
+    } else if (!opeParams.distance || Number(opeParams.distance) <= 0) {
+      Message.warning(stepText.value.enterDragDistance)
+      done(false)
+      return
+    }
   }
   submitting.value = true
   try {
