@@ -123,6 +123,19 @@ class PlaywrightExecutorDragTest(unittest.TestCase):
         self.assertFalse(success)
         self.assertIn('数字', message)
 
+    def test_drag_xy_offset_format(self):
+        step = self._drag_step({'x': 260, 'y': 0})
+        locator = FakeLocator({'x': 100, 'y': 200, 'width': 40, 'height': 40})
+
+        async def run():
+            return await self.executor._execute_drag(self.page, locator, step, self.page)
+
+        success, message = asyncio.run(run())
+
+        self.assertTrue(success)
+        self.assertIn('260', message)
+        self.assertEqual(self.page.mouse.moves[-1][0], 360)
+
 
 if __name__ == '__main__':
     unittest.main()

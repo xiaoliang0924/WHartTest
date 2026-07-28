@@ -704,8 +704,14 @@ class PlaywrightExecutor:
         if not box:
             return False, '无法获取拖动元素的位置信息'
 
-        start_x = box['x'] + box['width'] / 2
         start_y = box['y'] + box['height'] / 2
+        start_offset = str(params.get('start_offset') or 'left').lower()
+        if start_offset == 'left':
+            start_x = box['x'] + min(8, box['width'] / 4)
+        elif start_offset == 'right':
+            start_x = box['x'] + box['width'] - min(8, box['width'] / 4)
+        else:
+            start_x = box['x'] + box['width'] / 2
 
         if mode == 'to_element':
             target_type = str(params.get('target_locator_type') or 'xpath').lower()
@@ -727,26 +733,38 @@ class PlaywrightExecutor:
             end_y = target_box['y'] + target_box['height'] / 2
             drag_desc = f'拖到元素 [{target_type}={target_value}]'
         else:
-            direction = str(params.get('direction') or 'right').lower()
-            try:
-                distance = float(params.get('distance') or 100)
-            except (TypeError, ValueError):
-                return False, '拖动距离必须是数字'
+            # 兼容 {"x": 260, "y": 0} 偏移格式
+            if 'x' in params or 'y' in params:
+                try:
+                    dx = float(params.get('x') or 0)
+                    dy = float(params.get('y') or 0)
+                except (TypeError, ValueError):
+                    return False, '拖动偏移量 x/y 必须是数字'
+                end_x = start_x + dx
+                end_y = start_y + dy
+                drag_desc = f'相对拖动 offset ({dx}, {dy})'
+            else:
+                direction = str(params.get('direction') or 'right').lower()
+                try:
+                    distance = float(params.get('distance') or 100)
+                except (TypeError, ValueError):
+                    return False, '拖动距离必须是数字'
 
-            direction_delta = {
-                'right': (distance, 0),
-                'left': (-distance, 0),
-                'up': (0, -distance),
-                'down': (0, distance),
-            }
-            if direction not in direction_delta:
-                return False, f'不支持的拖动方向: {direction}'
+                direction_delta = {
+                    'right': (distance, 0),
+                    'left': (-distance, 0),
+                    'up': (0, -distance),
+                    'down': (0, distance),
+                }
+                if direction not in direction_delta:
+                    return False, f'不支持的拖动方向: {direction}'
 
-            dx, dy = direction_delta[direction]
-            end_x = start_x + dx
-            end_y = start_y + dy
-            drag_desc = f'相对拖动 {direction} {distance}px'
+                dx, dy = direction_delta[direction]
+                end_x = start_x + dx
+                end_y = start_y + dy
+                drag_desc = f'相对拖动 {direction} {distance}px'
 
+        await locator.hover()
         await page.mouse.move(start_x, start_y)
         await page.mouse.down()
         if delay_ms > 0:
