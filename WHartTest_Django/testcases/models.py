@@ -607,3 +607,50 @@ class ManualTestAssignment(models.Model):
             else self.testcase_snapshot.get("name", f"已删除用例 #{self.testcase_snapshot.get('id', '-')}")
         )
         return f"{self.run.name} - {testcase_name}"
+
+
+class TestCaseRunRecord(models.Model):
+    """用例管理模块中单条用例的 AI 执行记录（与测试套件批量执行隔离）。"""
+
+    STATUS_CHOICES = [
+        ("running", _("执行中")),
+        ("pass", _("通过")),
+        ("fail", _("失败")),
+        ("error", _("错误")),
+        ("stopped", _("已停止")),
+    ]
+
+    testcase = models.ForeignKey(
+        TestCase,
+        on_delete=models.CASCADE,
+        related_name="run_records",
+        verbose_name=_("测试用例"),
+    )
+    executor = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="testcase_run_records",
+        verbose_name=_("执行人"),
+    )
+    session_id = models.CharField(_("会话 ID"), max_length=255, unique=True, db_index=True)
+    status = models.CharField(
+        _("执行状态"),
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="running",
+    )
+    summary = models.TextField(_("结果摘要"), blank=True, default="")
+    step_results = models.JSONField(_("步骤结果"), default=list, blank=True)
+    execution_log = models.TextField(_("执行日志"), blank=True, default="")
+    generate_playwright_script = models.BooleanField(_("生成脚本"), default=False)
+    started_at = models.DateTimeField(_("开始时间"), auto_now_add=True)
+    completed_at = models.DateTimeField(_("完成时间"), null=True, blank=True)
+
+    class Meta:
+        verbose_name = _("用例执行记录")
+        verbose_name_plural = _("用例执行记录")
+        ordering = ["-started_at"]
+
+    def __str__(self):
+        return f"{self.testcase.name} - {self.get_status_display()} - {self.started_at:%Y-%m-%d %H:%M:%S}"

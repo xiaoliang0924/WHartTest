@@ -189,12 +189,32 @@
           </span>
         </a-tooltip>
       </template>
+      <template #lastExecution="{ record }">
+        <a-tag
+          v-if="record.latest_run"
+          :color="getRunStatusColor(record.latest_run.status)"
+          class="run-status-tag"
+          @click.stop="handleViewExecutionReport(record)"
+        >
+          {{ getRunStatusLabel(record.latest_run.status) }}
+        </a-tag>
+        <span v-else>-</span>
+      </template>
       <template #operations="{ record }">
         <a-space :size="4">
           <a-button type="primary" size="mini" @click.stop="handleViewTestCase(record)">{{ pageText.view }}</a-button>
           <a-button type="primary" size="mini" @click.stop="handleEditTestCase(record)">{{ pageText.edit }}</a-button>
           <a-button type="outline" size="mini" @click.stop="openMoveModal([record.id])">{{ pageText.move }}</a-button>
           <a-button type="outline" size="mini" @click.stop="handleExecuteTestCase(record)">{{ pageText.execute }}</a-button>
+          <a-button
+            v-if="record.latest_run"
+            type="outline"
+            size="mini"
+            status="success"
+            @click.stop="handleViewExecutionReport(record)"
+          >
+            {{ pageText.report }}
+          </a-button>
           <a-button type="outline" size="mini" @click.stop="handleCopyTestCase(record)">{{ pageText.copy }}</a-button>
           <a-button type="primary" status="danger" size="mini" @click.stop="handleDeleteTestCase(record)">{{ pageText.delete }}</a-button>
         </a-space>
@@ -275,6 +295,7 @@ const emit = defineEmits<{
 (e: 'testCasesMoved'): void;
   (e: 'testCaseCopied'): void;
   (e: 'executeTestCase', testCase: TestCase): void;
+  (e: 'viewExecutionReport', testCase: TestCase): void;
   (e: 'module-filter-change', moduleId: number | null): void;
   (e: 'requestOptimization', testCase: TestCase): void;
 }>();
@@ -318,6 +339,7 @@ const pageText = computed(() => (
         view: 'View',
         edit: 'Edit',
         execute: 'Run',
+        report: 'Report',
         delete: 'Delete',
         copy: 'Copy',
         select: 'Select',
@@ -352,6 +374,12 @@ const pageText = computed(() => (
         batchDeleteDetails: (details: string) => `Deletion details: ${details}`,
         batchDeleteFailed: 'Failed to batch delete test cases',
         batchDeleteError: 'An error occurred while batch deleting test cases',
+        lastExecution: 'Last run',
+        runRunning: 'Running',
+        runPass: 'Pass',
+        runFail: 'Fail',
+        runError: 'Error',
+        runStopped: 'Stopped',
       }
     : {
         searchPlaceholder: '搜索用例名称/前置条件',
@@ -380,6 +408,7 @@ const pageText = computed(() => (
         view: '查看',
         edit: '编辑',
         execute: '执行',
+        report: '报告',
         delete: '删除',
         copy: '复制',
         select: '选择',
@@ -414,6 +443,12 @@ const pageText = computed(() => (
         batchDeleteDetails: (details: string) => `删除详情: ${details}`,
         batchDeleteFailed: '批量删除测试用例失败',
         batchDeleteError: '批量删除测试用例时发生错误',
+        lastExecution: '最近执行',
+        runRunning: '执行中',
+        runPass: '通过',
+        runFail: '失败',
+        runError: '错误',
+        runStopped: '已停止',
       }
 ));
 
@@ -672,6 +707,7 @@ const columns = computed(() => ([
   { title: pageText.value.priority, dataIndex: 'level', slotName: 'level', width: getColumnWidth('level'), align: 'center' },
   { title: pageText.value.testType, dataIndex: 'test_type', slotName: 'testType', width: getColumnWidth('test_type'), align: 'center' },
   { title: pageText.value.reviewStatus, dataIndex: 'review_status', slotName: 'reviewStatus', width: getColumnWidth('review_status'), align: 'center' },
+  { title: pageText.value.lastExecution, slotName: 'lastExecution', width: 100, align: 'center' },
   { title: pageText.value.module, dataIndex: 'module_detail', slotName: 'module', width: getColumnWidth('module_detail'), ellipsis: true, tooltip: true, align: 'center' },
   {
     title: pageText.value.creator,
@@ -696,8 +732,27 @@ const columns = computed(() => ([
     align: 'center',
     sortable: { sortDirections: ['ascend', 'descend'], sortOrder: getSortOrder('updated_at') },
   },
-  { title: pageText.value.actions, slotName: 'operations', width: 240, fixed: 'right', align: 'center' },
+  { title: pageText.value.actions, slotName: 'operations', width: 300, fixed: 'right', align: 'center' },
 ]) as TableColumnData[]);
+
+const getRunStatusLabel = (status?: string) => {
+  const map: Record<string, string> = {
+    running: pageText.value.runRunning,
+    pass: pageText.value.runPass,
+    fail: pageText.value.runFail,
+    error: pageText.value.runError,
+    stopped: pageText.value.runStopped,
+  };
+  return map[status || ''] || '-';
+};
+
+const getRunStatusColor = (status?: string) => {
+  return ({ running: 'arcoblue', pass: 'green', fail: 'red', error: 'orangered', stopped: 'gray' } as Record<string, string>)[status || ''] || 'gray';
+};
+
+const handleViewExecutionReport = (testCase: TestCase) => {
+  emit('viewExecutionReport', testCase);
+};
 
 const handleColumnResize = (dataIndex: string, width: number) => {
   if (!(dataIndex in defaultColumnWidths) && dataIndex !== 'updated_at') return;
@@ -1304,6 +1359,10 @@ defineExpose({
 .testcase-name-link:hover {
   color: var(--theme-accent-hover);
   text-decoration: underline;
+}
+
+.run-status-tag {
+  cursor: pointer;
 }
 
 /* 移除重复的样式定义 */

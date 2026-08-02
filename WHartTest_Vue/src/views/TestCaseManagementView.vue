@@ -25,6 +25,7 @@
           @edit-test-case="showEditTestCaseForm"
           @view-test-case="showViewTestCaseDetail"
           @execute-test-case="handleExecuteTestCase"
+          @view-execution-report="handleViewExecutionReport"
           @test-case-deleted="handleTestCaseDeleted"
 @test-cases-moved="handleTestCaseDeleted"
           @test-case-copied="handleTestCaseCopied"
@@ -108,6 +109,15 @@
       @confirm="handleExecuteConfirm"
     />
 
+    <TestCaseExecutionResultDrawer
+      v-model:visible="isExecutionResultDrawerVisible"
+      :project-id="currentProjectId"
+      :test-case="executionResultTestCase"
+      :session-id="executionSessionId"
+      ref="executionResultDrawerRef"
+      @finished="handleExecutionFinished"
+    />
+
     <OptimizationSuggestionModal
       v-model="isOptimizationModalVisible"
       :test-case="pendingOptimizationTestCase"
@@ -139,6 +149,7 @@ import TestCaseDetail from '@/components/testcase/TestCaseDetail.vue';
 import TestCaseMindmap from '@/components/testcase/TestCaseMindmap.vue';
 import GenerateCasesModal from '@/components/testcase/GenerateCasesModal.vue';
 import ExecuteTestCaseModal from '@/components/testcase/ExecuteTestCaseModal.vue';
+import TestCaseExecutionResultDrawer from '@/components/testcase/TestCaseExecutionResultDrawer.vue';
 import OptimizationSuggestionModal from '@/components/testcase/OptimizationSuggestionModal.vue';
 import {
   sendChatMessageStream
@@ -259,6 +270,10 @@ const currentEditingTestCaseId = ref<number | null>(null);
 const currentViewingTestCaseId = ref<number | null>(null);
 const isGenerateCasesModalVisible = ref(false);
 const isExecuteModalVisible = ref(false);
+const isExecutionResultDrawerVisible = ref(false);
+const executionResultTestCase = ref<TestCase | null>(null);
+const executionSessionId = ref<string | null>(null);
+const executionResultDrawerRef = ref<InstanceType<typeof TestCaseExecutionResultDrawer> | null>(null);
 const isOptimizationModalVisible = ref(false);
 const pendingExecuteTestCase = ref<TestCase | null>(null);
 const pendingOptimizationTestCase = ref<TestCase | null>(null);
@@ -276,24 +291,28 @@ const startAutomationTask = (
   notificationTitle: string,
   notificationContent: string,
   notificationIdPrefix: string,
-  footerLinkText: string
+  footerLinkText: string,
+  streamHooks?: {
+    onStarted?: (sessionId: string) => void;
+    onComplete?: (sessionId: string) => void;
+    onError?: (sessionId: string, message: string) => void;
+  }
 ) => {
   sendChatMessageStream(
     requestData,
     (sessionId) => {
       localStorage.setItem('langgraph_session_id', sessionId);
+      streamHooks?.onStarted?.(sessionId);
 
-      // 保存提示词ID，使LangGraphChatView能恢复选中状态
       if (requestData.prompt_id) {
         localStorage.setItem('wharttest_selected_prompt_id', String(requestData.prompt_id));
       }
 
-      // 保存知识库设置，使LangGraphChatView能恢复选中状态
       const knowledgeSettings = {
         useKnowledgeBase: requestData.use_knowledge_base || false,
         selectedKnowledgeBaseId: requestData.knowledge_base_id || null,
-        similarityThreshold: 0.3, // 默认值
-        topK: 5 // 默认值
+        similarityThreshold: 0.3,
+        topK: 5,
       };
       localStorage.setItem('langgraph_knowledge_settings', JSON.stringify(knowledgeSettings));
 
@@ -302,9 +321,7 @@ const startAutomationTask = (
         content: notificationContent,
         footer: () => h(
           'div',
-          {
-            style: 'text-align: right; margin-top: 12px;',
-          },
+          { style: 'text-align: right; margin-top: 12px;' },
           [
             h(
               'a',
@@ -312,9 +329,7 @@ const startAutomationTask = (
                 href: 'javascript:;',
                 onClick: () => {
                   router.push({ name: 'LangGraphChat' });
-                  if (notificationReturn) {
-                    notificationReturn.close();
-                  }
+                  notificationReturn?.close();
                 },
               },
               footerLinkText
@@ -324,6 +339,15 @@ const startAutomationTask = (
         duration: 10000,
         id: `${notificationIdPrefix}-${sessionId}`,
       });
+    },
+    undefined,
+    {
+      onComplete: (sessionId) => {
+        streamHooks?.onComplete?.(sessionId);
+      },
+      onError: (sessionId, message) => {
+        streamHooks?.onError?.(sessionId, message);
+      },
     }
   );
 };
@@ -701,15 +725,43 @@ const handleExecuteConfirm = (options: { generatePlaywrightScript: boolean }) =>
     ? taskText.value.executionStartedWithGenerationContent
     : taskText.value.executionStartedContent;
 
+  executionResultTestCase.value = testCase;
+  executionSessionId.value = null;
+  isExecutionResultDrawerVisible.value = true;
+
   startAutomationTask(
     requestData,
     taskText.value.executionStarted,
     notificationContent,
     'exec-case',
-    taskText.value.viewExecutionProgress
+    taskText.value.viewExecutionProgress,
+    {
+      onStarted: (sessionId) => {
+        executionSessionId.value = sessionId;
+      },
+      onComplete: async (sessionId) => {
+        executionSessionId.value = sessionId;
+        await executionResultDrawerRef.value?.markCompleted();
+        Message.success(isEnglish.value ? 'Execution finished. See result drawer.' : '用例执行已完成，请查看右侧执行结果。');
+      },
+      onError: (sessionId, message) => {
+        executionSessionId.value = sessionId;
+        executionResultDrawerRef.value?.setStreamError(message);
+      },
+    }
   );
 
   pendingExecuteTestCase.value = null;
+};
+
+const handleViewExecutionReport = (testCase: TestCase) => {
+  executionResultTestCase.value = testCase;
+  executionSessionId.value = testCase.latest_run?.session_id || null;
+  isExecutionResultDrawerVisible.value = true;
+};
+
+const handleExecutionFinished = () => {
+  testCaseListRef.value?.refreshTestCases?.();
 };
 
 const handleRequestOptimization = (testCase: TestCase) => {

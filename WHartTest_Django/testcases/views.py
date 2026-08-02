@@ -802,6 +802,46 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         except TestCaseScreenshot.DoesNotExist:
             return Response({"error": "截屏不存在"}, status=status.HTTP_404_NOT_FOUND)
 
+    @action(detail=True, methods=["get"], url_path="run-records")
+    def list_run_records(self, request, project_pk=None, pk=None):
+        """GET /api/projects/{project_pk}/testcases/{pk}/run-records/"""
+        testcase = self.get_object()
+        records = testcase.run_records.select_related("executor").order_by("-started_at")[:20]
+        from .serializers import TestCaseRunRecordSerializer
+
+        serializer = TestCaseRunRecordSerializer(records, many=True, context={"request": request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["get"], url_path="run-records/latest")
+    def latest_run_record(self, request, project_pk=None, pk=None):
+        """GET /api/projects/{project_pk}/testcases/{pk}/run-records/latest/?session_id="""
+        testcase = self.get_object()
+        from .serializers import TestCaseRunRecordSerializer
+
+        session_id = request.query_params.get("session_id")
+        queryset = testcase.run_records.select_related("executor").order_by("-started_at")
+        if session_id:
+            record = queryset.filter(session_id=session_id).first()
+        else:
+            record = queryset.first()
+        if not record:
+            return Response({"detail": "暂无执行记录"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(TestCaseRunRecordSerializer(record, context={"request": request}).data)
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path=r"run-records/(?P<record_id>[^/.]+)",
+    )
+    def get_run_record(self, request, project_pk=None, pk=None, record_id=None):
+        testcase = self.get_object()
+        from .serializers import TestCaseRunRecordSerializer
+
+        record = testcase.run_records.filter(id=record_id).select_related("executor").first()
+        if not record:
+            return Response({"detail": "执行记录不存在"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(TestCaseRunRecordSerializer(record, context={"request": request}).data)
+
     @action(detail=True, methods=["post"], url_path="screenshots/batch-delete")
     @permission_required("testcases.delete_testcasescreenshot")
     def batch_delete_screenshots(self, request, project_pk=None, pk=None):

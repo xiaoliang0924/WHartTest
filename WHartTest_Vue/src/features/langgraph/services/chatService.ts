@@ -393,10 +393,16 @@ async function readHttpErrorMessage(response: Response, fallback: string) {
 /**
  * 发送流式对话消息
  */
+export type ChatStreamHooks = {
+  onComplete?: (sessionId: string, payload?: Record<string, unknown>) => void;
+  onError?: (sessionId: string, message: string) => void;
+};
+
 export async function sendChatMessageStream(
   data: ChatRequest,
   onStart: (sessionId: string) => void, // 简化回调，只保留 onStart
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  hooks?: ChatStreamHooks
 ): Promise<void> {
   const authStore = useAuthStore();
   let token = authStore.getAccessToken;
@@ -426,6 +432,9 @@ export async function sendChatMessageStream(
     if (sessionId && activeStreams.value[sessionId]) {
       activeStreams.value[sessionId].error = message;
       activeStreams.value[sessionId].isComplete = true;
+    }
+    if (sessionId) {
+      hooks?.onError?.(sessionId, message);
     }
   };
 
@@ -764,6 +773,8 @@ export async function sendChatMessageStream(
               };
               console.log('[ChatService] Script generation available:', parsed.script_generation);
             }
+
+            hooks?.onComplete?.(streamSessionId, parsed as Record<string, unknown>);
           }
         } catch (e) {
           console.warn('Failed to parse SSE data:', jsonData);

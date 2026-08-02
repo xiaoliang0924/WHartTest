@@ -1115,8 +1115,16 @@ class AgentLoopStreamAPIView(View):
                 logger.info(
                     f"AgentLoopStreamAPI: 已追加用例管理执行提示 test_case_id={test_case_id}"
                 )
+                from testcases.run_record_service import start_testcase_run_record
 
-            # 9. 构建用户消息（支持多模态：上传图片 + HTTP(S) 图片 + 需求文档图片）
+                await sync_to_async(start_testcase_run_record)(
+                    testcase_id=int(test_case_id),
+                    user_id=request.user.id,
+                    session_id=session_id,
+                    generate_playwright_script=bool(generate_playwright_script),
+                )
+
+            streamed_assistant_content = ""
             user_message_for_llm = user_message
             if llm_attachment_context:
                 user_message_for_llm = user_message + "\n\n以下是用户附加文件内容，请作为本轮对话上下文使用:" + llm_attachment_context
@@ -1437,6 +1445,7 @@ class AgentLoopStreamAPIView(View):
                                     # 检查是否是 ToolMessage（通过类名或 type 属性）
                                     token_type = type(token).__name__
                                     if "ToolMessage" not in token_type:
+                                        streamed_assistant_content += token.content
                                         yield create_sse_data(
                                             {"type": "stream", "data": token.content}
                                         )
@@ -1445,6 +1454,7 @@ class AgentLoopStreamAPIView(View):
                                 # 同样过滤掉 ToolMessage
                                 chunk_type = type(chunk).__name__
                                 if "ToolMessage" not in chunk_type:
+                                    streamed_assistant_content += chunk.content
                                     yield create_sse_data(
                                         {"type": "stream", "data": chunk.content}
                                     )
@@ -1458,6 +1468,14 @@ class AgentLoopStreamAPIView(View):
                             friendly_error.get("error_code"),
                             friendly_error.get("message"),
                         )
+                        if test_case_id:
+                            from testcases.run_record_service import finalize_testcase_run_record
+
+                            await sync_to_async(finalize_testcase_run_record)(
+                                session_id=session_id,
+                                final_content=streamed_assistant_content,
+                                error_message=friendly_error.get("message"),
+                            )
                         yield create_sse_data(_build_sse_error_event(e))
                     else:
                         logger.error(
@@ -1546,6 +1564,14 @@ class AgentLoopStreamAPIView(View):
                         logger.error(f"AgentLoopStreamAPI: Failed to auto-summarize title: {summarize_err}", exc_info=True)
 
                 if user_stopped:
+                    if test_case_id:
+                        from testcases.run_record_service import finalize_testcase_run_record
+
+                        await sync_to_async(finalize_testcase_run_record)(
+                            session_id=session_id,
+                            final_content=streamed_assistant_content,
+                            stopped=True,
+                        )
                     yield create_sse_data(
                         {"type": "complete", "status": "stopped", "steps": step_count}
                     )
@@ -1554,7 +1580,43 @@ class AgentLoopStreamAPIView(View):
                         "AgentLoopStreamAPI: Interrupt detected, returning early"
                     )
                 else:
-                    complete_data = {"type": "complete", "total_steps": step_count}
+                    if test_case_id:
+                        from testcases.run_record_service import finalize_testcase_run_record
+
+                        final_content = streamed_assistant_content
+                        try:
+                            if "all_messages" in locals() and all_messages:
+                                for msg in reversed(all_messages):
+                                    msg_type = type(msg).__name__
+                                    if msg_type in ("ToolMessage", "HumanMessage"):
+                                        continue
+                                    content = getattr(msg, "content", None)
+                                    if content:
+                                        final_content = (
+                                            content
+                                            if isinstance(content, str)
+                                            else str(content)
+                                        )
+                                        break
+                        except Exception as extract_err:
+                            logger.warning(
+                                "AgentLoopStreamAPI: Failed to extract final testcase content: %s",
+                                extract_err,
+                            )
+                        record = await sync_to_async(finalize_testcase_run_record)(
+                            session_id=session_id,
+                            final_content=final_content,
+                        )
+                        complete_data = {
+                            "type": "complete",
+                            "total_steps": step_count,
+                            "test_case_run": {
+                                "status": record.status if record else "pass",
+                                "summary": record.summary if record else "",
+                            },
+                        }
+                    else:
+                        complete_data = {"type": "complete", "total_steps": step_count}
                     if generate_playwright_script:
                         complete_data["script_generation"] = {
                             "enabled": True,

@@ -8,6 +8,7 @@ from .models import (
     TestSuite,
     TestExecution,
     TestCaseResult,
+    TestCaseRunRecord,
     ManualTestRun,
     ManualTestAssignment,
 )
@@ -54,6 +55,7 @@ class TestCaseListSerializer(serializers.ModelSerializer):
     creator_detail = UserDetailSerializer(source="creator", read_only=True)
     module_id = serializers.PrimaryKeyRelatedField(source="module", read_only=True)
     module_detail = serializers.StringRelatedField(source="module", read_only=True)
+    latest_run = serializers.SerializerMethodField()
 
     class Meta:
         model = TestCase
@@ -75,8 +77,15 @@ class TestCaseListSerializer(serializers.ModelSerializer):
             "review_status",
             "test_type",
             "sort_order",
+            "latest_run",
         ]
         read_only_fields = fields
+
+    def get_latest_run(self, obj):
+        run = obj.run_records.order_by("-started_at").first()
+        if not run:
+            return None
+        return TestCaseRunRecordSerializer(run).data
 
     def get_screenshots(self, obj):
         """获取测试用例的所有截屏"""
@@ -101,6 +110,7 @@ class TestCaseSerializer(serializers.ModelSerializer):
     module_detail = serializers.StringRelatedField(
         source="module", read_only=True
     )  # 用于只读展示模块名称
+    latest_run = serializers.SerializerMethodField()
 
     # project 字段在创建时需要，但通常通过 URL 传递，不在请求体中
     # project = serializers.PrimaryKeyRelatedField(queryset=Project.objects.all()) # 可以取消注释用于校验
@@ -126,6 +136,7 @@ class TestCaseSerializer(serializers.ModelSerializer):
             "review_status",
             "test_type",
             "sort_order",
+            "latest_run",
         ]
         read_only_fields = [
             "id",
@@ -136,6 +147,7 @@ class TestCaseSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "sort_order",
+            "latest_run",
         ]
         # project 字段在创建时是必需的，但通常从 URL 获取，不在 request.data 中。
         # 如果要通过 request.data 传递 project_id，则需要将其从 read_only_fields 中移除，
@@ -143,6 +155,12 @@ class TestCaseSerializer(serializers.ModelSerializer):
         # 这里我们假设 project 将从 URL 传递给视图，并在视图的 perform_create 中设置。
         # 因此，对于序列化器本身，project 字段可以被视为只读或在创建时不直接通过此序列化器输入。
         # 为了简单起见，我们先将其保留在 fields 中，视图将负责处理其赋值。
+
+    def get_latest_run(self, obj):
+        run = obj.run_records.order_by("-started_at").first()
+        if not run:
+            return None
+        return TestCaseRunRecordSerializer(run).data
 
     def validate(self, attrs):
         """验证数据"""
@@ -580,6 +598,28 @@ class TestSuiteSerializer(serializers.ModelSerializer):
 
 
 from urllib.parse import urlparse
+
+
+class TestCaseRunRecordSerializer(serializers.ModelSerializer):
+    executor_detail = UserDetailSerializer(source="executor", read_only=True)
+
+    class Meta:
+        model = TestCaseRunRecord
+        fields = [
+            "id",
+            "testcase",
+            "executor",
+            "executor_detail",
+            "session_id",
+            "status",
+            "summary",
+            "step_results",
+            "execution_log",
+            "generate_playwright_script",
+            "started_at",
+            "completed_at",
+        ]
+        read_only_fields = fields
 
 
 class TestCaseResultSerializer(serializers.ModelSerializer):

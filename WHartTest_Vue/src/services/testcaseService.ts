@@ -79,6 +79,31 @@ export interface TestCase {
   };
   created_at: string;
   updated_at: string;
+  latest_run?: TestCaseRunRecord | null;
+}
+
+export interface TestCaseRunStepResult {
+  step_number?: number;
+  description?: string;
+  status?: string;
+  error?: string;
+  expected_result?: string;
+  actual_result?: string;
+}
+
+export interface TestCaseRunRecord {
+  id: number;
+  testcase: number;
+  executor?: number;
+  executor_detail?: TestCase['creator_detail'];
+  session_id: string;
+  status: 'running' | 'pass' | 'fail' | 'error' | 'stopped';
+  summary: string;
+  step_results: TestCaseRunStepResult[];
+  execution_log?: string;
+  generate_playwright_script?: boolean;
+  started_at: string;
+  completed_at?: string | null;
 }
 
 // 创建测试用例请求参数
@@ -1256,4 +1281,65 @@ export const updateTestCaseReviewStatus = async (
   reviewStatus: ReviewStatus
 ): Promise<TestCaseResponse> => {
   return updateTestCase(projectId, testCaseId, { review_status: reviewStatus });
+};
+
+export const getLatestTestCaseRunRecord = async (
+  projectId: number,
+  testCaseId: number,
+  sessionId?: string
+): Promise<{ success: boolean; data?: TestCaseRunRecord; error?: string }> => {
+  const authStore = useAuthStore();
+  const accessToken = authStore.getAccessToken;
+  if (!accessToken) {
+    return { success: false, error: '未登录或会话已过期' };
+  }
+  try {
+    const response = await axios.get(
+      `${API_BASE_URL}/projects/${projectId}/testcases/${testCaseId}/run-records/latest/`,
+      {
+        params: sessionId ? { session_id: sessionId } : undefined,
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+        },
+      }
+    );
+    return { success: true, data: response.data };
+  } catch (error: any) {
+    if (error.response?.status === 404) {
+      return { success: false, error: '暂无执行记录' };
+    }
+    return {
+      success: false,
+      error: error.response?.data?.detail || error.message || '获取执行记录失败',
+    };
+  }
+};
+
+export const getTestCaseRunRecords = async (
+  projectId: number,
+  testCaseId: number
+): Promise<{ success: boolean; data?: TestCaseRunRecord[]; error?: string }> => {
+  const authStore = useAuthStore();
+  const accessToken = authStore.getAccessToken;
+  if (!accessToken) {
+    return { success: false, error: '未登录或会话已过期' };
+  }
+  try {
+    const response = await axios.get(
+      `${API_BASE_URL}/projects/${projectId}/testcases/${testCaseId}/run-records/`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+        },
+      }
+    );
+    return { success: true, data: response.data };
+  } catch (error: any) {
+    return {
+      success: false,
+      error: error.response?.data?.detail || error.message || '获取执行历史失败',
+    };
+  }
 };
