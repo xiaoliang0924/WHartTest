@@ -47,7 +47,10 @@ from .middleware_config import (
     get_user_tool_approvals,
     get_user_friendly_llm_error,
 )
-from .playwright_instructions import PLAYWRIGHT_SCRIPT_INSTRUCTION
+from .playwright_instructions import (
+    MANUAL_TESTCASE_EXECUTION_HINT,
+    PLAYWRIGHT_SCRIPT_INSTRUCTION,
+)
 from .stop_signal import should_stop, clear_stop_signal
 from langgraph_integration.models import ChatSession, LLMConfig
 from langgraph_integration.views import (
@@ -1105,6 +1108,13 @@ class AgentLoopStreamAPIView(View):
                     effective_prompt or ""
                 ) + PLAYWRIGHT_SCRIPT_INSTRUCTION
                 logger.info(f"AgentLoopStreamAPI: 已追加脚本生成指令")
+
+            # 8.2 用例管理「执行」传入的 test_case_id 需明确 ID 命名空间
+            if test_case_id:
+                effective_prompt = (effective_prompt or "") + MANUAL_TESTCASE_EXECUTION_HINT
+                logger.info(
+                    f"AgentLoopStreamAPI: 已追加用例管理执行提示 test_case_id={test_case_id}"
+                )
 
             # 9. 构建用户消息（支持多模态：上传图片 + HTTP(S) 图片 + 需求文档图片）
             user_message_for_llm = user_message

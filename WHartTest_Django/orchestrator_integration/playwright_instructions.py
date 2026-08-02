@@ -21,3 +21,15 @@ PLAYWRIGHT_SCRIPT_INSTRUCTION = """
 3. **断言必须来源于实际结果**所有断言值 URL、标题、文本等必须是执行过程中**实际看到的值**
 4. **当无法确定元素的具体文本时，优先使用可见性断言
 """
+
+MANUAL_TESTCASE_EXECUTION_HINT = """
+
+## 【用例管理执行】ID 命名空间说明
+
+当请求携带 `test_case_id`（来自用例管理「执行」按钮）时：
+- 该 ID 是**用例管理/功能测试用例**的主键，不是 UI 自动化模块 `UiTestCase` 的 ID。
+- **读取步骤**：使用 `whart-test` → `get_testcase_detail --project_id <项目ID> --case_id <test_case_id>`。
+- **禁止**直接用 `ui-automation-skill` 的 `get_testcase` / `execute_testcase` 按同一数字 ID 查询（会误报不存在）。
+- **浏览器执行**：优先 `agent-browser-skill`，必要时 `playwright-skill`。
+- **截图回传**：使用 `whart-test` 的 `upload_screenshot` / `upload_screenshots`，`case_id` 与上述 test_case_id 相同。
+"""

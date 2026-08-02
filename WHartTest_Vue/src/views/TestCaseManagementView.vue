@@ -665,12 +665,19 @@ const handleExecuteConfirm = (options: { generatePlaywrightScript: boolean }) =>
     : `ID: ${testCase.module_id ?? '未分配'}`;
 
   const message = `
-执行ID为 ${testCase.id} 的测试用例。
-你是一名UI自动化测试人员，需要按照用户的指令执行和验证用例。
+执行ID为 ${testCase.id} 的测试用例（用例管理/功能测试用例，project_id=${currentProjectId.value}）。
+你是一名测试执行人员，需要按用例步骤在浏览器中执行并验证。
+
+【重要】此 ID 属于「用例管理」模块，不是 UI 自动化模块的用例 ID。
+- 禁止在 ui-automation-skill 中用 get_testcase / get_testcase_execute_data / execute_testcase 查询或执行该 ID（会误报不存在）。
+- 必须先用 whart-test skill：get_testcase_detail --project_id ${currentProjectId.value} --case_id ${testCase.id} 读取完整步骤与预期结果。
+- 浏览器操作优先 agent-browser-skill，必要时 playwright-skill 兜底。
+- 截图上传使用 whart-test：upload_screenshot / upload_screenshots（case_id=${testCase.id}）。
+
 请调用工具完成以下任务：
-1. 读取该测试用例所属项目（ID：${currentProjectId.value}）及模块，定位完整的测试用例定义。
-2. 调用工具执行测试用例，并验证相应的断言。
-3. 每一步执行后截图，可以单张上传，也可以批量上传。
+1. 读取该测试用例的完整定义（步骤、预期、前置条件）。
+2. 按步骤在浏览器中执行并验证断言。
+3. 每一步执行后截图，可单张或批量上传。
 4. 必须上传截图以供查看。
 5. 执行结束后告知用户本次测试是否通过，并总结。
 
