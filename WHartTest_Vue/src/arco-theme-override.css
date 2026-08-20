@@ -1044,6 +1044,34 @@ body:not([arco-theme='dark']) .arco-table-header {
   background-color: var(--color-neutral-2) !important;
 }
 
+/* 黑主题通用变量与弹出层兜底 */
+:root[data-theme='black'],
+body[arco-theme='dark'] {
+  --color-bg-1: #17171a;
+  --color-bg-2: #232324;
+  --color-bg-3: #2a2a2c;
+  --color-bg-popup: #232324;
+  --color-text-1: rgba(255, 255, 255, 0.9);
+  --color-text-2: rgba(255, 255, 255, 0.7);
+  --color-text-3: rgba(255, 255, 255, 0.5);
+  --color-border-1: #2e2e30;
+  --color-border-2: #38383a;
+}
+
+:root[data-theme='black'] .arco-table-td,
+body[arco-theme='dark'] .arco-table-td {
+  background-color: var(--color-bg-2) !important;
+  color: var(--color-text-1) !important;
+  border-color: var(--color-border-2) !important;
+}
+
+:root[data-theme='black'] .arco-table-th,
+body[arco-theme='dark'] .arco-table-th {
+  background-color: var(--color-bg-3) !important;
+  color: var(--color-text-1) !important;
+  border-color: var(--color-border-2) !important;
+}
+
 /* ── 修复暗色主题下拉菜单/弹出层"幻影"问题 —— 使用完全不透明背景 ── */
 
 /* 所有弹出层容器 —— 完全不透明背景 + 清除模糊 */
