@@ -2,6 +2,7 @@ import type { UserBrief } from './common';
 
 export type InterfaceType = 'http' | 'sql';
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
+export type InterfaceStatus = 'draft' | 'testing' | 'released' | 'deprecated' | 'disabled' | string;
 export type SqlMethod = 'fetchone' | 'fetchmany' | 'fetchall' | 'insert' | 'update' | 'delete';
 export type ApiBodyType = 'none' | 'form-data' | 'x-www-form-urlencoded' | 'raw' | 'binary';
 export type ExtractVariableType = 'temporary' | 'project';
