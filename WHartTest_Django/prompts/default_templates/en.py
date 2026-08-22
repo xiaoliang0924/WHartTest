@@ -544,6 +544,8 @@ Start executing now.''',
       - Consistency with the requirement, review conclusions, and KB context.
       - Coverage of real, reasonable, executable business scenarios.
       - Steps and expected results are clear, verifiable, executable.
+      - Preconditions include real account/password/URL and required business data state.
+      - Steps are atomic: one action per step, each with a checkable expected result.
       - No omissions, duplicates, vague wording, requirement drift, or fabricated content.
       - No overlap with existing cases.
 
@@ -581,6 +583,41 @@ Start executing now.''',
       - For features that do not require login: precondition must read "System URL: http://xxx".
       - The first step of `steps` must contain the full system URL.
       - NEVER use placeholders; write actual credential values.
+
+      **Precondition and step granularity (hard constraint; coarse steps are forbidden)**:
+      Preconditions MUST be a numbered list and include at least:
+      1. Which account logs in: name / username / password, plus the full system URL
+      2. Required business data and state (e.g. a work order in "Pending" status whose current handler is the logged-in user)
+      3. Other accounts if transfer, notification, or permission comparison is involved
+
+      Do NOT write vague steps such as "enter the page / view the button / try to access".
+      Each step MUST be **one independently executable UI or API action** with a **checkable expected result** (toast text, dialog, field state, list visibility, status value).
+
+      Minimum split (normally >= 4 steps; display-only cases >= 3):
+      - Enter the specific page (menu path or URL)
+      - Click the specific button / open the specific dialog
+      - Fill or select a specific field (field name and value; empty must say "leave empty")
+      - Click confirm / submit
+      - Assert the message, status, or whether the record appears in a list
+      - If another party's data or permission must be verified, add a step that logs in with that account
+
+      Forbidden examples (too coarse; do not save):
+      - Enter the process-task page / page loads normally
+      - View the one-click bind button / button is hidden or disabled
+      - Access the bind API via URL / permission denied
+
+      Required example:
+      Preconditions:
+      1. Log in with Li Liang (admin/admin123) at http://test.bot.by56.com/work-order/login
+      2. A work order in "Pending" status exists, and the current handler is the logged-in user
+      Steps:
+      1. Open the work-order detail page and click Transfer / the transfer dialog opens
+      2. Select a transfer target / selection succeeds
+      3. Leave Transfer Reason empty / the handover-instruction field is empty
+      4. Click Confirm Transfer / the system prompts "Please fill in: Transfer Reason" and transfer fails
+      5. Log in as the target user and open My Work Orders / the work order does not appear
+
+      If a step can still be split into independent actions during review, split it before saving.
 
       **Case-naming convention**:
       - Functional: `[feature]-[scenario]-happy path`

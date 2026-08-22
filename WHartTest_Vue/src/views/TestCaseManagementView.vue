@@ -195,6 +195,39 @@ const TEST_TYPE_PROMPTS: Record<string, string> = {
 - 原则：确保用户在不同环境下的体验一致性`
 };
 
+const CASE_STEP_DETAIL_PROMPT = `【前置条件与步骤粒度（必须遵守，禁止写粗步骤）】
+前置条件必须写成编号列表，至少包含：
+1. 使用哪个账号登录：姓名/用户名/密码，以及系统完整 URL
+2. 需要准备的业务数据与状态（例如：存在状态为“待处理”的工单，当前处理人为当前登录用户）
+3. 如涉及转派、通知、权限对比，必须写明其他账号
+
+测试步骤禁止写成“进入页面 / 查看按钮 / 尝试访问”这类概括句。
+每一步必须是一个可单独执行的界面或接口操作，并且必须有可判定的预期结果（提示文案、弹窗、字段状态、列表可见性、状态值）。
+
+最低拆分标准（一条用例原则上不少于 4 步，纯展示类不少于 3 步）：
+- 进入具体页面（写清菜单路径或 URL）
+- 点击具体按钮 / 打开具体弹窗
+- 填写或选择具体字段（写字段名和填什么；空值必须写“保持为空”）
+- 点击确认 / 提交
+- 断言提示语、状态、列表是否出现该数据
+- 如需验证另一方数据或权限，再增加用另一账号登录验证的步骤
+
+禁止示例（粒度不够，不得保存）：
+- 进入工单系统流程任务页面 / 页面正常加载
+- 查看一键绑定按钮 / 按钮不可见或禁用
+- 尝试通过 URL 直接访问绑定接口 / 返回无权限
+
+正确示例（必须达到此粒度）：
+前置条件：
+1. 使用李亮账号(admin/admin123)登录系统(http://test.bot.by56.com/work-order/login)
+2. 存在状态为“待处理”的工单，当前处理人为当前登录用户
+步骤：
+1. 登录后进入该工单详情页，点击“转派” / 弹出转派弹窗
+2. 选择转派目标 / 选择成功
+3. 转派原因保持为空 / 交接说明字段为空
+4. 点击确认转派 / 系统提示“请填写：转派原因”，转派失败
+5. 使用目标账号登录查看“我的工单” / 该工单不出现在列表中`;
+
 // 根据测试类型列表生成提示词片段
 const getTestTypePrompt = (testTypes: string[]): string => {
   if (!testTypes || testTypes.length === 0) {
@@ -552,6 +585,8 @@ const handleGenerateCasesSubmit = async (formData: {
 
 ${testTypePrompt}
 
+${CASE_STEP_DETAIL_PROMPT}
+
 ${formData.selectedModules.map((mod, idx) => `---
 [需求模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}标题]
 ${mod.title}
@@ -622,6 +657,8 @@ ${formData.selectedTestCases.map(tc => `- 用例ID: ${tc.id}, 名称: ${tc.name}
 请根据知识库和需求文档的知识，为以下用例生成测试步骤并保存对应用例中。
 
 ${testTypePrompt}
+
+${CASE_STEP_DETAIL_PROMPT}
 
 【重要约束】
 - 必须基于知识库和需求文档中的实际内容
@@ -814,7 +851,9 @@ ${stepsText}
 - 备注: ${data.testCase.notes || '无'}
 
 【用户优化建议】
-${data.suggestion || '请根据测试最佳实践进行全面优化'}
+${data.suggestion || '请把前置条件和步骤拆到可独立执行的粒度：前置条件写清账号/密码/URL和业务数据状态；每一步只做一个操作并给出可判定预期结果，不要写“进入页面查看按钮”这类粗步骤。'}
+
+${CASE_STEP_DETAIL_PROMPT}
   `.trim();
 
   const requestData: ChatRequest = {
