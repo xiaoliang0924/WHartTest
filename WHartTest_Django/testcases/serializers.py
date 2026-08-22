@@ -328,10 +328,14 @@ class TestCaseModuleSerializer(serializers.ModelSerializer):
     # 添加获取用例数量的方法
     def get_testcase_count(self, obj):
         """
-        计算模块下的用例数量（包含所有子模块的用例）
+        计算模块下的用例数量（包含所有子模块的用例）。
+        只统计当前模块所属项目内的用例，避免把误挂到该模块的其他项目用例算进去。
         """
         all_module_ids = obj.get_all_descendant_ids()
-        return TestCase.objects.filter(module_id__in=all_module_ids).count()
+        return TestCase.objects.filter(
+            module_id__in=all_module_ids,
+            project_id=obj.project_id,
+        ).count()
 
     def validate(self, attrs):
         """验证模块数据"""
