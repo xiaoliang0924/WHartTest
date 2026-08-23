@@ -582,12 +582,12 @@ Start executing now.''',
       - For features that require login: precondition must read "Use account XX (username/password) to log in to system (URL)".
       - For features that do not require login: precondition must read "System URL: http://xxx".
       - Login is setup. Do NOT split it into open URL / type username / type password / click Login.
-      - For non-login cases, start steps after login. If login must appear in steps, write it as 1 step only.
+      - For features that require login: step 1 MUST be login, and only 1 login step.
       - NEVER use placeholders; write actual credential values.
 
       **Precondition and step granularity (hard constraint)**:
       Preconditions MUST be a numbered list and include at least:
-      1. Which account logs in: name / username / password, plus the full system URL (put login here)
+      1. Which account logs in: name / username / password, plus the full system URL
       2. Required business data and state (e.g. a work order in "Pending" status whose current handler is the logged-in user)
       3. Other accounts if transfer, notification, or permission comparison is involved
 
@@ -595,9 +595,8 @@ Start executing now.''',
       Each business step MUST be **one independently executable UI or API action** with a **checkable expected result**.
 
       **Login step rules (MUST follow)**:
-      - For normal / display / permission cases: login belongs only in preconditions; do not split login in steps
-      - Only login-specific cases may include login actions in steps
-      - Even then, login is 1 step, e.g. "Log in with 17670400361/000000 at http://test.bot.by56.com/work-order/login"
+      - For features that require login: write the account in preconditions, then write login again as step 1
+      - Login is 1 step only, e.g. "Log in with 17670400361/000000 at http://test.bot.by56.com/work-order/login"
       - Forbidden: open login URL, enter username, enter password, click Login as four steps
 
       Minimum business-step split after login (normally >= 3):
@@ -617,13 +616,14 @@ Start executing now.''',
       1. Log in with Li Liang (admin/admin123) at http://test.bot.by56.com/work-order/login
       2. A work order in "Pending" status exists, and the current handler is the logged-in user
       Steps:
-      1. Open the work-order detail page and click Transfer / the transfer dialog opens
-      2. Select a transfer target / selection succeeds
-      3. Leave Transfer Reason empty / the handover-instruction field is empty
-      4. Click Confirm Transfer / the system prompts "Please fill in: Transfer Reason" and transfer fails
-      5. Log in as the target user and open My Work Orders / the work order does not appear
+      1. Log in with Li Liang (admin/admin123) at http://test.bot.by56.com/work-order/login / login succeeds
+      2. Open the work-order detail page and click Transfer / the transfer dialog opens
+      3. Select a transfer target / selection succeeds
+      4. Leave Transfer Reason empty / the handover-instruction field is empty
+      5. Click Confirm Transfer / the system prompts "Please fill in: Transfer Reason" and transfer fails
+      6. Log in as the target user and open My Work Orders / the work order does not appear
 
-      During review: do not split login further; split remaining business actions if they are still compound.
+      During review: keep login as 1 step only; split remaining business actions if they are still compound.
 
       **Case-naming convention**:
       - Functional: `[feature]-[scenario]-happy path`
