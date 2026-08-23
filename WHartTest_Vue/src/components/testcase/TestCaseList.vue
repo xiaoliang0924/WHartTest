@@ -531,7 +531,7 @@ const loading = ref(false);
 const localSearchKeyword = ref('');
 const selectedLevel = ref<string>('');
 const selectedTestType = ref<string>('');
-const selectedOrdering = ref<string>('-created_at');
+const selectedOrdering = ref<string>('created_at');
 // 默认选中除"不可用"之外的所有状态
 const DEFAULT_REVIEW_STATUSES: ReviewStatus[] = ['pending_review', 'approved', 'needs_optimization', 'optimization_pending_review', 'pending_product_confirmation'];
 const selectedReviewStatuses = ref<ReviewStatus[]>([...DEFAULT_REVIEW_STATUSES]);
@@ -1117,7 +1117,7 @@ watch(currentProjectId, () => {
   localSearchKeyword.value = '';
   selectedLevel.value = ''; // 项目切换时清空优先级筛选
   selectedTestType.value = ''; // 项目切换时清空测试类型筛选
-  selectedOrdering.value = '-created_at'; // 项目切换时重置排序
+  selectedOrdering.value = 'created_at'; // 项目切换时重置为最早创建在前
   selectedReviewStatuses.value = [...DEFAULT_REVIEW_STATUSES]; // 项目切换时重置审核状态筛选
   fetchTestCases();
 });

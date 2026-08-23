@@ -93,7 +93,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     filterset_class = TestCaseFilter  # 使用自定义的 FilterSet
     search_fields = ["name", "precondition"]
     ordering_fields = ["id", "created_at", "updated_at"]
-    ordering = ["-created_at"]
+    ordering = ["created_at"]
 
     def _should_include_steps(self):
         value = self.request.query_params.get("include_steps")
@@ -132,7 +132,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 "creator", "module"
             )
             if self.action == "list":
-                qs = qs.order_by("-created_at", "-id")
+                qs = qs.order_by("created_at", "id")
             if self.action != "list" or self._should_include_steps():
                 qs = qs.prefetch_related("steps")
             return qs
