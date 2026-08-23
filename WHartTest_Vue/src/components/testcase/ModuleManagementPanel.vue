@@ -1,5 +1,8 @@
 <template>
-  <div class="module-panel-wrapper">
+  <div
+    class="module-panel-wrapper"
+    :style="{ width: `${panelWidth}px` }"
+  >
     <a-card
       class="module-panel"
       :bordered="false"
@@ -88,11 +91,16 @@
         @close="closeModuleModal"
       />
     </a-card>
+    <div
+      class="module-panel-resizer"
+      title="拖动调整宽度"
+      @mousedown="startResize"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, watch, toRefs } from 'vue';
+import { ref, reactive, onMounted, onUnmounted, computed, watch, toRefs } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import type { TreeNodeData } from '@arco-design/web-vue';
 import {
@@ -115,6 +123,63 @@ const emit = defineEmits<{
 }>();
 
 const { currentProjectId } = toRefs(props);
+
+const MODULE_PANEL_WIDTH_STORAGE_KEY = 'wharttest_module_panel_width';
+const DEFAULT_PANEL_WIDTH = 280;
+const MIN_PANEL_WIDTH = 200;
+const MAX_PANEL_WIDTH = 600;
+
+const clampPanelWidth = (width: number): number => (
+  Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, width))
+);
+
+const getStoredPanelWidth = (): number => {
+  try {
+    const stored = localStorage.getItem(MODULE_PANEL_WIDTH_STORAGE_KEY);
+    if (!stored) return DEFAULT_PANEL_WIDTH;
+    const parsed = Number.parseInt(stored, 10);
+    return Number.isFinite(parsed) ? clampPanelWidth(parsed) : DEFAULT_PANEL_WIDTH;
+  } catch {
+    return DEFAULT_PANEL_WIDTH;
+  }
+};
+
+const panelWidth = ref(getStoredPanelWidth());
+let isResizing = false;
+let resizeStartX = 0;
+let resizeStartWidth = DEFAULT_PANEL_WIDTH;
+
+const savePanelWidth = () => {
+  localStorage.setItem(MODULE_PANEL_WIDTH_STORAGE_KEY, String(panelWidth.value));
+};
+
+const handleResizeMove = (event: MouseEvent) => {
+  if (!isResizing) return;
+  const diff = event.clientX - resizeStartX;
+  panelWidth.value = clampPanelWidth(resizeStartWidth + diff);
+};
+
+const stopResize = () => {
+  if (!isResizing) return;
+  isResizing = false;
+  document.removeEventListener('mousemove', handleResizeMove);
+  document.removeEventListener('mouseup', stopResize);
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+  savePanelWidth();
+};
+
+const startResize = (event: MouseEvent) => {
+  if (window.innerWidth <= 768) return;
+  event.preventDefault();
+  isResizing = true;
+  resizeStartX = event.clientX;
+  resizeStartWidth = panelWidth.value;
+  document.addEventListener('mousemove', handleResizeMove);
+  document.addEventListener('mouseup', stopResize);
+  document.body.style.cursor = 'col-resize';
+  document.body.style.userSelect = 'none';
+};
 
 // 加载状态
 const moduleLoading = ref(false); // 模块列表加载状态
@@ -482,6 +547,10 @@ onMounted(() => {
   }
 });
 
+onUnmounted(() => {
+  stopResize();
+});
+
 watch(currentProjectId, (newProjectId) => {
   if (newProjectId) {
     testCaseModules.value = [];
@@ -505,20 +574,53 @@ defineExpose({
 
 <style scoped>
 .module-panel-wrapper {
-  width: 280px;
+  position: relative;
   min-width: 200px;
-  max-width: 100%;
+  max-width: 600px;
   height: 100%;
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
 }
 
+.module-panel-resizer {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  width: 10px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+
+.module-panel-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: transparent;
+  transition: background-color 0.15s ease;
+}
+
+.module-panel-resizer:hover::after,
+.module-panel-wrapper:active .module-panel-resizer::after {
+  background: rgba(var(--theme-accent-rgb, 59, 130, 246), 0.45);
+}
+
 @media (max-width: 768px) {
   .module-panel-wrapper {
-    width: 100%;
+    width: 100% !important;
+    max-width: 100%;
     height: 200px;
     min-height: 150px;
+  }
+
+  .module-panel-resizer {
+    display: none;
   }
 }
 
