@@ -132,7 +132,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 "creator", "module"
             )
             if self.action == "list":
-                qs = qs.order_by("sort_order", "id")
+                qs = qs.order_by("-created_at", "-id")
             if self.action != "list" or self._should_include_steps():
                 qs = qs.prefetch_related("steps")
             return qs
