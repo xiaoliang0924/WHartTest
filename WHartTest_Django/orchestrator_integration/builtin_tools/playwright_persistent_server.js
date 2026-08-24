@@ -194,7 +194,10 @@ async function main() {
       helpers = {
         launchBrowser: async (type) => {
           const browsers = { chromium, firefox, webkit };
-          return browsers[type || 'chromium'].launch({ headless: false });
+          return browsers[type || 'chromium'].launch({
+            headless: process.env.HEADLESS !== 'false',
+            args: ['--no-sandbox', '--disable-setuid-sandbox'],
+          });
         },
         getExtraHeadersFromEnv: () => null,
       };
@@ -337,7 +340,13 @@ async function main() {
       'getContextOptionsWithHeaders',
       `
 let { browser, context, page } = state;
+if (page && helpers && typeof helpers.dismissBlockingDialogs === 'function') {
+  try { await helpers.dismissBlockingDialogs(page); } catch (_) {}
+}
 ${code}
+if (page && helpers && typeof helpers.dismissBlockingDialogs === 'function') {
+  try { await helpers.dismissBlockingDialogs(page); } catch (_) {}
+}
 state.browser = browser;
 state.context = context;
 state.page = page;

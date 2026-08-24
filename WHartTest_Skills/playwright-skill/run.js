@@ -145,6 +145,9 @@ function getContextOptionsWithHeaders(options = {}) {
 (async () => {
   try {
     ${code}
+    if (typeof page !== 'undefined' && page && helpers.dismissBlockingDialogs) {
+      await helpers.dismissBlockingDialogs(page);
+    }
   } catch (error) {
     console.error('❌ Automation error:', error.message);
     if (error.stack) {

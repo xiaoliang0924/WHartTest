@@ -281,6 +281,58 @@ async function extractTableData(page, tableSelector) {
 }
 
 /**
+ * 关闭会挡住页面操作的一次性弹窗（如登录后的「发现新版本」）。
+ * 只点「我知道了」这类确认按钮，不会点「确定/取消/关闭」，以免关掉正在测的业务弹窗。
+ * @param {Object} page - Playwright 页面对象
+ * @returns {Promise<boolean>} 是否关掉了至少一个弹窗
+ */
+async function dismissBlockingDialogs(page) {
+  if (!page) return false;
+  try {
+    if (typeof page.isClosed === 'function' && page.isClosed()) return false;
+  } catch (e) {
+    return false;
+  }
+
+  const clickIfVisible = async (locator, label) => {
+    try {
+      const target = locator.first();
+      if (!(await target.isVisible())) return false;
+      await target.click({ timeout: 2000, force: true });
+      console.log(`已关闭遮挡弹窗: ${label}`);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  let dismissed = false;
+
+  try {
+    const versionDialog = page
+      .locator('.el-dialog, [role="dialog"], .el-overlay-dialog')
+      .filter({ hasText: '发现新版本' });
+    if (await versionDialog.first().isVisible().catch(() => false)) {
+      dismissed =
+        (await clickIfVisible(
+          versionDialog.getByRole('button', { name: /我知道了|知道了/ }),
+          '发现新版本'
+        )) || dismissed;
+    }
+  } catch (e) {
+    // 忽略：弹窗不存在时继续
+  }
+
+  dismissed =
+    (await clickIfVisible(
+      page.getByRole('button', { name: '我知道了', exact: true }),
+      '我知道了'
+    )) || dismissed;
+
+  return dismissed;
+}
+
+/**
  * 等待并关闭 Cookie 提示条
  * @param {Object} page - Playwright 页面对象
  * @param {number} timeout - 最大等待时间
@@ -539,6 +591,7 @@ module.exports = {
   authenticate,
   scrollPage,
   extractTableData,
+  dismissBlockingDialogs,
   handleCookieBanner,
   retryWithBackoff,
   createContext,

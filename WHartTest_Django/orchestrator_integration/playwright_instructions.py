@@ -30,6 +30,14 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
 - 该 ID 是**用例管理/功能测试用例**的主键，不是 UI 自动化模块 `UiTestCase` 的 ID。
 - **读取步骤**：使用 `whart-test` → `get_testcase_detail --project_id <项目ID> --case_id <test_case_id>`。
 - **禁止**直接用 `ui-automation-skill` 的 `get_testcase` / `execute_testcase` 按同一数字 ID 查询（会误报不存在）。
-- **浏览器执行**：优先 `agent-browser-skill`，必要时 `playwright-skill`。
+- **浏览器执行**：优先 `playwright-skill`（或 `agent-browser-skill`）。
 - **截图回传**：使用 `whart-test` 的 `upload_screenshot` / `upload_screenshots`，`case_id` 与上述 test_case_id 相同。
+
+## 【Playwright 执行铁律】不遵守会出现「命令执行失败 (退出码 1)」
+
+1. **全程同一个 session_id**：所有 `execute_skill_script(skill_name="playwright-skill")` 必须带 `session_id="case_<test_case_id>"`。直接使用已有 `page`，禁止 `chromium.launch()` / `newPage()` / `browser.close()`。
+2. **登录或跳转后立刻** `await helpers.dismissBlockingDialogs(page);` 关掉「发现新版本 / 我知道了」，否则点击会被遮罩拦截。
+3. **禁止 `#el-id-*`**：Element Plus 动态 ID 每次刷新都变。用 `getByRole('button', { name: '...' })`、`getByPlaceholder(...)`、`getByText(...)`。
+4. **容器内必须无头**：不要 `headless: false`。
+5. **产品不符合预期不要杀进程**：断言失败时 `console.log('RESULT=FAIL: ...')` + 截图上传，禁止 `throw` / `process.exit(1)`。通过则 `RESULT=PASS`。定位超时才允许脚本失败。
 """

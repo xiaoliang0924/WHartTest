@@ -7,225 +7,152 @@ description: 浏览器自动化执行工具。用于执行 Web 页面测试、�
 
 执行浏览器自动化任务，支持页面测试、表单操作、登录验证等。
 
-## ⚠️ 强制规则：先获取页面结构，再操作元素
+## ⚠️ 强制规则（违反会导致退出码 1）
 
-**禁止猜测选择器！禁止通过截图识别元素！**
+### 1. 多步骤必须用同一个 session_id
 
-打开任何页面后，必须**立即**调用 `helpers.describePageForAI(page)` 获取页面元素列表，然后根据返回的选择器进行操作。
+执行测试用例、登录后继续操作时，**每一步** `execute_skill_script` 都必须带相同 `session_id`（建议 `case_{用例ID}`）。
+
+- 持久化模式下直接使用已有 `page`，**禁止** `chromium.launch()` / `browser.newPage()` / `browser.close()`
+- 不要每步新开浏览器（会反复登录，弹窗反复出现，登录态丢失）
+
+### 2. 登录或跳转后先关遮挡弹窗
+
+目标系统登录后常弹出「发现新版本」，不关掉则后续点击全部被拦截（`intercepts pointer events` → 退出码 1）。
 
 ```javascript
-// 打开页面后第一件事：获取页面结构
-await page.goto('http://example.com');
-const desc = await helpers.describePageForAI(page);
-console.log(desc);  // 输出所有可交互元素及其选择器
+await helpers.dismissBlockingDialogs(page);
 ```
 
-输出示例：
-```
-## Page: WHartTest
-URL: http://192.168.150.114:8913/login
+只关「我知道了」这类一次性提示，不要点业务弹窗的「确定/取消」。
 
-### Input Fields (2)
-- text: selector="#username" placeholder="请输入用户名"
-- password: selector="#password" placeholder="请输入密码"
+### 3. 禁止使用会变的选择器
 
-### Buttons (1)
-- "登录": selector="button[type="submit"]"
-```
+**禁止** `#el-id-*`、`#el-id-847-3` 等 Element Plus 自动生成 ID（每次刷新都变）。
 
-然后根据输出的选择器进行操作：
+优先使用：
+
 ```javascript
-await page.fill('#username', 'admin');
-await page.fill('#password', '123456');
-await page.click('button[type="submit"]');
+page.getByRole('button', { name: '批量操作' })
+page.getByPlaceholder('请输入用户名')
+page.getByText('我的工单', { exact: true })
 ```
+
+打开页面后调用 `helpers.describePageForAI(page)` 获取结构，再操作。**禁止猜测选择器，禁止靠截图认元素。**
+
+### 4. Docker / 后台执行必须无头
+
+```javascript
+chromium.launch({ headless: true })
+```
+
+`headless: false` 在容器里会失败。有 `session_id` 时不要自己 launch，系统已按无头启动。
+
+### 5. 产品不符合预期 ≠ 脚本崩溃
+
+定位超时、语法错误可以让脚本失败。  
+**断言没过**（例如按钮该 disabled 却仍可点）时：
+
+1. `console.log('RESULT=FAIL: ...原因...')`
+2. 截图并 `upload_screenshot`
+3. **禁止** `throw` / `process.exit(1)`（界面会显示成「命令执行失败」，不像用例失败）
+
+通过时输出 `RESULT=PASS`。
+
+---
 
 ## 使用方法
 
-通过 `execute_skill_script` 工具调用，传入 inline 代码：
+通过 `execute_skill_script` 调用，传入 inline 代码：
 
 ```
 node run.js "your playwright code here"
 ```
 
-**重要**：代码必须写在一行，语句用分号分隔。run.js 会自动包装 async IIFE 和 require 语句。**禁止添加 --session、--inline、--eval 等参数，run.js 不支持这些参数。**
+代码必须写在一行，用分号分隔。run.js 会自动包装 async IIFE 和 require。**禁止** `--session`、`--inline`、`--eval`。
+
+也可以只传裸 JS（以 `const`/`await` 开头），系统会自动包成 `node run.js '...'`。
 
 ## 截图路径约定
 
-**必须使用环境变量 `process.env.SCREENSHOT_DIR`** 作为截图保存目录。系统会自动设置该变量指向 playwright-skill 目录下的 `media/screenshots/` 子目录。
-
-截图命名建议：`case_{case_id}_step{step_number}.png`
-
-**示例**：
-```javascript
-const screenshotDir = process.env.SCREENSHOT_DIR || './media/screenshots';
-await page.screenshot({ path: `${screenshotDir}/case_11_step1.png` });
-```
-
-## 基础示例
-
-### 打开页面并截图
-
-```bash
-node run.js "const dir = process.env.SCREENSHOT_DIR; const browser = await chromium.launch({ headless: false }); const page = await browser.newPage(); await page.goto('http://example.com'); await page.screenshot({ path: dir + '/example.png' }); console.log('截图已保存:', dir + '/example.png'); await browser.close();"
-```
-
-### 登录测试（带截图）
-
-```bash
-node run.js "const dir = process.env.SCREENSHOT_DIR; const browser = await chromium.launch({ headless: false, slowMo: 100 }); const page = await browser.newPage(); await page.goto('http://192.168.150.114:8913/'); await page.screenshot({ path: dir + '/step1_open.png' }); await page.fill('input[type=\"text\"]', 'admin'); await page.fill('input[type=\"password\"]', 'admin123456'); await page.screenshot({ path: dir + '/step2_filled.png' }); await page.click('button[type=\"submit\"]'); await page.waitForTimeout(2000); await page.screenshot({ path: dir + '/step3_result.png' }); console.log('截图已保存到', dir); await browser.close();"
-```
-
-### 表单填写
-
-```bash
-node run.js "const browser = await chromium.launch({ headless: false }); const page = await browser.newPage(); await page.goto('http://example.com/form'); await page.fill('input[name=\"username\"]', 'testuser'); await page.fill('input[name=\"email\"]', 'test@example.com'); await page.click('button[type=\"submit\"]'); console.log('表单提交完成'); await browser.close();"
-```
-
-## 其他 helpers 函数
-
-### helpers.getPageStructure(page) - 获取结构化 JSON
-
-返回 JSON 对象，适合程序化处理。
-
-```javascript
-const structure = await helpers.getPageStructure(page);
-console.log(JSON.stringify(structure, null, 2));
-```
-
-### helpers.getPageText(page) - 获取纯文本内容
-
-返回页面所有可见文本。
-
-```javascript
-const text = await helpers.getPageText(page);
-console.log(text);
-```
-
-## 常用 API
-
-### 浏览器启动
-
-```javascript
-// 可见模式（推荐调试）
-const browser = await chromium.launch({ headless: false, slowMo: 100 });
-
-// 无头模式（后台执行）
-const browser = await chromium.launch({ headless: true });
-```
-
-### 页面导航
-
-```javascript
-await page.goto('http://example.com');
-await page.goto('http://example.com', { waitUntil: 'networkidle' });
-```
-
-### 元素定位与操作
-
-```javascript
-// 输入文本
-await page.fill('input[name="username"]', 'admin');
-await page.fill('input[type="password"]', '123456');
-
-// 点击
-await page.click('button[type="submit"]');
-await page.click('text=登录');
-await page.click('.login-btn');
-
-// 等待元素
-await page.waitForSelector('.success-message');
-await page.waitForURL('**/dashboard');
-```
-
-### 常用选择器
-
-| 选择器类型 | 示例 |
-|-----------|------|
-| CSS | `input[name="username"]`, `.login-btn`, `#submit` |
-| 文本 | `text=登录`, `button:has-text("提交")` |
-| 类型 | `input[type="text"]`, `input[type="password"]` |
-| 占位符 | `input[placeholder*="账号"]`, `input[placeholder*="密码"]` |
-
-### 截图（使用环境变量）
+**必须使用 `process.env.SCREENSHOT_DIR`**。命名建议：`case_{case_id}_step{step_number}.png`
 
 ```javascript
 const dir = process.env.SCREENSHOT_DIR;
-await page.screenshot({ path: `${dir}/screenshot.png` });
-await page.screenshot({ path: `${dir}/full.png`, fullPage: true });
+await page.screenshot({ path: `${dir}/case_11_step1.png` });
 ```
 
-### 等待
+## 先获取页面结构，再操作元素
 
 ```javascript
-await page.waitForTimeout(2000);  // 等待2秒
-await page.waitForLoadState('networkidle');  // 等待网络空闲
+await page.goto('http://example.com');
+await helpers.dismissBlockingDialogs(page);
+const desc = await helpers.describePageForAI(page);
+console.log(desc);
 ```
 
-## 完整测试流程示例
+然后用返回的稳定选择器或 getByRole / getByPlaceholder 操作。
 
-执行一个完整的登录测试：
+## 持久化会话模式（用例执行默认用这个）
 
-```bash
-node run.js "const dir = process.env.SCREENSHOT_DIR; const browser = await chromium.launch({ headless: false, slowMo: 100 }); const page = await browser.newPage(); console.log('步骤1: 打开登录页'); await page.goto('http://192.168.150.114:8913/'); await page.screenshot({ path: dir + '/step1_open.png' }); console.log('步骤2: 输入账号'); await page.fill('input[type=\"text\"]', 'admin'); console.log('步骤3: 输入密码'); await page.fill('input[type=\"password\"]', 'admin123456'); await page.screenshot({ path: dir + '/step2_input.png' }); console.log('步骤4: 点击登录'); await page.click('button[type=\"submit\"]'); await page.waitForTimeout(2000); await page.screenshot({ path: dir + '/step3_result.png' }); console.log('登录结果 - 当前URL:', page.url()); await browser.close(); console.log('测试完成，截图保存在:', dir);"
+### 核心规则
+
+1. **session_id 全程一致**，否则会开多个浏览器
+2. **直接用 `page`**，不要 `chromium.launch()`
+3. **不要 `browser.close()`**，空闲 15 分钟自动关
+
+### 示例
+
+**步骤 1：打开并登录**
 ```
+skill_name="playwright-skill"
+session_id="case_1354"
+command='node run.js "const dir = process.env.SCREENSHOT_DIR; await page.goto(\'http://test.bot.by56.com/work-order/login\', { waitUntil: \'networkidle\' }); await page.getByPlaceholder(\'请输入用户名\').fill(\'19902579992\'); await page.getByPlaceholder(\'请输入密码\').fill(\'000000\'); await page.getByRole(\'button\', { name: \'登 录\' }).click(); await page.waitForLoadState(\'networkidle\'); await helpers.dismissBlockingDialogs(page); await page.screenshot({ path: dir + \'/case_1354_login.png\' });"'
+```
+
+**步骤 2：同一浏览器继续操作**
+```
+skill_name="playwright-skill"
+session_id="case_1354"
+command='node run.js "await helpers.dismissBlockingDialogs(page); const bulkBtn = page.getByRole(\'button\', { name: \'批量操作\' }); console.log(\'isDisabled=\', await bulkBtn.isDisabled());"'
+```
+
+### 持久化 vs 非持久化
+
+| 特性 | 无 session_id | 有 session_id |
+|------|---------------|---------------|
+| 浏览器 | 代码自己 launch/close | 系统管理，直接用 `page` |
+| 跨步骤登录态 | 不保持 | 保持 |
+| 适用 | 单步探查 | **测试用例、多步骤操作** |
+
+## 非持久化单步示例（必须 headless: true）
+
+```
+node run.js "const dir = process.env.SCREENSHOT_DIR; const browser = await chromium.launch({ headless: true }); const page = await browser.newPage(); await page.goto('http://example.com'); await helpers.dismissBlockingDialogs(page); await page.screenshot({ path: dir + '/example.png' }); await browser.close();"
+```
+
+## 其他 helpers
+
+- `helpers.dismissBlockingDialogs(page)`：关掉「发现新版本」等遮挡弹窗
+- `helpers.describePageForAI(page)`：可读的页面元素列表
+- `helpers.getPageStructure(page)`：结构化 JSON
+- `helpers.getPageText(page)`：可见文本
+
+## 常用定位（推荐）
+
+```javascript
+await page.getByPlaceholder('请输入用户名').fill('admin');
+await page.getByRole('button', { name: '登 录' }).click();
+await page.getByRole('button', { name: '批量操作' }).click();
+await page.getByText('我的工单', { exact: true }).click();
+```
+
+不要用：`#el-id-7201-8`、`#el-id-847-3`
 
 ## 注意事项
 
-1. **截图路径**：必须使用 `process.env.SCREENSHOT_DIR` 环境变量
-2. **代码格式**：inline 代码用分号分隔语句，写在一行内
-3. **引号转义**：字符串内的双引号需要转义 `\"`
-4. **browser.close()**：非持久化模式下执行完毕后务必关闭浏览器
-5. **console.log()**：用于输出执行进度和结果
-6. **headless: false**：调试时使用可见模式，方便观察
-
-## 持久化会话模式
-
-对于需要**跨多个步骤保持浏览器打开**的场景（如自动化测试用例），使用 `session_id` 参数：
-
-### ⚠️ 核心规则（必须严格遵守）
-
-1. **session_id 必须完全一致**：整个测试流程中所有步骤**必须使用完全相同的 session_id 字符串**，否则会创建新浏览器导致状态丢失！
-   - ✅ 正确：所有步骤都用 `session_id="case_11"`
-   - ❌ 错误：第一步用 `case_11`，第二步用 `case-11`，第三步用 `test-case-11`（这会创建3个不同的浏览器！）
-2. **直接使用 `page` 变量**：无需 `chromium.launch()`，系统自动管理
-3. **不要调用 `browser.close()`**：浏览器由系统管理，空闲 15 分钟自动关闭
-
-### 持久化模式示例
-
-**步骤 1：打开页面**
-```python
-execute_skill_script(
-    skill_name="playwright-skill",
-    command='node run.js "await page.goto(\'http://example.com\'); console.log(page.url());"',
-    session_id="test-case-001"
-)
-```
-
-**步骤 2：填写表单（复用同一浏览器）**
-```python
-execute_skill_script(
-    skill_name="playwright-skill",
-    command='node run.js "await page.fill(\'input[name=username]\', \'admin\'); await page.fill(\'input[name=password]\', \'123456\');"',
-    session_id="test-case-001"
-)
-```
-
-**步骤 3：点击登录（继续复用）**
-```python
-execute_skill_script(
-    skill_name="playwright-skill",
-    command='node run.js "await page.click(\'button[type=submit]\'); await page.waitForTimeout(2000); console.log(\'登录后URL:\', page.url());"',
-    session_id="test-case-001"
-)
-```
-
-### 持久化 vs 非持久化对比
-
-| 特性 | 非持久化（无 session_id） | 持久化（有 session_id） |
-|------|--------------------------|------------------------|
-| 浏览器生命周期 | 代码手动管理 | 系统自动管理 |
-| 启动方式 | `chromium.launch()` | 直接使用 `page` |
-| 关闭方式 | `browser.close()` | 自动关闭（15分钟空闲） |
-| 跨步骤状态 | 不保持 | 保持（登录态、cookie等） |
-| 适用场景 | 单步操作 | 多步骤测试用例 |
+1. 截图路径必须用 `process.env.SCREENSHOT_DIR`
+2. inline 代码一行、分号分隔；字符串内双引号转义 `\"`
+3. 有 session_id 时不要 close 浏览器
+4. 用 `console.log()` 输出进度和 `RESULT=PASS/FAIL`
+5. Docker 里必须 `headless: true`

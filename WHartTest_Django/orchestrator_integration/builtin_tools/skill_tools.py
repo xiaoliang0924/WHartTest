@@ -880,13 +880,20 @@ def get_skill_tools(
                 logger.debug(f"[execute_skill_script] output: {output[:500]}")
             result_output = output.strip() if output.strip() else "(无输出)"
 
-            # 如果是 playwright-skill 的 run.js 调用但没有使用 session_id，提醒 LLM
-            if (
-                skill_name == "playwright-skill"
-                and "run.js" in command
-                and not session_id
-            ):
-                result_output = f"[SCREENSHOT_DIR] {screenshots_dir}\n{result_output}\n\n[注意] 此次执行未使用 session_id，浏览器已关闭。如果这是多步骤测试的一部分，请在后续调用中使用 session_id 参数保持浏览器会话。"
+            # playwright-skill 未带 session_id 时提醒：裸 JS 也会被规范化成 run.js，不能只检查原始 command
+            if skill_name == "playwright-skill" and not session_id:
+                case_hint = (
+                    f'session_id="case_{current_test_case_id}"'
+                    if current_test_case_id
+                    else 'session_id="case_<用例ID>"'
+                )
+                result_output = (
+                    f"[SCREENSHOT_DIR] {screenshots_dir}\n{result_output}\n\n"
+                    f"[注意] 此次未使用 session_id，浏览器已关闭、登录态丢失。"
+                    f"多步骤/用例执行必须全程使用 {case_hint}，直接操作 page，"
+                    f"禁止 chromium.launch()；登录后调用 helpers.dismissBlockingDialogs(page)；"
+                    f"禁止使用 #el-id-* 选择器。"
+                )
             elif skill_name == "playwright-skill":
                 result_output = f"[SCREENSHOT_DIR] {screenshots_dir}\n{result_output}"
 
@@ -922,7 +929,7 @@ def get_skill_tools(
         Args:
             skill_name: Skill 名称（单个执行时必填）
             command: Playwright 必须使用 node run.js "一行 JS 代码"；不要把 const/await 直接当 shell 命令。其他 Skill 传对应脚本命令，如 "python whart_tools.py --action get_projects"
-            session_id: 可选会话ID，用于 playwright-skill 保持浏览器会话
+            session_id: playwright-skill 多步骤/用例执行时必填，全程使用相同值（建议 case_<用例ID>）以保持浏览器会话
             commands: 批量命令列表，每个元素包含 skill_name、command、session_id（可选）
                 示例: [
                     {"skill_name": "whart-test", "command": "python whart_tools.py --action add_testcase ..."},
