@@ -153,9 +153,12 @@ class TestCaseStep(models.Model):
         return f"{self.test_case.name} - Step {self.step_number}"
 
 
+MAX_MODULE_LEVEL = 6
+
+
 class TestCaseModule(models.Model):
     """
-    用例模块模型，支持5级子模块
+    用例模块模型，最多支持 6 级
     """
     project = models.ForeignKey(
         Project,
@@ -197,9 +200,9 @@ class TestCaseModule(models.Model):
         return self.name
 
     def clean(self):
-        """验证模块级别不超过5级"""
-        if self.level > 5:
-            raise ValidationError(_('模块级别不能超过5级'))
+        """验证模块级别不超过上限"""
+        if self.level > MAX_MODULE_LEVEL:
+            raise ValidationError(_('模块级别不能超过6级'))
 
         # 验证父模块属于同一个项目
         if self.parent and self.parent.project_id != self.project_id:

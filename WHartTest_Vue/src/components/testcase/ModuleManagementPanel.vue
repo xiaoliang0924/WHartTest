@@ -46,7 +46,7 @@
               </a-button>
               <template #content>
                 <a-doption value="addRoot" class="centered-dropdown-item">添加根模块</a-doption>
-                <a-doption value="addChild" :disabled="!selectedModuleKey" class="centered-dropdown-item">添加子模块</a-doption>
+                <a-doption value="addChild" :disabled="!canAddChildModule" class="centered-dropdown-item">添加子模块</a-doption>
                 <a-doption value="edit" :disabled="!selectedModuleKey" class="centered-dropdown-item">编辑模块</a-doption>
                 <a-doption value="delete" :disabled="!selectedModuleKey" class="centered-dropdown-item">删除模块</a-doption>
               </template>
@@ -260,6 +260,13 @@ const selectedModule = computed(() => {
   return testCaseModules.value.find(module => module.id === selectedModuleKey.value) || null;
 });
 
+const MAX_MODULE_LEVEL = 6;
+
+const canAddChildModule = computed(() => {
+  if (!selectedModule.value) return false;
+  return (selectedModule.value.level ?? 1) < MAX_MODULE_LEVEL;
+});
+
 const selectedSiblingModules = computed(() => {
   if (!selectedModule.value) return [];
   const parentId = getModuleParentId(selectedModule.value);
@@ -391,7 +398,7 @@ const onDrop = async (info: {
 
   if (dragNode.id === dropNode.id) return;
 
-  // 检查移动后的深度是否超过5级限制
+  // 检查移动后的深度是否超过 6 级限制
   let newLevel = dropNode.level as number;
   if (dropPosition === 0) {
     newLevel = (dropNode.level as number) + 1;
@@ -403,8 +410,8 @@ const onDrop = async (info: {
   };
 
   const subtreeDepth = getSubtreeDepth(dragNode);
-  if (newLevel + subtreeDepth - 1 > 5) {
-    Message.error('移动后模块层级将超过5级限制');
+  if (newLevel + subtreeDepth - 1 > MAX_MODULE_LEVEL) {
+    Message.error('移动后模块层级将超过6级限制');
     return;
   }
 
@@ -457,15 +464,19 @@ const handleModuleAction = async (action: string | number | Record<string, any> 
       moduleModalVisible.value = true;
       break;
     case 'addChild':
-      if (selectedModuleKey.value) {
-        isEditingModule.value = false;
-        moduleForm.id = undefined;
-        moduleForm.name = '';
-        moduleForm.parent = selectedModuleKey.value;
-        moduleModalVisible.value = true;
-      } else {
+      if (!selectedModuleKey.value) {
         Message.warning('请先选择一个父模块');
+        break;
       }
+      if (!canAddChildModule.value) {
+        Message.warning('模块最多支持 6 级，当前模块已是第 6 级，无法再添加子模块');
+        break;
+      }
+      isEditingModule.value = false;
+      moduleForm.id = undefined;
+      moduleForm.name = '';
+      moduleForm.parent = selectedModuleKey.value;
+      moduleModalVisible.value = true;
       break;
     case 'edit':
       if (selectedModuleKey.value) {

@@ -68,25 +68,39 @@ const getApiBasePath = (projectId: string | number | undefined | null) => {
   return `${APP_API_BASE_URL}/projects/${projectId}/testcase-modules/`;
 };
 
+const extractErrorMessage = (responseData: any, defaultMessage: string): string => {
+  const errors = responseData?.errors;
+  if (Array.isArray(errors) && errors.length > 0) {
+    return errors.join('; ');
+  }
+  if (errors && typeof errors === 'object') {
+    const details = Object.values(errors)
+      .flatMap((value) => (Array.isArray(value) ? value : [value]))
+      .map((value) => String(value))
+      .filter(Boolean);
+    if (details.length > 0) {
+      return details.join('; ');
+    }
+  }
+  if (responseData?.detail) {
+    return responseData.detail;
+  }
+  if (responseData?.message) {
+    return responseData.message;
+  }
+  if (typeof responseData === 'string') {
+    return responseData;
+  }
+  return defaultMessage;
+};
+
 // 辅助函数处理 Axios 错误
 const handleError = (error: any, defaultMessage: string): APIResponse<any> => {
   console.error(defaultMessage, error);
   if (axios.isAxiosError(error)) {
-    const responseData = error.response?.data;
-    // 优先使用 errors 数组中的详细错误信息
-    let message = defaultMessage;
-    if (responseData?.errors && Array.isArray(responseData.errors) && responseData.errors.length > 0) {
-      message = responseData.errors.join('; ');
-    } else if (responseData?.detail) {
-      message = responseData.detail;
-    } else if (responseData?.message) {
-      message = responseData.message;
-    } else if (typeof responseData === 'string') {
-      message = responseData;
-    }
     return {
       success: false,
-      error: message,
+      error: extractErrorMessage(error.response?.data, defaultMessage),
       statusCode: error.response?.status,
     };
   }
@@ -197,7 +211,7 @@ export const createTestCaseModule = async (
     } else {
       return {
         success: false,
-        error: response.data.message || '创建模块失败',
+        error: extractErrorMessage(response.data, '创建模块失败'),
         statusCode: response.data.code,
       };
     }
