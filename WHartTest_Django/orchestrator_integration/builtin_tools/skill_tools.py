@@ -16,6 +16,7 @@ import time
 import mimetypes
 import re
 import signal
+import shlex
 from typing import Optional
 
 from langchain_core.tools import tool as langchain_tool
@@ -93,6 +94,76 @@ def _get_skill_output_max_chars() -> int:
             _DEFAULT_SKILL_OUTPUT_MAX_CHARS,
         )
     )
+
+
+_JS_START_RE = re.compile(
+    r"^(?:const|let|var|await|async|function|import|export|class|if|for|while|try|#!|helpers\.|page\.|chromium\.|browser\.)\b",
+    re.IGNORECASE,
+)
+_RUNJS_PREFIX_RE = re.compile(
+    r"^(?:npx\s+)?(?:node\s+)?(?:\./)?run\.js(?:\s+|$)",
+    re.IGNORECASE,
+)
+
+
+def _collapse_command_whitespace(command: str) -> str:
+    return " ".join(
+        line.strip() for line in (command or "").splitlines() if line.strip()
+    )
+
+
+def _looks_like_javascript(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if _JS_START_RE.match(stripped):
+        return True
+    markers = (
+        "await page.",
+        "process.env.SCREENSHOT_DIR",
+        "chromium.launch",
+        "helpers.describePageForAI",
+        "page.goto(",
+        "page.screenshot",
+        "page.fill(",
+        "page.click(",
+    )
+    return any(marker in stripped for marker in markers)
+
+
+def normalize_playwright_skill_command(command: str) -> str:
+    """
+    LLM 常把 Playwright JS 直接当作 shell 命令传入，导致：
+    - 退出码 127：/bin/sh 把 `const` 当成命令
+    - 退出码 2：未加引号的 `page.goto(...)` 被 shell 解析成语法错误
+
+    这里统一纠正为 `node run.js '<js>'`。
+    """
+    collapsed = _collapse_command_whitespace(command)
+    if not collapsed:
+        return collapsed
+
+    prefix_match = _RUNJS_PREFIX_RE.match(collapsed)
+    if prefix_match:
+        rest = collapsed[prefix_match.end() :].strip()
+        if not rest:
+            return "node run.js"
+        if (rest[0] == rest[-1]) and rest[0] in {'"', "'"}:
+            return f"node run.js {rest}"
+        if rest.startswith("--"):
+            return collapsed
+        logger.warning(
+            "[execute_skill_script] playwright run.js 参数未加引号，已自动转义"
+        )
+        return "node run.js " + shlex.quote(rest)
+
+    if _looks_like_javascript(collapsed):
+        logger.warning(
+            "[execute_skill_script] playwright command 是裸 JS，已自动包裹 node run.js"
+        )
+        return "node run.js " + shlex.quote(collapsed)
+
+    return collapsed
 
 
 def _truncate_skill_output(output: str) -> str:
@@ -689,6 +760,14 @@ def get_skill_tools(
             import re
 
             exec_command = command
+            if skill_name == "playwright-skill":
+                exec_command = normalize_playwright_skill_command(command)
+                if exec_command != command:
+                    logger.info(
+                        "[execute_skill_script] playwright 命令已规范化: %s",
+                        exec_command[:300],
+                    )
+
             if platform.system() == "Windows":
                 # 处理多行字符串：将双引号内的换行符替换为空格或分号
                 def collapse_multiline(m):
@@ -700,7 +779,9 @@ def get_skill_tools(
                     return f'"{collapsed}"'
 
                 # 匹配 "..." 形式的多行字符串
-                exec_command = re.sub(r'"([^"]*\n[^"]*)"', collapse_multiline, command)
+                exec_command = re.sub(
+                    r'"([^"]*\n[^"]*)"', collapse_multiline, exec_command
+                )
 
                 # 单引号转双引号
                 def convert_quotes(m):
@@ -840,7 +921,7 @@ def get_skill_tools(
 
         Args:
             skill_name: Skill 名称（单个执行时必填）
-            command: shell 命令，如 "python whart_tools.py --action get_projects"（单个执行时必填）
+            command: Playwright 必须使用 node run.js "一行 JS 代码"；不要把 const/await 直接当 shell 命令。其他 Skill 传对应脚本命令，如 "python whart_tools.py --action get_projects"
             session_id: 可选会话ID，用于 playwright-skill 保持浏览器会话
             commands: 批量命令列表，每个元素包含 skill_name、command、session_id（可选）
                 示例: [
