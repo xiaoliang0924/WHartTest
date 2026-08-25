@@ -540,6 +540,12 @@ watch(sessionId, () => {
   }
 });
 
+watch(isRemoteGenerating, async (running) => {
+  if (!running) return;
+  await nextTick();
+  chatMessagesRef.value?.scrollToBottom();
+});
+
 // 提示词相关
 const selectedPromptId = ref<number | null>(null); // 用户选择的提示词ID
 const hasPrompts = ref(false); // 是否有可用的提示词
@@ -2188,6 +2194,24 @@ const displayedMessages = computed(() => {
       }
     }
   }
+
+  // 跨标签页：会话在另一窗口执行中，本页无本地流，需展示「正在输入」占位
+  if (!stream && isRemoteGenerating.value) {
+    const lastMsg = combined[combined.length - 1];
+    const hasLoadingPlaceholder = !!(lastMsg && lastMsg.isLoading);
+    const hasStreamingAi = !!(lastMsg && !lastMsg.isUser && lastMsg.isStreaming);
+
+    if (!hasLoadingPlaceholder && !hasStreamingAi) {
+      combined.push({
+        content: '',
+        isUser: false,
+        time: getCurrentTime(),
+        messageType: 'ai',
+        isLoading: true,
+      });
+    }
+  }
+
   return combined;
 });
 
