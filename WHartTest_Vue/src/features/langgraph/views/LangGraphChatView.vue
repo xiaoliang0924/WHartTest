@@ -1146,6 +1146,11 @@ const applyChatHistoryResponse = (data: ChatHistoryResponseData) => {
   const tempMessages = enrichMessagesWithSeparators(data.history, formatHistoryTime);
   messages.value = mergeThinkingProcessMessages(tempMessages);
 
+  syncRemoteGenerating();
+  if (isRemoteGenerating.value) {
+    isLoading.value = true;
+  }
+
   const existingSession = chatSessions.value.find(s => s.id === data.session_id);
   if (!existingSession) {
     const firstHumanMessage = data.history.find(msg => msg.type === 'human')?.content;
