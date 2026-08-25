@@ -74,7 +74,7 @@
       />
 
       <ChatInput
-        :is-loading="isLoading"
+        :is-loading="isGenerating"
         :supports-vision="currentLlmConfig?.supports_vision || false"
         :context-token-count="contextTokenInfo.tokenCount"
         :context-limit="contextTokenInfo.limit"
@@ -160,6 +160,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onActivated, watch, onUnmounted, computed, nextTick } from 'vue';
+import { useRoute } from 'vue-router';
 import { Message, Modal } from '@arco-design/web-vue';
 import {
   sendChatMessageNonStream,
@@ -178,11 +179,12 @@ import {
 } from '@/features/langgraph/services/chatService';
 import { listLlmConfigs, partialUpdateLlmConfig } from '@/features/langgraph/services/llmConfigService';
 import { getUserPrompts } from '@/features/prompts/services/promptService';
-import type { ChatRequest, ChatHistoryMessage, ChatSessionDetail } from '@/features/langgraph/types/chat';
+import type { ChatRequest, ChatHistoryMessage, ChatHistoryResponseData, ChatSessionDetail } from '@/features/langgraph/types/chat';
 import type { LlmConfig } from '@/features/langgraph/types/llmConfig';
 import { useProjectStore } from '@/store/projectStore';
 import { useLlmConfigRefresh } from '@/composables/useLlmConfigRefresh';
 import { useAppI18n } from '@/composables/useAppI18n';
+import { clearSessionRunning, isSessionRunning } from '@/features/langgraph/utils/runningSession';
 import { marked } from 'marked';
 import { IconFullscreen, IconFullscreenExit } from '@arco-design/web-vue/es/icon';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
@@ -201,6 +203,7 @@ import WeixinConnectModal from '../components/WeixinConnectModal.vue';
 import type { InterruptEvent } from '../components/ToolApprovalCard.vue';
 
 const { isEnglish } = useAppI18n();
+const route = useRoute();
 const pageText = computed(() => (
   isEnglish.value
     ? {
@@ -415,6 +418,7 @@ const buildHtmlPreviewSrcdoc = (html: string): string => {
 
 const messages = ref<ChatMessage[]>([]);
 const isLoading = ref(false);
+const isRemoteGenerating = ref(false);
 const sessionId = ref<string>('');
 const chatSessions = ref<ChatSession[]>([]);
 const chatMessagesRef = ref<InstanceType<typeof ChatMessages> | null>(null);
@@ -425,6 +429,29 @@ const pendingTitleRefreshTimers = new Map<string, ReturnType<typeof window.setTi
 
 // 流式模式：从 LLM 配置读取（computed）
 const isStreamMode = computed(() => currentLlmConfig.value?.enable_streaming ?? true);
+
+const syncRemoteGenerating = () => {
+  const currentId = sessionId.value || getSessionIdFromStorage();
+  isRemoteGenerating.value = isSessionRunning(currentId);
+};
+
+const handleRunningSessionStorage = (event: StorageEvent) => {
+  if (event.key !== 'langgraph_running_session') return;
+  syncRemoteGenerating();
+  if (isRemoteGenerating.value) {
+    isLoading.value = true;
+    startRemoteSessionPolling();
+    return;
+  }
+  safeStopLoading();
+};
+
+const isGenerating = computed(() => {
+  const currentId = sessionId.value;
+  const localStream = currentId ? activeStreams.value[currentId] : null;
+  const localStreamRunning = !!(localStream && !localStream.isComplete);
+  return isLoading.value || isRemoteGenerating.value || localStreamRunning;
+});
 
 // 知识库相关
 const useKnowledgeBase = ref(false); // 是否启用知识库功能
@@ -507,6 +534,10 @@ const closeFloatingImage = () => {
 watch(sessionId, () => {
   floatingToolImageSrc.value = null;
   panelPos.value = null;
+  syncRemoteGenerating();
+  if (isRemoteGenerating.value) {
+    isLoading.value = true;
+  }
 });
 
 // 提示词相关
@@ -828,9 +859,12 @@ const safeStopLoading = () => {
   // 检查普通聊天流
   const stream = id ? activeStreams.value[id] : null;
   const hasActiveStream = stream && !stream.isComplete;
+  syncRemoteGenerating();
 
-  if (!hasActiveStream) {
+  if (!hasActiveStream && !isRemoteGenerating.value) {
     isLoading.value = false;
+  } else {
+    isLoading.value = true;
   }
 };
 
@@ -1089,12 +1123,120 @@ const enrichMessagesWithSeparators = (rawHistory: ChatHistoryMessage[], formatHi
 };
 
 // 加载聊天历史记录
+const applyChatHistoryResponse = (data: ChatHistoryResponseData) => {
+  sessionId.value = data.session_id;
+
+  if (data.context_token_count !== undefined) {
+    const tokenCount = data.context_token_count || 0;
+    const limit = data.context_limit || 128000;
+    latestContextUsage.value[data.session_id] = { tokenCount, limit };
+  }
+
+  if (data.prompt_id !== null && data.prompt_id !== undefined) {
+    selectedPromptId.value = data.prompt_id;
+    localStorage.setItem(PROMPT_STORAGE_KEY, String(data.prompt_id));
+  }
+
+  const tempMessages = enrichMessagesWithSeparators(data.history, formatHistoryTime);
+  messages.value = mergeThinkingProcessMessages(tempMessages);
+
+  const existingSession = chatSessions.value.find(s => s.id === data.session_id);
+  if (!existingSession) {
+    const firstHumanMessage = data.history.find(msg => msg.type === 'human')?.content;
+    updateSessionInList(data.session_id, firstHumanMessage, false);
+  }
+};
+
+const bootstrapSessionFromRoute = () => {
+  const querySessionId = route.query.session_id;
+  const queryProjectId = route.query.project_id;
+
+  if (typeof querySessionId === 'string' && querySessionId.trim()) {
+    localStorage.setItem('langgraph_session_id', querySessionId.trim());
+  }
+
+  if (typeof queryProjectId === 'string' && queryProjectId.trim()) {
+    const projectId = parseInt(queryProjectId, 10);
+    if (!Number.isNaN(projectId)) {
+      localStorage.setItem('selected_project_id', String(projectId));
+      projectStore.setCurrentProjectById(projectId);
+    }
+  }
+};
+
+let remoteSessionPollTimer: ReturnType<typeof setInterval> | null = null;
+let remoteSessionPollIdleCount = 0;
+
+const stopRemoteSessionPolling = () => {
+  if (remoteSessionPollTimer) {
+    clearInterval(remoteSessionPollTimer);
+    remoteSessionPollTimer = null;
+  }
+  remoteSessionPollIdleCount = 0;
+};
+
+const refreshCurrentSessionHistory = async (): Promise<boolean> => {
+  const storedSessionId = getSessionIdFromStorage();
+  if (!storedSessionId || !projectStore.currentProjectId) {
+    return false;
+  }
+
+  try {
+    const response = await getChatHistory(storedSessionId, projectStore.currentProjectId);
+    if (response.status === 'success' && response.data) {
+      const previousCount = messages.value.length;
+      applyChatHistoryResponse(response.data);
+      return messages.value.length !== previousCount;
+    }
+  } catch (error) {
+    console.warn('刷新远程会话历史失败:', error);
+  }
+
+  return false;
+};
+
+const startRemoteSessionPolling = () => {
+  stopRemoteSessionPolling();
+
+  const targetSessionId = sessionId.value || getSessionIdFromStorage();
+  if (!targetSessionId || activeStreams.value[targetSessionId]) {
+    return;
+  }
+
+  remoteSessionPollTimer = setInterval(async () => {
+    const currentId = sessionId.value || getSessionIdFromStorage();
+    if (!currentId || activeStreams.value[currentId]) {
+      stopRemoteSessionPolling();
+      return;
+    }
+
+    const changed = await refreshCurrentSessionHistory();
+    syncRemoteGenerating();
+    if (isRemoteGenerating.value) {
+      isLoading.value = true;
+    }
+    if (changed) {
+      remoteSessionPollIdleCount = 0;
+      await nextTick();
+      chatMessagesRef.value?.scrollToBottom();
+      return;
+    }
+
+    remoteSessionPollIdleCount += 1;
+    if (!isRemoteGenerating.value && remoteSessionPollIdleCount >= 20) {
+      stopRemoteSessionPolling();
+      safeStopLoading();
+    }
+  }, 3000);
+};
+
 const loadChatHistory = async () => {
   const storedSessionId = getSessionIdFromStorage();
   
   // 🔧 修复：静默处理无会话ID的情况，不显示任何提示
   if (!storedSessionId) {
     console.log('💭 没有保存的会话ID，显示空白对话界面');
+    stopRemoteSessionPolling();
     return;
   }
   
@@ -1109,47 +1251,17 @@ const loadChatHistory = async () => {
     const response = await getChatHistory(storedSessionId, projectStore.currentProjectId);
 
     if (response.status === 'success' && response.data) {
-      const data = response.data;
-      sessionId.value = data.session_id;
-
-      // 🆕 恢复该会话的Token使用信息
-      if (data.context_token_count !== undefined) {
-        const tokenCount = data.context_token_count || 0;
-        const limit = data.context_limit || 128000;
-        latestContextUsage.value[data.session_id] = { tokenCount, limit };
-        console.log(`🔄 恢复会话Token使用: ${tokenCount}/${limit}`);
-      }
-
-      // 🆕 恢复该会话关联的提示词
-      if (data.prompt_id !== null && data.prompt_id !== undefined) {
-        selectedPromptId.value = data.prompt_id;
-        localStorage.setItem(PROMPT_STORAGE_KEY, String(data.prompt_id));
-        console.log(`🔄 恢复会话提示词: ${data.prompt_name} (ID: ${data.prompt_id})`);
-      }
-
-      // ✅ 使用纯函数处理历史记录,自动插入步骤分隔符
-      const tempMessages = enrichMessagesWithSeparators(data.history, formatHistoryTime);
-      
-      // 🎨 合并连续的思考过程消息
-      messages.value = mergeThinkingProcessMessages(tempMessages);
-      
-      console.log('🔍 [Debug] messages.value最终数量:', messages.value.length);
-      console.log('🔍 [Debug] 最终step_separator数量:', messages.value.filter(m => m.messageType === 'step_separator').length);
-
-      // 只有在会话列表中不存在该会话时才添加（避免重复）
-      const existingSession = chatSessions.value.find(s => s.id === data.session_id);
-      if (!existingSession) {
-        const firstHumanMessage = data.history.find(msg => msg.type === 'human')?.content;
-        updateSessionInList(data.session_id, firstHumanMessage, false);
-      }
-      
+      applyChatHistoryResponse(response.data);
       console.log(`✅ 成功加载会话历史: ${sessionId.value}, ${messages.value.length} 条消息`);
+      startRemoteSessionPolling();
+      syncRemoteGenerating();
     } else {
       // 🔧 修复：获取历史失败时静默处理，不显示错误提示
       // 可能是会话已被删除或过期，清除存储的会话ID即可
       console.warn('⚠️ 会话历史获取失败，可能已被删除');
       localStorage.removeItem('langgraph_session_id');
       sessionId.value = '';
+      stopRemoteSessionPolling();
     }
   } catch (error) {
     // 🔧 修复：网络错误等异常情况才显示错误提示
@@ -1438,6 +1550,8 @@ const handleStopGeneration = async () => {
 
     // ⭐ 强制清除流状态，避免重新加载历史时消息重复
     clearStreamState(sessionId.value);
+    clearSessionRunning(sessionId.value);
+    isRemoteGenerating.value = false;
 
     // ⭐ 延迟一小段时间后重新加载历史，确保后端已保存完整记录
     // 后端在收到停止信号后会保存包含 [用户中断] 的完整历史
@@ -1682,6 +1796,7 @@ const switchSession = async (id: string) => {
 
       // 更新会话信息（不更新时间，因为这是加载历史记录）
       updateSessionInList(id, undefined, false);
+      startRemoteSessionPolling();
     } else {
       Message.error(pageText.value.loadSessionHistoryFailed);
     }
@@ -2228,14 +2343,14 @@ const handleNormalMessage = async (requestData: ChatRequest, originalMessage: st
 
 // 监听项目变化，重新加载数据
 watch(() => projectStore.currentProjectId, async (newProjectId, oldProjectId) => {
-  if (newProjectId && newProjectId !== oldProjectId) {
-    // 项目切换时清空当前状态
+  // 仅在用户主动切换项目时清空会话，首次加载项目时不要清除 session_id
+  if (newProjectId && oldProjectId && newProjectId !== oldProjectId) {
     messages.value = [];
     chatSessions.value = [];
     sessionId.value = '';
     localStorage.removeItem('langgraph_session_id');
+    stopRemoteSessionPolling();
 
-    // 重新加载会话列表
     await loadSessionsFromServer();
   }
 }, { immediate: false });
@@ -2488,6 +2603,9 @@ watch(htmlPreviewVisible, async (visible) => {
 });
 
 onMounted(async () => {
+  bootstrapSessionFromRoute();
+  syncRemoteGenerating();
+  window.addEventListener('storage', handleRunningSessionStorage);
   window.addEventListener('message', handleDiagramPreviewMessage);
   document.addEventListener('fullscreenchange', syncHtmlPreviewFullscreenState);
 
@@ -2545,6 +2663,7 @@ watch(getRefreshTrigger(), async () => {
 }, { immediate: false });
 
 onActivated(async () => {
+  bootstrapSessionFromRoute();
   // 每次组件被激活时（从其他页面切回来）
   console.log('✅ Chat component activated.');
 
@@ -2581,6 +2700,8 @@ onActivated(async () => {
 });
 
 onUnmounted(() => {
+  stopRemoteSessionPolling();
+  window.removeEventListener('storage', handleRunningSessionStorage);
   window.removeEventListener('message', handleDiagramPreviewMessage);
   document.removeEventListener('fullscreenchange', syncHtmlPreviewFullscreenState);
   pendingTitleRefreshTimers.forEach(timer => window.clearTimeout(timer));

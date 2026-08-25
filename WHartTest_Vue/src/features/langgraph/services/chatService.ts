@@ -11,6 +11,7 @@ import type {
 } from '@/features/langgraph/types/chat';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
 import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolResultParser';
+import { clearSessionRunning, markSessionRunning } from '@/features/langgraph/utils/runningSession';
 
 // --- 全局流式状态管理 ---
 interface StreamMessage {
@@ -434,6 +435,7 @@ export async function sendChatMessageStream(
       activeStreams.value[sessionId].isComplete = true;
     }
     if (sessionId) {
+      clearSessionRunning(sessionId);
       hooks?.onError?.(sessionId, message);
     }
   };
@@ -535,6 +537,7 @@ export async function sendChatMessageStream(
             // 设置错误状态而非完成状态，让用户知道可能需要重试
             activeStreams.value[streamSessionId].error = '连接意外中断，请重试';
             activeStreams.value[streamSessionId].isComplete = true;
+            clearSessionRunning(streamSessionId);
         }
         break;
       }
@@ -588,6 +591,7 @@ export async function sendChatMessageStream(
                   : data.message, // 优先使用后端规范化后的展示文本
                 userMessageTime: formatIsoTime(parsed.created_at) // 使用会话创建时间
               };
+              markSessionRunning(streamSessionId);
               onStart(streamSessionId);
             }
           }
@@ -774,6 +778,7 @@ export async function sendChatMessageStream(
               console.log('[ChatService] Script generation available:', parsed.script_generation);
             }
 
+            clearSessionRunning(streamSessionId);
             hooks?.onComplete?.(streamSessionId, parsed as Record<string, unknown>);
           }
         } catch (e) {

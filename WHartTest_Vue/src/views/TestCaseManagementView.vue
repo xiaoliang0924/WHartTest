@@ -154,6 +154,7 @@ import OptimizationSuggestionModal from '@/components/testcase/OptimizationSugge
 import {
   sendChatMessageStream
 } from '@/features/langgraph/services/chatService';
+import { openLangGraphChatInNewWindow } from '@/features/langgraph/utils/openLangGraphChat';
 import type { ChatRequest } from '@/features/langgraph/types/chat';
 import {
   updateTestCaseReviewStatus,
@@ -365,7 +366,11 @@ const startAutomationTask = (
               {
                 href: 'javascript:;',
                 onClick: () => {
-                  router.push({ name: 'LangGraphChat' });
+                  openLangGraphChatInNewWindow(
+                    router,
+                    sessionId,
+                    currentProjectId.value,
+                  );
                   notificationReturn?.close();
                 },
               },

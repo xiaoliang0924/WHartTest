@@ -80,6 +80,7 @@ import {
   type TestCaseScreenshot,
 } from '@/services/testcaseService';
 import { useAppI18n } from '@/composables/useAppI18n';
+import { openLangGraphChatInNewWindow } from '@/features/langgraph/utils/openLangGraphChat';
 
 const props = defineProps<{
   visible: boolean;
@@ -289,10 +290,7 @@ const handleClose = () => {
 };
 
 const openChat = () => {
-  if (props.sessionId) {
-    localStorage.setItem('langgraph_session_id', props.sessionId);
-  }
-  router.push({ name: 'LangGraphChat' });
+  openLangGraphChatInNewWindow(router, props.sessionId, props.projectId);
 };
 
 defineExpose({
