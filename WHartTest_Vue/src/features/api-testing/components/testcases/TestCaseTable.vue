@@ -2,6 +2,7 @@
 import type { TableColumnData } from '@arco-design/web-vue'
 import type { ApiTestCase } from '../../types/testcase'
 import { IconEdit, IconDelete, IconMore, IconCopy } from '@arco-design/web-vue/es/icon'
+import { sortApiTestCaseTags } from '../../utils/tagSort'
 
 interface Props {
   data: ApiTestCase[]
@@ -159,7 +160,7 @@ const handleDelete = (record: ApiTestCase) => {
       <template #tags="{ record }">
         <div class="flex flex-wrap gap-1 justify-center">
           <a-tag
-            v-for="tag in (record as any).tags_info"
+            v-for="tag in sortApiTestCaseTags((record as any).tags_info)"
             :key="tag.id"
             :color="tag.color"
             size="small"

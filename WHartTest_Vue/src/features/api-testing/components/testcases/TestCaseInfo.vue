@@ -7,6 +7,7 @@ import {
   IconFolder,
 } from '@arco-design/web-vue/es/icon'
 import type { ApiTestCase } from '../../types/testcase'
+import { sortApiTestCaseTags } from '../../utils/tagSort'
 
 interface Props {
   testCase: ApiTestCase
@@ -50,7 +51,7 @@ defineProps<Props>()
         <icon-tags class="info-secondary" />
         <a-space>
           <a-tag
-            v-for="tag in (testCase as any).tags_info"
+            v-for="tag in sortApiTestCaseTags((testCase as any).tags_info)"
             :key="tag.id"
             :color="tag.color"
           >

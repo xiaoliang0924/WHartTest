@@ -2349,3 +2349,24 @@ class ApiInterfaceCaseAPITest(TestCase):
         self.assertEqual(details[0].step, precondition)
         self.assertEqual(details[0].extracted_variables['token'], 'abc123')
         self.assertEqual(details[1].step, main_step)
+
+
+class ApiTestCaseTagSortTest(TestCase):
+    def test_sort_testcase_tags_puts_parent_tags_first(self):
+        from api_testcases.tag_utils import sort_testcase_tags
+
+        class Tag:
+            def __init__(self, name):
+                self.name = name
+
+        tags = [
+            Tag('列表查询'),
+            Tag('我的工单'),
+            Tag('取消分配'),
+            Tag('工单列表'),
+            Tag('登录'),
+        ]
+
+        sorted_names = [tag.name for tag in sort_testcase_tags(tags)]
+        self.assertEqual(sorted_names[:2], ['我的工单', '工单列表'])
+        self.assertEqual(sorted_names[2:], ['列表查询', '取消分配', '登录'])

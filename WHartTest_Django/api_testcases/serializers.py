@@ -8,6 +8,7 @@ from .models import (
     ApiInterfaceCase, ApiInterfaceCaseStep,
     ApiInterfaceCaseReport, ApiInterfaceCaseReportDetail
 )
+from .tag_utils import sort_testcase_tags
 
 
 class ApiTestCaseTagSerializer(serializers.ModelSerializer):
@@ -236,12 +237,18 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
         write_only=True,
         required=False,
     )
-    tags_info = ApiTestCaseTagSerializer(source='tags', many=True, read_only=True)
+    tags_info = serializers.SerializerMethodField()
     group_info = ApiTestCaseGroupSerializer(source='group', read_only=True)
     related_interfaces = serializers.SerializerMethodField()
     created_by_name = serializers.CharField(
         source='created_by.username', read_only=True, default=''
     )
+
+    def get_tags_info(self, obj):
+        return ApiTestCaseTagSerializer(
+            sort_testcase_tags(obj.tags.all()),
+            many=True,
+        ).data
 
     def get_related_interfaces(self, obj):
         interfaces = {}
@@ -562,11 +569,17 @@ class ApiInterfaceCaseSerializer(serializers.ModelSerializer):
     interface_info = serializers.SerializerMethodField()
     main_step = serializers.SerializerMethodField()
     precondition_count = serializers.SerializerMethodField()
-    tags_info = ApiTestCaseTagSerializer(source='tags', many=True, read_only=True)
+    tags_info = serializers.SerializerMethodField()
     group_info = ApiTestCaseGroupSerializer(source='group', read_only=True)
     created_by_name = serializers.CharField(
         source='created_by.username', read_only=True, default=''
     )
+
+    def get_tags_info(self, obj):
+        return ApiTestCaseTagSerializer(
+            sort_testcase_tags(obj.tags.all()),
+            many=True,
+        ).data
 
     class Meta:
         model = ApiInterfaceCase
