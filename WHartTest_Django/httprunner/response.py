@@ -26,6 +26,10 @@ def get_uniform_comparator(comparator: Text):
         return "greater_than"
     elif comparator in ["ge", "greater_or_equals"]:
         return "greater_or_equals"
+    elif comparator in ["gte"]:
+        return "greater_or_equals"
+    elif comparator in ["is"]:
+        return "is_same"
     elif comparator in ["ne", "not_equal"]:
         return "not_equal"
     elif comparator in ["str_eq", "string_equals"]:
@@ -287,8 +291,7 @@ class ResponseObjectBase(object):
             try:
                 assert_func = self.parser.get_mapping_function(assert_method)
             except exceptions.FunctionNotFound:
-                # 如果断言方法不存在，使用相等比较
-                assert_func = get_uniform_comparator("equal")
+                assert_func = self.parser.get_mapping_function("equal")
                 logger.warning(f"断言方法 '{assert_method}' 不存在，将使用'equal'替代")
 
             # expect item

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import re
 import time
 from urllib.parse import unquote
@@ -20,6 +21,39 @@ from httprunner.models import SessionData, ReqRespData
 from httprunner.utils import lower_dict_keys, omit_long_data
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+try:
+    from api_testcases.rate_limit import (
+        get_rate_limit_max_retries,
+        is_rate_limited_response,
+        parse_rate_limit_wait_seconds,
+    )
+except Exception:  # pragma: no cover - httprunner standalone usage
+    def get_rate_limit_max_retries() -> int:
+        return max(0, int(os.environ.get("WHARTTEST_API_RATE_LIMIT_MAX_RETRIES", "3")))
+
+    def is_rate_limited_response(status_code: int, body=None) -> bool:
+        if status_code == 429:
+            return True
+        if status_code == 400 and isinstance(body, dict):
+            if body.get("code") == "RATE_LIMIT_EXCEEDED":
+                return True
+            return "rate limit exceeded" in str(body.get("message") or "").lower()
+        return False
+
+    def parse_rate_limit_wait_seconds(
+        *,
+        status_code: int,
+        headers=None,
+        body=None,
+        default: float = 2.0,
+        max_wait: float = 65.0,
+    ) -> float:
+        message = str((body or {}).get("message", "")) if isinstance(body, dict) else ""
+        match = re.search(r"retry in (\d+)", message, flags=re.IGNORECASE)
+        if match:
+            return min(float(match.group(1)) + 1.0, max_wait)
+        return min(default, max_wait)
 
 
 BINARY_PREVIEW_BYTES = 64
@@ -372,9 +406,42 @@ class HttpSession(requests.Session):
         # set stream to True, in order to get client/server IP/Port
         kwargs["stream"] = True
 
-        start_timestamp = time.time()
-        response = self._send_request_safe_mode(method, url, **kwargs)
-        response_time_ms = round((time.time() - start_timestamp) * 1000, 2)
+        max_retries = get_rate_limit_max_retries()
+        attempt = 0
+        while True:
+            start_timestamp = time.time()
+            response = self._send_request_safe_mode(method, url, **kwargs)
+            response_time_ms = round((time.time() - start_timestamp) * 1000, 2)
+
+            response_body = None
+            if getattr(response, "status_code", 0):
+                try:
+                    response_body = response.json()
+                except ValueError:
+                    response_body = None
+
+            if (
+                attempt < max_retries
+                and is_rate_limited_response(response.status_code, response_body)
+            ):
+                wait_seconds = parse_rate_limit_wait_seconds(
+                    status_code=response.status_code,
+                    headers=dict(getattr(response, "headers", {}) or {}),
+                    body=response_body,
+                )
+                logger.warning(
+                    "Rate limited on %s %s (status=%s), retry %s/%s after %.1fs",
+                    method,
+                    url,
+                    response.status_code,
+                    attempt + 1,
+                    max_retries,
+                    wait_seconds,
+                )
+                time.sleep(wait_seconds)
+                attempt += 1
+                continue
+            break
 
         try:
             client_ip, client_port = response.raw._connection.sock.getsockname()

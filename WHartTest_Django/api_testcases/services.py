@@ -9,6 +9,7 @@ from .models import (
     ApiTestCase, ApiTestCaseStep, ApiTestReport, ApiTestReportDetail,
     ApiInterfaceCase, ApiInterfaceCaseReport, ApiInterfaceCaseReportDetail,
 )
+from .rate_limit import sleep_between_cases
 from .runner import TestCaseRunner
 from wharttest_django.notification_service import notify_api_test_report
 
@@ -199,7 +200,18 @@ class TestExecutionService:
         environment: Optional[Dict] = None,
         user=None,
         notify: bool = True,
+        refresh_tokens: bool = True,
     ) -> ApiTestReport:
+        if refresh_tokens and isinstance(environment, dict):
+            from api_environments.token_refresh import (
+                refresh_environment_tokens_for_execution,
+            )
+
+            environment = refresh_environment_tokens_for_execution(
+                environment,
+                persist=True,
+            )
+
         source_config = testcase.config if isinstance(testcase.config, dict) else {}
         source_environment = environment if isinstance(environment, dict) else {}
         verify_source = TestExecutionService._resolve_verify_source(
@@ -313,9 +325,27 @@ class TestExecutionService:
         user=None,
         notify: bool = True,
     ) -> List[ApiTestReport]:
+        if isinstance(environment, dict):
+            from api_environments.token_refresh import (
+                refresh_environment_tokens_for_execution,
+            )
+
+            environment = refresh_environment_tokens_for_execution(
+                environment,
+                persist=True,
+            )
+
         reports = []
-        for testcase in testcases:
-            report = TestExecutionService.run_testcase(testcase, environment, user, notify=notify)
+        for index, testcase in enumerate(testcases):
+            if index > 0:
+                sleep_between_cases()
+            report = TestExecutionService.run_testcase(
+                testcase,
+                environment,
+                user,
+                notify=notify,
+                refresh_tokens=False,
+            )
             reports.append(report)
         return reports
 
