@@ -141,6 +141,25 @@ class WhartToolsScreenshotResolutionTests(unittest.TestCase):
         self.assertEqual(result, {"message": "截图 '步骤1 登录成功' 上传成功"})
         mock_post.assert_called_once()
 
+    @patch.object(whart_tools.requests, "post", return_value=_DummyResponse())
+    def test_upload_screenshot_does_not_fallback_to_last_png_for_unrelated_name(self, mock_post):
+        with tempfile.TemporaryDirectory() as temp_root:
+            screenshot_dir = os.path.join(temp_root, "skill_runtime", "screenshots", "1", "1523")
+            self._write_file(os.path.join(screenshot_dir, "last.png"))
+            self._write_file(os.path.join(screenshot_dir, "case_1523_step1.png"))
+
+            with patch.dict(
+                os.environ,
+                {"SCREENSHOT_DIR": screenshot_dir},
+                clear=False,
+            ):
+                result = whart_tools.upload_screenshot(
+                    1, 1523, "步骤5_点击文件.png", "步骤5 点击文件"
+                )
+
+        self.assertIn("文件不存在", result["error"])
+        mock_post.assert_not_called()
+
     @patch.object(whart_tools.requests, "get")
     def test_get_testcases_returns_api_total_and_case_ids(self, mock_get):
         response = MagicMock()

@@ -393,9 +393,20 @@ state.page = page;
       }
       try {
         fs.mkdirSync(dir, { recursive: true });
+        state.screenshotSeq = (state.screenshotSeq || 0) + 1;
+        const seq = String(state.screenshotSeq).padStart(2, '0');
+        const stepFile = `step_${seq}.png`;
+        const stepPath = path.join(dir, stepFile);
         const lastPath = path.join(dir, 'last.png');
-        await page.screenshot({ path: lastPath });
+        await page.screenshot({ path: stepPath });
+        try {
+          fs.copyFileSync(stepPath, lastPath);
+        } catch (_) {
+          await page.screenshot({ path: lastPath });
+        }
+        captured.stdout.push(`[SCREENSHOT_SAVED] ${stepPath}`);
         captured.stdout.push(`[SCREENSHOT_SAVED] ${lastPath}`);
+        captured.stdout.push(`[SCREENSHOT_STEP_FILE] ${stepFile}`);
       } catch (err) {
         captured.stderr.push(`[SCREENSHOT_SAVE_FAILED] ${err?.message || String(err)}`);
       }

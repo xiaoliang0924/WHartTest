@@ -422,27 +422,45 @@ def _extract_step_hint(name: str):
     return match.group(1) if match else None
 
 
+def _is_last_png_basename(name: str) -> bool:
+    return os.path.basename(name or '').lower() == 'last.png'
+
+
 def _fallback_recent_screenshot(requested_path: str):
-    """文件名对不上时，用 SCREENSHOT_DIR 里最近的截图兜底，避免执行半途因上传失败中断。"""
-    images = _screenshot_dir_images()
+    """仅在能从文件名推断步骤号且目录内有对应 step 文件时兜底，禁止回退到 last.png 或任意最新图。"""
+    requested_name = os.path.basename((requested_path or '').strip())
+    if _is_last_png_basename(requested_name):
+        # 显式上传 last.png 时允许（但多步共用 last.png 会重复，由执行提示词约束）
+        images = _screenshot_dir_images()
+        for path in images:
+            if _is_last_png_basename(path):
+                return path
+        return None
+
+    images = [
+        path for path in _screenshot_dir_images()
+        if not _is_last_png_basename(path)
+    ]
     if not images:
+        return None
+
+    hint = _extract_step_hint(requested_name)
+    if not hint:
         return None
 
     now = time.time()
     recent = [path for path in images if now - os.path.getmtime(path) < 10 * 60]
     candidates = recent or images
-    hint = _extract_step_hint(os.path.basename(requested_path or ''))
     ranked = sorted(candidates, key=os.path.getmtime, reverse=True)
-    if hint:
-        for path in ranked:
-            basename = os.path.basename(path)
-            if hint in basename and (
-                f'step{hint}' in basename.lower()
-                or f'step_{hint}' in basename.lower()
-                or f'步骤{hint}' in basename
-            ):
-                return path
-    return ranked[0] if ranked else None
+    for path in ranked:
+        basename = os.path.basename(path)
+        if hint in basename and (
+            f'step{hint}' in basename.lower()
+            or f'step_{hint}' in basename.lower()
+            or f'步骤{hint}' in basename
+        ):
+            return path
+    return None
 
 
 def _resolve_screenshot_file_path(file_path: str):

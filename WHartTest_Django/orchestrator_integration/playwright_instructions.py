@@ -56,7 +56,12 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
 - **读取步骤**：使用 `whart-test` → `get_testcase_detail --project_id <项目ID> --case_id <test_case_id>`。
 - **禁止**直接用 `ui-automation-skill` 的 `get_testcase` / `execute_testcase` 按同一数字 ID 查询（会误报不存在）。
 - **浏览器执行**：优先 `playwright-skill`（或 `agent-browser-skill`）。
-- **截图回传**：使用 `whart-test` 的 `upload_screenshot` / `upload_screenshots`，`case_id` 与上述 test_case_id 相同。截图文件名必须是英文，如 `case_<id>_step1.png`，禁止 `步骤1_登录成功.png`。先 `page.screenshot` 保存，再按实际文件名上传。
+- **截图回传**：使用 `whart-test` 的 `upload_screenshot` / `upload_screenshots`，`case_id` 与上述 test_case_id 相同。
+  - 每步必须先 `page.screenshot({ path: '<SCREENSHOT_DIR>/case_<id>_step<N>.png' })`，再按**该文件名**上传。
+  - `upload_screenshot` 必须带 `step_number=<N>`。
+  - **禁止**多步都上传 `last.png`（会覆盖导致所有步骤显示同一张图）。
+  - 日志里的 `[SCREENSHOT_STEP_FILE] step_XX.png` 仅作参考，上传时仍用 `case_<id>_step<N>.png` 命名。
+  - 禁止中文文件名如 `步骤1_登录成功.png`。
 
 ## 【步骤执行纪律】（违反会导致跳步、虚报通过）
 
@@ -69,6 +74,8 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
    - **禁止**未筛选就在混合状态列表里直接找行点击。
 3. **筛选后必须验收**：刷新后逐行检查「当前状态」列；若仍出现「处理中」「已完成」「已关闭」等非目标状态，输出 `RESULT=FAIL: 筛选未生效，列表仍为混合状态` 并**停止**，不得进入下一步，**不得**在总结里标记该步通过。
 4. **截图与步骤对齐**：每步截图 title/文件名必须含 `步骤N`；第 N 步截图必须是完成第 N 步后的页面（筛选步必须是筛选后的列表页，不能是详情页）。
+   - 禁止不截图直接 upload；禁止连续多步 upload 同一文件。
+   - 若 upload 报「文件不存在」，应重新 `page.screenshot` 保存 `case_<id>_step<N>.png` 后再传，**不得**用其它步骤的旧图凑数。
 5. **结束必须输出完整报告**：通过、失败、或脚本报错无法继续时，都要立刻输出「测试执行结果」完整报告（含基本信息、步骤表、问题分析、结论），格式见下方。禁止沉默结束、禁止等用户追问。
    脚本问题（SyntaxError / chromium already declared / ERR_BLOCKED_BY_CLIENT / 文件不存在）应先修正重试当前步；重试后仍无法继续，同样输出完整「不通过」报告。
 
