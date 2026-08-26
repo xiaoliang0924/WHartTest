@@ -1,8 +1,15 @@
 const RUNNING_SESSION_KEY = 'langgraph_running_session';
+export const RUNNING_SESSION_EVENT = 'langgraph-running-session-change';
+
+function notifyRunningSessionChange(): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new Event(RUNNING_SESSION_EVENT));
+}
 
 export function markSessionRunning(sessionId: string): void {
   if (!sessionId) return;
   localStorage.setItem(RUNNING_SESSION_KEY, sessionId);
+  notifyRunningSessionChange();
 }
 
 export function clearSessionRunning(sessionId?: string | null): void {
@@ -10,6 +17,7 @@ export function clearSessionRunning(sessionId?: string | null): void {
   if (!current) return;
   if (!sessionId || current === sessionId) {
     localStorage.removeItem(RUNNING_SESSION_KEY);
+    notifyRunningSessionChange();
   }
 }
 

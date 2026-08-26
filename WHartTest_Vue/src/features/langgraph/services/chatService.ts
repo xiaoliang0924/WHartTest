@@ -12,6 +12,12 @@ import type {
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
 import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolResultParser';
 import { clearSessionRunning, markSessionRunning } from '@/features/langgraph/utils/runningSession';
+import {
+  extractFirstExecutionReport,
+  isExecutionReportContent,
+  parseExecutionReportStatus,
+  stripExecutionReportFromText,
+} from '@/features/langgraph/utils/executionReport';
 
 // --- 全局流式状态管理 ---
 interface StreamMessage {
@@ -35,6 +41,10 @@ interface StreamState {
   error?: string;
   isComplete: boolean;
   messages: StreamMessage[]; // 存储所有消息,包括工具消息
+  executionReport?: {
+    status: 'pass' | 'fail';
+    content: string;
+  };
   contextTokenCount?: number; // 当前上下文Token数
   contextLimit?: number; // 上下文Token限制
   currentStep?: number;  // Agent Loop 当前步骤
@@ -80,6 +90,35 @@ const formatStreamTime = (): string => {
   const now = new Date();
   return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 };
+
+interface TestCaseRunPayload {
+  status?: string;
+  summary?: string;
+}
+
+/** 将用例执行报告存到 stream.executionReport，仅在执行完成时展示（避免报告后还有工具日志） */
+export function applyTestCaseRunReportToStream(
+  stream: StreamState,
+  testCaseRun?: TestCaseRunPayload | Record<string, unknown> | null
+) {
+  if (!testCaseRun || typeof testCaseRun !== 'object') return;
+  const rawSummary = typeof (testCaseRun as TestCaseRunPayload).summary === 'string'
+    ? (testCaseRun as TestCaseRunPayload).summary!.trim()
+    : '';
+  const summary = extractFirstExecutionReport(rawSummary);
+  if (!summary || !isExecutionReportContent(summary)) return;
+
+  const status = (testCaseRun as TestCaseRunPayload).status === 'pass'
+    || parseExecutionReportStatus(summary) === 'pass'
+    ? 'pass'
+    : 'fail';
+
+  stream.executionReport = { status, content: summary };
+  stream.content = stripExecutionReportFromText(stream.content || '');
+  stream.messages = stream.messages.filter(
+    (msg) => !(msg.type === 'ai' && isExecutionReportContent(msg.content))
+  );
+}
 
 // 格式化 ISO 时间字符串为显示格式
 const formatIsoTime = (isoString: string | null | undefined): string => {
@@ -424,6 +463,9 @@ export async function sendChatMessageStream(
         activeStreams.value[sessionId].isComplete = true;
         // 不设置 error，避免显示错误提示
       }
+      if (sessionId) {
+        clearSessionRunning(sessionId);
+      }
       return;
     }
 
@@ -518,6 +560,10 @@ export async function sendChatMessageStream(
               }
               
               if (parsed.type === 'complete' && streamSessionId && activeStreams.value[streamSessionId]) {
+                applyTestCaseRunReportToStream(
+                  activeStreams.value[streamSessionId],
+                  parsed.test_case_run as Record<string, unknown> | undefined
+                );
                 activeStreams.value[streamSessionId].isComplete = true;
               }
             } catch (e) {
@@ -555,6 +601,7 @@ export async function sendChatMessageStream(
                 // HITL: 如果正在等待审批，不设置 isComplete，让 resumeAgentLoop 处理后续流程
                 if (!activeStreams.value[streamSessionId].isWaitingForApproval) {
                     activeStreams.value[streamSessionId].isComplete = true;
+                    clearSessionRunning(streamSessionId);
                 }
             }
             continue;
@@ -759,6 +806,10 @@ export async function sendChatMessageStream(
           }
 
           if (parsed.type === 'complete' && streamSessionId && activeStreams.value[streamSessionId]) {
+            applyTestCaseRunReportToStream(
+              activeStreams.value[streamSessionId],
+              parsed.test_case_run as Record<string, unknown> | undefined
+            );
             // ✅ 修复：标记完成，保持content不变（Vue组件会从content读取最终消息）
             // 不清空content，因为displayedMessages和watch都依赖stream.content来显示最终AI回复
             activeStreams.value[streamSessionId].isComplete = true;
@@ -1223,6 +1274,10 @@ export async function resumeAgentLoop(
             try {
               const parsed = JSON.parse(jsonData);
               if (parsed.type === 'complete' && activeStreams.value[sessionId]) {
+                applyTestCaseRunReportToStream(
+                  activeStreams.value[sessionId],
+                  parsed.test_case_run as Record<string, unknown> | undefined
+                );
                 activeStreams.value[sessionId].isComplete = true;
               }
             } catch {
@@ -1354,6 +1409,10 @@ export async function resumeAgentLoop(
 
           // 处理完成事件
           if (parsed.type === 'complete' && activeStreams.value[sessionId]) {
+            applyTestCaseRunReportToStream(
+              activeStreams.value[sessionId],
+              parsed.test_case_run as Record<string, unknown> | undefined
+            );
             activeStreams.value[sessionId].isComplete = true;
           }
         } catch (e) {

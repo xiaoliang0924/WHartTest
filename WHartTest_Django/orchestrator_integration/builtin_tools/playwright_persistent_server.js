@@ -95,6 +95,20 @@ function createCapturedConsole() {
   };
 }
 
+function stripRedeclaredPlaywrightBindings(code) {
+  // 持久化会话已通过 AsyncFunction 参数注入 chromium/page/helpers。
+  // 用户脚本再写 const { chromium } = require('playwright') 会 SyntaxError 并中断整步。
+  return String(code || '')
+    .replace(
+      /^\s*(?:const|let|var)\s*\{[\s\S]*?\}\s*=\s*require\(\s*['"]playwright['"]\s*\)\s*;?\s*$/gm,
+      ''
+    )
+    .replace(
+      /^\s*(?:const|let|var)\s+(?:chromium|firefox|webkit|devices|helpers)\s*=\s*[^;\n]+;?\s*$/gm,
+      ''
+    );
+}
+
 async function safeClose(target, timeoutMs = 5000) {
   /**
    * Close a Playwright handle with a hard timeout.
@@ -343,7 +357,25 @@ let { browser, context, page } = state;
 if (page && helpers && typeof helpers.dismissBlockingDialogs === 'function') {
   try { await helpers.dismissBlockingDialogs(page); } catch (_) {}
 }
-${code}
+const __screenshotDir = process.env.SCREENSHOT_DIR;
+if (page && __screenshotDir) {
+  const __fs = require('fs');
+  const __path = require('path');
+  try { __fs.mkdirSync(__screenshotDir, { recursive: true }); } catch (_) {}
+  const __origScreenshot = page.screenshot.bind(page);
+  page.screenshot = async (opts = {}) => {
+    const requested = opts && opts.path;
+    const basename = requested ? __path.basename(String(requested)) : 'last.png';
+    const savedPath = __path.join(__screenshotDir, basename);
+    const result = await __origScreenshot({ ...opts, path: savedPath });
+    console.log('[SCREENSHOT_SAVED] ' + savedPath);
+    if (basename !== 'last.png') {
+      try { await __origScreenshot({ path: __path.join(__screenshotDir, 'last.png') }); } catch (_) {}
+    }
+    return result;
+  };
+}
+${stripRedeclaredPlaywrightBindings(code)}
 if (page && helpers && typeof helpers.dismissBlockingDialogs === 'function') {
   try { await helpers.dismissBlockingDialogs(page); } catch (_) {}
 }
@@ -352,6 +384,22 @@ state.context = context;
 state.page = page;
 `
     );
+
+    const saveLastScreenshot = async () => {
+      const dir = process.env.SCREENSHOT_DIR;
+      const page = state.page;
+      if (!dir || !page || (typeof page.isClosed === 'function' && page.isClosed())) {
+        return;
+      }
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        const lastPath = path.join(dir, 'last.png');
+        await page.screenshot({ path: lastPath });
+        captured.stdout.push(`[SCREENSHOT_SAVED] ${lastPath}`);
+      } catch (err) {
+        captured.stderr.push(`[SCREENSHOT_SAVE_FAILED] ${err?.message || String(err)}`);
+      }
+    };
 
     try {
       await fn(
@@ -366,10 +414,12 @@ state.page = page;
         safeProcess,
         getContextOptionsWithHeaders
       );
+      await saveLastScreenshot();
       return { ok: true, stdout: captured.stdout, stderr: captured.stderr };
     } catch (e) {
       const msg = e?.stack || e?.message || String(e);
       captured.stderr.push(msg);
+      await saveLastScreenshot();
       return { ok: false, stdout: captured.stdout, stderr: captured.stderr, error: msg };
     }
   }

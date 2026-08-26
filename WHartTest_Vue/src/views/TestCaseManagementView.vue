@@ -161,7 +161,8 @@ import {
   getTestCaseList,
   updateTestCase,
   createTestCase,
-  deleteTestCase
+  deleteTestCase,
+  getLatestTestCaseRunRecord
 } from '@/services/testcaseService';
 
 // 测试类型提示词映射
@@ -233,11 +234,36 @@ const CASE_STEP_DETAIL_PROMPT = `【前置条件与步骤粒度（必须遵守�
 4. 点击确认转派 / 系统提示“请填写：转派原因”，转派失败
 5. 使用目标账号登录后查看“我的工单” / 该工单不出现在列表中`;
 
+const EXECUTION_RESULT_REPORT = `【结束报告（必须遵守）】
+无论通过、失败，还是脚本报错无法继续，结束前必须在对话中输出完整报告，禁止沉默结束：
+
+## 测试执行结果: 通过/不通过
+
+### 基本信息
+- 测试用例ID:
+- 名称:
+- 优先级:
+
+### 执行过程与结果
+| 步骤 | 操作 | 结果 | 状态 |
+|------|------|------|------|
+| 1 | … | 符合预期 / 失败原因 | ✅ 通过 / ❌ 失败 / ⏭ 未执行 |
+
+### 问题分析
+- 失败步骤：
+- 失败原因：
+- 建议：
+
+### 结论
+未执行的步骤必须标「未执行」，不得标通过。`;
+
 const EXECUTION_STEP_DISCIPLINE = `【步骤执行纪律（必须遵守）】
 - 必须严格按用例步骤编号顺序逐步执行，禁止跳步、合并步骤或自行省略任何一步。
 - 若某步包含「筛选条件」「工单状态」「查询」等筛选操作：必须先完成下拉选择并点击蓝色「查询」，等待列表刷新后，逐行检查「当前状态」列是否全部符合该步预期；禁止在未筛选的混合列表中直接找行点击。
 - 筛选类步骤的预期结果未满足时（例如列表仍出现「处理中」「已完成」等其他状态标签）：必须判定该步失败并停止后续步骤，不得虚报通过。
-- 每一步必须单独截图并上传，截图序号与步骤编号一致；截图内容必须是完成该步操作后的页面状态，禁止用下一步的页面冒充上一步。`;
+- 筛选工单状态禁止 \`page.getByText('处理中').click()\`（会 strict mode 命中表格多行）；必须用 \`helpers.filterWorkOrdersByStatus(page, '处理中')\` 或 \`helpers.selectFormDropdownOption(page, '工单状态', '处理中')\` 后再点「查询」。
+- 每一步必须单独截图并上传，截图序号与步骤编号一致；截图内容必须是完成该步操作后的页面状态，禁止用下一步的页面冒充上一步。
+- ${EXECUTION_RESULT_REPORT}`;
 
 // 根据测试类型列表生成提示词片段
 const getTestTypePrompt = (testTypes: string[]): string => {
@@ -329,6 +355,51 @@ const testCaseListRef = ref<InstanceType<typeof TestCaseList> | null>(null);
 // 存储所有模块数据，用于传递给详情页和表单
 const allModules = ref<TestCaseModule[]>([]);
 const moduleTreeForForm = ref<TreeNodeData[]>([]); // 用于表单的模块树
+
+const extractExecutionFailReason = (summary?: string) => {
+  if (!summary) {
+    return isEnglish.value
+      ? 'The case did not pass. Open the result drawer for details.'
+      : '用例未通过，请查看右侧执行结果了解失败步骤和原因。';
+  }
+  const reasonMatch = summary.match(/失败原因[:：]\s*([\s\S]+?)(?:\n\s*\n|###|结论|$)/);
+  const text = (reasonMatch?.[1] || summary).replace(/[#|*`-]/g, ' ').replace(/\s+/g, ' ').trim();
+  return text.slice(0, 180) || (isEnglish.value ? 'The case did not pass.' : '用例未通过，请查看执行结果。');
+};
+
+const notifyExecutionOutcome = async (caseId: number, sessionId: string) => {
+  if (!currentProjectId.value) {
+    Message.info(isEnglish.value ? 'Execution finished. See result drawer.' : '用例执行已结束，请查看右侧执行结果。');
+    return;
+  }
+
+  let status = '';
+  let summary = '';
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const response = await getLatestTestCaseRunRecord(currentProjectId.value, caseId, sessionId);
+    if (response.success && response.data?.status && response.data.status !== 'running') {
+      status = response.data.status;
+      summary = response.data.summary || '';
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  }
+
+  if (status === 'fail' || status === 'error') {
+    Notification.error({
+      title: isEnglish.value ? 'Case execution failed' : '用例执行失败',
+      content: extractExecutionFailReason(summary),
+      duration: 12000,
+      id: `exec-case-fail-${sessionId}`,
+    });
+    return;
+  }
+  if (status === 'pass') {
+    Message.success(isEnglish.value ? 'Case passed. See result drawer.' : '用例执行通过，请查看右侧执行结果。');
+    return;
+  }
+  Message.info(isEnglish.value ? 'Execution finished. See result drawer.' : '用例执行已结束，请查看右侧执行结果。');
+};
 
 const startAutomationTask = (
   requestData: ChatRequest,
@@ -757,7 +828,8 @@ ${EXECUTION_STEP_DISCIPLINE}
 2. 按步骤编号顺序在浏览器中逐步执行，每一步都验证预期结果后再进入下一步。
 3. 每一步执行完成后立即截图，可单张或批量上传；截图必须对应当前步骤编号。
 4. 必须上传截图以供查看。
-5. 执行结束后告知用户本次测试是否通过，并总结；不得将未实际执行的步骤标记为通过。
+5. 执行结束后必须输出完整「测试执行结果」报告（基本信息、步骤表、问题分析、结论）；未执行步骤标「未执行」。
+6. 若失败或中途无法继续：立刻输出完整「不通过」报告，不要等用户追问。不要只写三行【执行失败】。
 
 附加信息：
 - 测试用例名称：${testCase.name}
@@ -796,7 +868,7 @@ ${EXECUTION_STEP_DISCIPLINE}
       onComplete: async (sessionId) => {
         executionSessionId.value = sessionId;
         await executionResultDrawerRef.value?.markCompleted();
-        Message.success(isEnglish.value ? 'Execution finished. See result drawer.' : '用例执行已完成，请查看右侧执行结果。');
+        await notifyExecutionOutcome(testCase.id, sessionId);
       },
       onError: (sessionId, message) => {
         executionSessionId.value = sessionId;

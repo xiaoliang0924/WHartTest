@@ -97,6 +97,56 @@ def _build_sse_error_event(exc: Exception) -> Dict[str, Any]:
     return {"type": "error", "message": f"执行错误: {str(exc)}", "code": 500}
 
 
+async def _complete_testcase_run_with_report(
+    *,
+    session_id: str,
+    final_content: str = "",
+    messages=None,
+    stopped: bool = False,
+    error_message: Optional[str] = None,
+    agent=None,
+    invoke_config=None,
+):
+    """Finalize the case-management run and inject a 1436-style report if the model omitted one."""
+    from testcases.run_record_service import (
+        collect_assistant_transcript,
+        collect_message_transcript,
+        finalize_testcase_run_record,
+        is_filled_execution_result_report,
+    )
+
+    transcript = collect_message_transcript(messages, exclude_human=True)
+    assistant_transcript = collect_assistant_transcript(messages)
+    record = await sync_to_async(finalize_testcase_run_record)(
+        session_id=session_id,
+        final_content=final_content or "",
+        stopped=stopped,
+        error_message=error_message,
+        transcript=transcript,
+        assistant_transcript=assistant_transcript,
+    )
+    injected = ""
+    if (
+        record
+        and getattr(record, "injected_report", False)
+        and record.summary
+        and not is_filled_execution_result_report(final_content or "")
+    ):
+        injected = record.summary
+        if agent is not None and invoke_config is not None:
+            try:
+                await agent.aupdate_state(
+                    invoke_config,
+                    {"messages": [AIMessage(content=injected)]},
+                )
+            except Exception as persist_err:
+                logger.warning(
+                    "AgentLoopStreamAPI: Failed to persist fallback execution report: %s",
+                    persist_err,
+                )
+    return record, injected
+
+
 # ============== 统一响应辅助函数 ==============
 
 
@@ -1470,13 +1520,18 @@ class AgentLoopStreamAPIView(View):
                             friendly_error.get("message"),
                         )
                         if test_case_id:
-                            from testcases.run_record_service import finalize_testcase_run_record
-
-                            await sync_to_async(finalize_testcase_run_record)(
+                            _, injected_report = await _complete_testcase_run_with_report(
                                 session_id=session_id,
                                 final_content=streamed_assistant_content,
+                                messages=[],
                                 error_message=friendly_error.get("message"),
+                                agent=agent,
+                                invoke_config=invoke_config,
                             )
+                            if injected_report:
+                                yield create_sse_data(
+                                    {"type": "stream", "data": "\n\n" + injected_report}
+                                )
                         yield create_sse_data(_build_sse_error_event(e))
                     else:
                         logger.error(
@@ -1563,13 +1618,18 @@ class AgentLoopStreamAPIView(View):
 
                 if user_stopped:
                     if test_case_id:
-                        from testcases.run_record_service import finalize_testcase_run_record
-
-                        await sync_to_async(finalize_testcase_run_record)(
+                        _, injected_report = await _complete_testcase_run_with_report(
                             session_id=session_id,
                             final_content=streamed_assistant_content,
+                            messages=all_messages if "all_messages" in locals() else [],
                             stopped=True,
+                            agent=agent,
+                            invoke_config=invoke_config,
                         )
+                        if injected_report:
+                            yield create_sse_data(
+                                {"type": "stream", "data": "\n\n" + injected_report}
+                            )
                     yield create_sse_data(
                         {"type": "complete", "status": "stopped", "steps": step_count}
                     )
@@ -1579,8 +1639,6 @@ class AgentLoopStreamAPIView(View):
                     )
                 else:
                     if test_case_id:
-                        from testcases.run_record_service import finalize_testcase_run_record
-
                         final_content = streamed_assistant_content
                         try:
                             if "all_messages" in locals() and all_messages:
@@ -1601,10 +1659,17 @@ class AgentLoopStreamAPIView(View):
                                 "AgentLoopStreamAPI: Failed to extract final testcase content: %s",
                                 extract_err,
                             )
-                        record = await sync_to_async(finalize_testcase_run_record)(
+                        record, injected_report = await _complete_testcase_run_with_report(
                             session_id=session_id,
                             final_content=final_content,
+                            messages=all_messages if "all_messages" in locals() else [],
+                            agent=agent,
+                            invoke_config=invoke_config,
                         )
+                        if injected_report:
+                            yield create_sse_data(
+                                {"type": "stream", "data": "\n\n" + injected_report}
+                            )
                         complete_data = {
                             "type": "complete",
                             "total_steps": step_count,

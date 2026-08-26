@@ -22,6 +22,15 @@
       </div>
 
       <a-alert v-if="streamError" type="error" :title="streamError" show-icon class="block" />
+      <a-alert
+        v-if="record?.status === 'fail' || record?.status === 'error'"
+        type="error"
+        :title="text.failedHint"
+        show-icon
+        class="block"
+      >
+        {{ failReasonText }}
+      </a-alert>
       <a-alert v-if="isRunning" type="info" :title="text.runningHint" show-icon class="block" />
 
       <a-card v-if="record?.summary" :title="text.summary" size="small" class="block">
@@ -116,6 +125,7 @@ const text = computed(() => (
         startedAt: 'Started',
         completedAt: 'Completed',
         runningHint: 'Execution in progress. Results will refresh automatically.',
+        failedHint: 'Execution failed',
         summary: 'Summary',
         stepResults: 'Step Results',
         waitingSteps: 'Waiting for execution results...',
@@ -141,6 +151,7 @@ const text = computed(() => (
         startedAt: '开始时间',
         completedAt: '完成时间',
         runningHint: '用例正在执行中，结果将自动刷新。',
+        failedHint: '用例执行失败',
         summary: '结果摘要',
         stepResults: '步骤结果',
         waitingSteps: '等待执行结果...',
@@ -163,6 +174,13 @@ const text = computed(() => (
 ));
 
 const isRunning = computed(() => record.value?.status === 'running');
+
+const failReasonText = computed(() => {
+  const summary = record.value?.summary || '';
+  const reasonMatch = summary.match(/失败原因[:：]\s*([\s\S]+?)(?:\n\s*\n|###|结论|$)/);
+  const text = (reasonMatch?.[1] || summary).replace(/[#|*`-]/g, ' ').replace(/\s+/g, ' ').trim();
+  return text.slice(0, 240);
+});
 
 const statusLabel = computed(() => {
   const status = record.value?.status;
@@ -205,10 +223,15 @@ const displaySteps = computed(() => {
 const stepStatusLabel = (status?: string) => {
   if (status === 'pass') return text.value.pass;
   if (status === 'fail') return text.value.fail;
+  if (status === 'skip' || status === 'not_executed') {
+    return isEnglish.value ? 'Not executed' : '未执行';
+  }
   return text.value.unknown;
 };
 
-const stepStatusColor = (status?: string) => (status === 'pass' ? 'green' : status === 'fail' ? 'red' : 'gray');
+const stepStatusColor = (status?: string) => (
+  status === 'pass' ? 'green' : status === 'fail' ? 'red' : 'gray'
+);
 
 const formatTime = (value: string) => {
   try {

@@ -19,6 +19,29 @@
       </div>
     </template>
 
+    <!-- 测试执行报告：独立卡片，始终最后展示 -->
+    <template v-else-if="message.messageType === 'execution_report'">
+      <div class="avatar">
+        <img :src="brandLogoUrl" alt="AI Avatar" class="avatar-img" />
+      </div>
+      <div class="message-content execution-report-wrapper">
+        <div
+          class="execution-report-card"
+          :class="message.executionStatus === 'pass' ? 'execution-report-pass' : 'execution-report-fail'"
+        >
+          <div class="execution-report-header message-render-skip" data-i18n-skip>
+            {{ executionReportTitle }}
+          </div>
+          <div
+            class="execution-report-body message-render-skip"
+            data-i18n-skip
+            v-html="formattedContent"
+          ></div>
+        </div>
+        <div class="message-time">{{ message.time }}</div>
+      </div>
+    </template>
+
     <!-- 其他消息类型：使用头像+气泡布局 -->
     <template v-else>
       <div class="avatar">
@@ -225,7 +248,8 @@ interface ChatMessage {
   isUser: boolean;
   time: string;
   isLoading?: boolean;
-  messageType?: 'human' | 'ai' | 'tool' | 'system' | 'agent_step' | 'step_separator';
+  messageType?: 'human' | 'ai' | 'tool' | 'system' | 'agent_step' | 'step_separator' | 'execution_report';
+  executionStatus?: 'pass' | 'fail';
   toolName?: string; // 工具名称
   isExpanded?: boolean;
   isStreaming?: boolean; // 标识是否正在流式输出
@@ -462,6 +486,7 @@ const messageClass = computed(() => {
   if (props.message.messageType === 'step_separator' || props.message.messageType === 'agent_step') {
     return 'step-separator-message';
   }
+  if (props.message.messageType === 'execution_report') return 'execution-report-message';
   if (props.message.isUser) return 'user-message';
   if (props.message.messageType === 'tool') return 'tool-message';
   return 'ai-message';
@@ -479,6 +504,13 @@ const agentStepLabel = computed(() => {
     return `${pageText.value.step} ${step}/${maxStepsDisplay}`;
   }
   return pageText.value.step;
+});
+
+const executionReportTitle = computed(() => {
+  const match = props.message.content.match(/测试执行结果[:：]\s*(通过|不通过)/);
+  if (match?.[1] === '通过') return '测试执行结果：测试通过';
+  if (match?.[1] === '不通过') return '测试执行结果：测试不通过';
+  return '测试执行结果';
 });
 
 // 头像样式类
@@ -1969,5 +2001,74 @@ const formatToolMessage = (content: string) => {
   background-color: #f9fafb;
   border-radius: 8px;
   border-left: 3px solid #165dff;
+}
+
+.execution-report-message {
+  width: 100%;
+  max-width: 100%;
+}
+
+.execution-report-wrapper {
+  max-width: min(920px, 100%);
+}
+
+.execution-report-card {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-2);
+  background: var(--color-bg-1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.execution-report-pass .execution-report-header {
+  background: linear-gradient(90deg, #e8ffea 0%, #f6ffed 100%);
+  color: #008026;
+  border-bottom: 1px solid #b7eb8f;
+}
+
+.execution-report-fail .execution-report-header {
+  background: linear-gradient(90deg, #fff1f0 0%, #fff7f6 100%);
+  color: #cb2634;
+  border-bottom: 1px solid #ffccc7;
+}
+
+.execution-report-header {
+  padding: 12px 16px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.execution-report-body {
+  padding: 14px 16px 16px;
+  line-height: 1.6;
+}
+
+.execution-report-body :deep(h3) {
+  margin: 14px 0 8px;
+  font-size: 14px;
+  color: var(--color-text-1);
+}
+
+.execution-report-body :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0 12px;
+  font-size: 13px;
+}
+
+.execution-report-body :deep(th),
+.execution-report-body :deep(td) {
+  border: 1px solid var(--color-border-2);
+  padding: 8px 10px;
+  vertical-align: top;
+}
+
+.execution-report-body :deep(th) {
+  background: var(--color-fill-2);
+  font-weight: 600;
+}
+
+.execution-report-body :deep(tr:nth-child(even) td) {
+  background: var(--color-fill-1);
 }
 </style>

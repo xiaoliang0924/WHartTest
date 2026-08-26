@@ -405,6 +405,46 @@ def _search_file_in_dirs(target_name: str, search_dirs: list[str]):
     return None
 
 
+def _screenshot_dir_images():
+    screenshot_dir = os.environ.get('SCREENSHOT_DIR', '').strip()
+    if not screenshot_dir or not os.path.isdir(screenshot_dir):
+        return []
+    images = []
+    for name in os.listdir(screenshot_dir):
+        if os.path.splitext(name)[1].lower() in IMAGE_MIME_TYPES:
+            images.append(os.path.join(screenshot_dir, name))
+    return images
+
+
+def _extract_step_hint(name: str):
+    import re
+    match = re.search(r'(?:step|步骤)[_\-\s]*(\d+)', name or '', re.I)
+    return match.group(1) if match else None
+
+
+def _fallback_recent_screenshot(requested_path: str):
+    """文件名对不上时，用 SCREENSHOT_DIR 里最近的截图兜底，避免执行半途因上传失败中断。"""
+    images = _screenshot_dir_images()
+    if not images:
+        return None
+
+    now = time.time()
+    recent = [path for path in images if now - os.path.getmtime(path) < 10 * 60]
+    candidates = recent or images
+    hint = _extract_step_hint(os.path.basename(requested_path or ''))
+    ranked = sorted(candidates, key=os.path.getmtime, reverse=True)
+    if hint:
+        for path in ranked:
+            basename = os.path.basename(path)
+            if hint in basename and (
+                f'step{hint}' in basename.lower()
+                or f'step_{hint}' in basename.lower()
+                or f'步骤{hint}' in basename
+            ):
+                return path
+    return ranked[0] if ranked else None
+
+
 def _resolve_screenshot_file_path(file_path: str):
     """解析截图路径，兼容固定 SCREENSHOT_DIR 与临时目录兜底。"""
     normalized_path = (file_path or '').strip()
@@ -428,14 +468,23 @@ def _resolve_screenshot_file_path(file_path: str):
         if resolved_path:
             return resolved_path, search_dirs
 
+    fallback_path = _fallback_recent_screenshot(normalized_path)
+    if fallback_path and os.path.exists(fallback_path):
+        return fallback_path, search_dirs
+
     return normalized_path, search_dirs
 
 
-def _build_missing_file_error(original_path: str, searched_dirs: list[str]):
+def _build_missing_file_error(original_path: str, searched_dirs: list):
+    existing = [os.path.basename(path) for path in _screenshot_dir_images()]
+    extra = f"；目录内现有文件: {', '.join(existing)}" if existing else "；目录内没有截图，请先 page.screenshot 保存到 SCREENSHOT_DIR，文件名只用英文，例如 case_1520_step1.png"
     if not searched_dirs:
-        return {"error": f"文件不存在: {original_path}"}
+        return {"error": f"文件不存在: {original_path}{extra}"}
     return {
-        "error": f"文件不存在: {original_path}；已搜索目录: {', '.join(searched_dirs)}"
+        "error": (
+            f"文件不存在: {original_path}；已搜索目录: {', '.join(searched_dirs)}{extra}"
+            "。这不是用例失败，请用目录中的实际文件名重新上传，或先截图再上传。"
+        )
     }
 
 

@@ -51,7 +51,8 @@ interface ChatMessage {
   isUser: boolean;
   time: string;
   isLoading?: boolean;
-  messageType?: 'human' | 'ai' | 'tool' | 'system' | 'agent_step' | 'step_separator';
+  messageType?: 'human' | 'ai' | 'tool' | 'system' | 'agent_step' | 'step_separator' | 'execution_report';
+  executionStatus?: 'pass' | 'fail';
   toolName?: string;
   todoPayload?: TodoDisplayPayload;
   isExpanded?: boolean;

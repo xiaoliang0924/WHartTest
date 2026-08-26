@@ -161,7 +161,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onActivated, watch, onUnmounted, computed, nextTick } from 'vue';
 import { useRoute } from 'vue-router';
-import { Message, Modal } from '@arco-design/web-vue';
+import { Message, Modal, Notification } from '@arco-design/web-vue';
 import {
   sendChatMessageNonStream,
   sendChatMessageStream,
@@ -175,8 +175,10 @@ import {
   clearStreamState,
   latestContextUsage,
   stopAgentLoop,
-  resumeAgentLoop
+  resumeAgentLoop,
+  applyTestCaseRunReportToStream,
 } from '@/features/langgraph/services/chatService';
+import { getLatestTestCaseRunRecord } from '@/services/testcaseService';
 import { listLlmConfigs, partialUpdateLlmConfig } from '@/features/langgraph/services/llmConfigService';
 import { getUserPrompts } from '@/features/prompts/services/promptService';
 import type { ChatRequest, ChatHistoryMessage, ChatHistoryResponseData, ChatSessionDetail } from '@/features/langgraph/types/chat';
@@ -184,7 +186,14 @@ import type { LlmConfig } from '@/features/langgraph/types/llmConfig';
 import { useProjectStore } from '@/store/projectStore';
 import { useLlmConfigRefresh } from '@/composables/useLlmConfigRefresh';
 import { useAppI18n } from '@/composables/useAppI18n';
-import { clearSessionRunning, isSessionRunning } from '@/features/langgraph/utils/runningSession';
+import { clearSessionRunning, isSessionRunning, RUNNING_SESSION_EVENT } from '@/features/langgraph/utils/runningSession';
+import {
+  extractFirstExecutionReport,
+  isExecutionReportContent,
+  parseExecutionReportStatus,
+  parseTestCaseIdFromExecuteMessage,
+  stripExecutionReportFromText,
+} from '@/features/langgraph/utils/executionReport';
 import { marked } from 'marked';
 import { IconFullscreen, IconFullscreenExit } from '@arco-design/web-vue/es/icon';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
@@ -339,7 +348,8 @@ interface ChatMessage {
   isUser: boolean;
   time: string;
   isLoading?: boolean;
-  messageType?: 'human' | 'ai' | 'tool' | 'system' | 'agent_step' | 'step_separator';  // ⭐ 新增 step_separator 类型
+  messageType?: 'human' | 'ai' | 'tool' | 'system' | 'agent_step' | 'step_separator' | 'execution_report';
+  executionStatus?: 'pass' | 'fail';
   toolName?: string;
   isExpanded?: boolean;
   isStreaming?: boolean;
@@ -435,15 +445,20 @@ const syncRemoteGenerating = () => {
   isRemoteGenerating.value = isSessionRunning(currentId);
 };
 
-const handleRunningSessionStorage = (event: StorageEvent) => {
-  if (event.key !== 'langgraph_running_session') return;
+const applyRunningSessionChange = () => {
   syncRemoteGenerating();
   if (isRemoteGenerating.value) {
     isLoading.value = true;
     startRemoteSessionPolling();
     return;
   }
+  stopRemoteSessionPolling();
   safeStopLoading();
+};
+
+const handleRunningSessionStorage = (event: StorageEvent) => {
+  if (event.key !== 'langgraph_running_session') return;
+  applyRunningSessionChange();
 };
 
 const isGenerating = computed(() => {
@@ -540,10 +555,15 @@ watch(sessionId, () => {
   }
 });
 
-watch(isRemoteGenerating, async (running) => {
-  if (!running) return;
-  await nextTick();
-  chatMessagesRef.value?.scrollToBottom();
+watch(isRemoteGenerating, async (running, wasRunning) => {
+  if (running) {
+    await nextTick();
+    chatMessagesRef.value?.scrollToBottom();
+    return;
+  }
+  if (wasRunning && sessionId.value) {
+    await attachExecutionReportIfMissing(sessionId.value);
+  }
 });
 
 // 提示词相关
@@ -1128,6 +1148,108 @@ const enrichMessagesWithSeparators = (rawHistory: ChatHistoryMessage[], formatHi
   return result;
 };
 
+const findExecuteTestCaseId = (msgs: ChatMessage[]): number | null => {
+  for (const msg of msgs) {
+    if (!msg.isUser) continue;
+    const caseId = parseTestCaseIdFromExecuteMessage(msg.content);
+    if (caseId) return caseId;
+  }
+  return null;
+};
+
+/** 将历史 AI 消息中的报告 markdown 提升为 execution_report 卡片 */
+const promoteExecutionReportInMessages = (msgs: ChatMessage[]): ChatMessage[] => {
+  if (msgs.some((m) => m.messageType === 'execution_report')) {
+    return msgs;
+  }
+
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    const msg = msgs[i];
+    if (msg.isUser || msg.messageType === 'tool') continue;
+    if (!isExecutionReportContent(msg.content)) continue;
+
+    const summary = extractFirstExecutionReport(msg.content);
+    const status = parseExecutionReportStatus(summary) === 'pass' ? 'pass' : 'fail';
+    const prefix = stripExecutionReportFromText(msg.content).trim();
+    const next = [...msgs];
+
+    if (prefix) {
+      next[i] = { ...msg, content: prefix, messageType: msg.messageType || 'ai' };
+      next.push({
+        content: summary,
+        isUser: false,
+        time: msg.time,
+        messageType: 'execution_report',
+        executionStatus: status,
+      });
+    } else {
+      next[i] = {
+        ...msg,
+        content: summary,
+        messageType: 'execution_report',
+        executionStatus: status,
+      };
+    }
+    return next;
+  }
+
+  return msgs;
+};
+
+/** SSE 未带回 summary 时，从用例执行记录 API 补全报告卡片 */
+const attachExecutionReportIfMissing = async (chatSessionId: string) => {
+  if (!chatSessionId || !projectStore.currentProjectId) return false;
+
+  if (messages.value.some((m) => m.messageType === 'execution_report')) {
+    return false;
+  }
+
+  const caseId = findExecuteTestCaseId(messages.value);
+  if (!caseId) return false;
+
+  const stream = activeStreams.value[chatSessionId];
+  if (stream && !stream.isComplete && !stream.error) {
+    return false;
+  }
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const response = await getLatestTestCaseRunRecord(
+      projectStore.currentProjectId,
+      caseId,
+      chatSessionId
+    );
+    const record = response.success ? response.data : undefined;
+    if (record?.summary && record.status && record.status !== 'running') {
+      const summary = extractFirstExecutionReport(record.summary);
+      if (!isExecutionReportContent(summary)) {
+        return false;
+      }
+
+      const status = record.status === 'pass' || parseExecutionReportStatus(summary) === 'pass'
+        ? 'pass'
+        : 'fail';
+
+      if (stream) {
+        applyTestCaseRunReportToStream(stream, record);
+      }
+
+      messages.value.push({
+        content: summary,
+        isUser: false,
+        time: getCurrentTime(),
+        messageType: 'execution_report',
+        executionStatus: status,
+      });
+      await nextTick();
+      chatMessagesRef.value?.scrollToBottom();
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  return false;
+};
+
 // 加载聊天历史记录
 const applyChatHistoryResponse = (data: ChatHistoryResponseData) => {
   sessionId.value = data.session_id;
@@ -1144,11 +1266,13 @@ const applyChatHistoryResponse = (data: ChatHistoryResponseData) => {
   }
 
   const tempMessages = enrichMessagesWithSeparators(data.history, formatHistoryTime);
-  messages.value = mergeThinkingProcessMessages(tempMessages);
+  messages.value = mergeThinkingProcessMessages(promoteExecutionReportInMessages(tempMessages));
 
   syncRemoteGenerating();
   if (isRemoteGenerating.value) {
     isLoading.value = true;
+  } else {
+    void attachExecutionReportIfMissing(data.session_id);
   }
 
   const existingSession = chatSessions.value.find(s => s.id === data.session_id);
@@ -1230,6 +1354,9 @@ const startRemoteSessionPolling = () => {
       remoteSessionPollIdleCount = 0;
       await nextTick();
       chatMessagesRef.value?.scrollToBottom();
+      if (!isRemoteGenerating.value && currentId) {
+        void attachExecutionReportIfMissing(currentId);
+      }
       return;
     }
 
@@ -1237,6 +1364,9 @@ const startRemoteSessionPolling = () => {
     if (!isRemoteGenerating.value && remoteSessionPollIdleCount >= 20) {
       stopRemoteSessionPolling();
       safeStopLoading();
+      if (currentId) {
+        void attachExecutionReportIfMissing(currentId);
+      }
     }
   }, 3000);
 };
@@ -1298,21 +1428,31 @@ const solidifyStreamContent = () => {
 
   // 固化普通LLM聊天的流式内容
   const stream = activeStreams.value[sessionId.value];
-  if (stream && stream.isComplete && stream.content && stream.content.trim()) {
+  if (stream && stream.isComplete) {
     // ⭐ HITL：如果正在等待审批，不要清理流状态
     if (stream.isWaitingForApproval) {
       console.log('⏸️ 流正在等待 HITL 审批，跳过固化和清理');
       return;
     }
 
-    // 检查是否已经固化过（避免重复）
+    const hasContent = !!(stream.content && stream.content.trim());
+    const hasTools = !!(stream.messages && stream.messages.length > 0);
+    const hasReport = !!stream.executionReport?.content;
+    if (!hasContent && !hasTools && !hasReport) {
+      clearStreamState(sessionId.value);
+      return;
+    }
+
     const lastMsg = messages.value[messages.value.length - 1];
-    const alreadySolidified = lastMsg && !lastMsg.isUser && lastMsg.content === stream.content;
+    const alreadySolidified = lastMsg
+      && !lastMsg.isUser
+      && ((hasContent && lastMsg.content === stream.content)
+        || (hasReport && lastMsg.messageType === 'execution_report'));
 
     if (!alreadySolidified) {
-      // 先添加工具消息和中间消息
       if (stream.messages && stream.messages.length > 0) {
         stream.messages.forEach(msg => {
+          if (msg.type === 'ai' && isExecutionReportContent(msg.content)) return;
           const chatMsg: ChatMessage = {
             content: msg.content,
             isUser: false,
@@ -1325,7 +1465,6 @@ const solidifyStreamContent = () => {
             isThinkingProcess: msg.isThinkingProcess,
             isThinkingExpanded: msg.isThinkingExpanded
           };
-          // 保留 Agent Step 相关字段
           if (typeof msg.stepNumber === 'number') {
             chatMsg.stepNumber = msg.stepNumber;
           }
@@ -1338,13 +1477,24 @@ const solidifyStreamContent = () => {
           messages.value.push(chatMsg);
         });
       }
-      // 添加AI回复内容
-      messages.value.push({
-        content: stream.content,
-        isUser: false,
-        time: getCurrentTime(),
-        messageType: 'ai'
-      });
+      const plainContent = stripExecutionReportFromText(stream.content || '').trim();
+      if (plainContent) {
+        messages.value.push({
+          content: plainContent,
+          isUser: false,
+          time: getCurrentTime(),
+          messageType: 'ai'
+        });
+      }
+      if (stream.executionReport?.content) {
+        messages.value.push({
+          content: stream.executionReport.content,
+          isUser: false,
+          time: getCurrentTime(),
+          messageType: 'execution_report',
+          executionStatus: stream.executionReport.status,
+        });
+      }
       console.log('✅ 已固化LLM流式内容到messages.value');
     }
     clearStreamState(sessionId.value);
@@ -2131,42 +2281,44 @@ const displayedMessages = computed(() => {
       lastMsg.content === stream.content &&
       !lastMsg.isLoading;
 
-    // 只有在内容尚未固化时才添加流式内容
+    if (stream.messages && stream.messages.length > 0) {
+      stream.messages.forEach(msg => {
+        if (msg.type === 'ai' && isExecutionReportContent(msg.content)) return;
+        const chatMsg: ChatMessage = {
+          content: msg.content,
+          isUser: false,
+          time: msg.time,
+          messageType: msg.type as ChatMessage['messageType'],
+          toolName: msg.toolName,
+          isExpanded: msg.isExpanded,
+          imageDataUrl: msg.imageDataUrl,
+          fileAttachments: msg.fileAttachments,
+          isThinkingProcess: msg.isThinkingProcess,
+          isThinkingExpanded: msg.isThinkingExpanded
+        };
+
+        if (typeof msg.stepNumber === 'number') {
+          chatMsg.stepNumber = msg.stepNumber;
+        }
+        if (typeof msg.maxSteps === 'number') {
+          chatMsg.maxSteps = msg.maxSteps;
+        }
+        if (msg.stepStatus) {
+          chatMsg.stepStatus = msg.stepStatus;
+        }
+
+        combined.push(chatMsg);
+      });
+    }
+
+    // 只有在内容尚未固化时才添加流式 AI 文本
     if (!contentAlreadyInMessages) {
-      // 首先添加工具消息和 Agent Step 消息(如果有)
-      if (stream.messages && stream.messages.length > 0) {
-        stream.messages.forEach(msg => {
-          const chatMsg: ChatMessage = {
-            content: msg.content,
-            isUser: false,
-            time: msg.time,
-            messageType: msg.type as ChatMessage['messageType'],
-            toolName: msg.toolName,
-            isExpanded: msg.isExpanded,
-            imageDataUrl: msg.imageDataUrl,
-            fileAttachments: msg.fileAttachments,
-            isThinkingProcess: msg.isThinkingProcess,
-            isThinkingExpanded: msg.isThinkingExpanded
-          };
-
-          // Agent Step 专用字段
-          if (typeof msg.stepNumber === 'number') {
-            chatMsg.stepNumber = msg.stepNumber;
-          }
-          if (typeof msg.maxSteps === 'number') {
-            chatMsg.maxSteps = msg.maxSteps;
-          }
-          if (msg.stepStatus) {
-            chatMsg.stepStatus = msg.stepStatus;
-          }
-
-          combined.push(chatMsg);
-        });
+      let streamContent = stripExecutionReportFromText(stream.content || '');
+      if (stream.isComplete && stream.executionReport?.content) {
+        streamContent = stripExecutionReportFromText(streamContent);
       }
 
-      // 然后处理AI消息
       if (stream.error) {
-        // 如果有错误，显示错误消息
         combined.push({
           content: stream.error,
           isUser: false,
@@ -2174,9 +2326,7 @@ const displayedMessages = computed(() => {
           messageType: 'ai',
           isStreaming: false,
         });
-      }
-      else if (!stream.content || stream.content.trim() === '') {
-        // 如果流式内容为空或只有空白字符，且流还未完成，显示加载中状态
+      } else if (!streamContent.trim()) {
         if (!stream.isComplete) {
           combined.push({
             content: '',
@@ -2186,15 +2336,26 @@ const displayedMessages = computed(() => {
             isLoading: true,
           });
         }
-      }
-      else {
-        // 有实际内容时，显示流式内容
+      } else {
         combined.push({
-          content: stream.content,
+          content: streamContent,
           isUser: false,
           time: getCurrentTime(),
           messageType: 'ai',
           isStreaming: !stream.isComplete,
+        });
+      }
+    }
+
+    if (stream.isComplete && stream.executionReport?.content) {
+      const alreadyHasReport = combined.some((m) => m.messageType === 'execution_report');
+      if (!alreadyHasReport) {
+        combined.push({
+          content: stream.executionReport.content,
+          isUser: false,
+          time: getCurrentTime(),
+          messageType: 'execution_report',
+          executionStatus: stream.executionReport.status,
         });
       }
     }
@@ -2547,6 +2708,43 @@ const handlePromptsUpdated = async () => {
   }
 };
 
+const looksLikeExecutionStop = (text: string) => {
+  if (!text) return false;
+  return /【执行失败】|RESULT=FAIL|命令执行失败|文件不存在|用例执行失败|执行已停止|测试执行结果/.test(text);
+};
+
+const notifyChatExecutionEnded = () => {
+  const stream = sessionId.value ? activeStreams.value[sessionId.value] : null;
+  const chunks = [
+    stream?.content || '',
+    stream?.error || '',
+    ...((stream?.messages || []).map((item) => item.content || '')),
+    ...messages.value.slice(-10).map((item) => item.content || ''),
+  ].join('\n');
+
+  if (!looksLikeExecutionStop(chunks) && !/测试执行结果/.test(chunks)) {
+    return;
+  }
+
+  const reportTitle = chunks.match(/测试执行结果[:：]\s*(通过|不通过)/);
+  const failBlock = chunks.match(/## 测试执行结果[\s\S]{0,80}/) || chunks.match(/【执行失败】[\s\S]{0,240}/);
+  const isPass = reportTitle?.[1] === '通过';
+  const notifier = isPass ? Notification.success : Notification.error;
+  notifier({
+    title: isPass
+      ? (isEnglish.value ? 'Execution passed' : '测试执行结果: 通过')
+      : (isEnglish.value ? 'Execution failed' : '测试执行结果: 不通过'),
+    content: (
+      failBlock?.[0]
+      || (isEnglish.value
+        ? 'The run ended. Check the chat for the step table and analysis.'
+        : '执行已结束，请查看对话中的步骤表和问题分析。')
+    ).replace(/\s+/g, ' ').slice(0, 200),
+    duration: 12000,
+    id: `chat-exec-stop-${sessionId.value || 'current'}`,
+  });
+};
+
 // 监听知识库设置变化，自动保存到本地存储
 // 监视当前会话的流是否完成
 watch(
@@ -2562,9 +2760,28 @@ watch(
       console.log(`会话 ${sessionId.value} 的流已完成。`);
 
       const currentSessionId = sessionId.value;
+      notifyChatExecutionEnded();
+
+      // 本窗口流已结束：立即清除 running 标记（同窗口改 localStorage 不会触发 storage）
+      if (currentSessionId) {
+        clearSessionRunning(currentSessionId);
+      }
+      syncRemoteGenerating();
+      stopRemoteSessionPolling();
 
       // 🔧 流完成后立即固化内容到messages.value，避免清理后内容丢失
       solidifyStreamContent();
+
+      if (currentSessionId) {
+        void attachExecutionReportIfMissing(currentSessionId).then((attached) => {
+          if (!attached) {
+            chatMessagesRef.value?.scrollToBottom();
+          }
+        });
+      } else {
+        await nextTick();
+        chatMessagesRef.value?.scrollToBottom();
+      }
 
       // 后端标题总结是异步写库，这里短轮询当前会话标题，不阻塞消息完成态。
       if (currentSessionId && projectStore.currentProjectId) {
@@ -2579,7 +2796,6 @@ watch(
         });
       }
 
-      // 如果是通过本页面发送的消息，则需要在这里设置 isLoading = false
       if (isLoading.value) {
         isLoading.value = false;
       }
@@ -2635,6 +2851,7 @@ onMounted(async () => {
   bootstrapSessionFromRoute();
   syncRemoteGenerating();
   window.addEventListener('storage', handleRunningSessionStorage);
+  window.addEventListener(RUNNING_SESSION_EVENT, applyRunningSessionChange);
   window.addEventListener('message', handleDiagramPreviewMessage);
   document.addEventListener('fullscreenchange', syncHtmlPreviewFullscreenState);
 
@@ -2731,6 +2948,7 @@ onActivated(async () => {
 onUnmounted(() => {
   stopRemoteSessionPolling();
   window.removeEventListener('storage', handleRunningSessionStorage);
+  window.removeEventListener(RUNNING_SESSION_EVENT, applyRunningSessionChange);
   window.removeEventListener('message', handleDiagramPreviewMessage);
   document.removeEventListener('fullscreenchange', syncHtmlPreviewFullscreenState);
   pendingTitleRefreshTimers.forEach(timer => window.clearTimeout(timer));

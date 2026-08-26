@@ -280,8 +280,32 @@ async function extractTableData(page, tableSelector) {
   }, tableSelector);
 }
 
+async function selectFormDropdownOption(page, labelText, optionText) {
+  const formItem = page.locator('.el-form-item').filter({
+    has: page.getByText(labelText, { exact: true }),
+  });
+  const select = formItem.locator('.el-select').first();
+  await select.waitFor({ state: 'visible', timeout: 15000 });
+  await select.click();
+  const dropdown = page.locator('.el-select-dropdown:visible');
+  await dropdown.waitFor({ state: 'visible', timeout: 10000 });
+  const escaped = String(optionText).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const option = dropdown.locator('.el-select-dropdown__item').filter({
+    hasText: new RegExp(`^\\s*${escaped}\\s*$`),
+  });
+  await option.first().click();
+}
+
 /**
- * 关闭会挡住页面操作的一次性弹窗（如登录后的「发现新版本」）。
+ * 工单列表筛选：选择工单状态并点击查询（禁止 page.getByText('处理中') 直接点页面）
+ */
+async function filterWorkOrdersByStatus(page, statusText) {
+  await selectFormDropdownOption(page, '工单状态', statusText);
+  await page.getByRole('button', { name: '查询' }).click();
+  await page.waitForLoadState('networkidle').catch(() => {});
+}
+
+/**
  * 只点「我知道了」这类确认按钮，不会点「确定/取消/关闭」，以免关掉正在测的业务弹窗。
  * @param {Object} page - Playwright 页面对象
  * @returns {Promise<boolean>} 是否关掉了至少一个弹窗
@@ -592,6 +616,8 @@ module.exports = {
   scrollPage,
   extractTableData,
   dismissBlockingDialogs,
+  selectFormDropdownOption,
+  filterWorkOrdersByStatus,
   handleCookieBanner,
   retryWithBackoff,
   createContext,

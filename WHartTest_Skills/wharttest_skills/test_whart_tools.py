@@ -122,6 +122,25 @@ class WhartToolsScreenshotResolutionTests(unittest.TestCase):
         self.assertIn(screenshot_dir, result["error"])
         self.assertIn(os.path.join(tmpdir, "screenshots"), result["error"])
 
+    @patch.object(whart_tools.requests, "post", return_value=_DummyResponse())
+    def test_upload_screenshot_falls_back_to_recent_file_when_name_mismatch(self, mock_post):
+        with tempfile.TemporaryDirectory() as temp_root:
+            screenshot_dir = os.path.join(temp_root, "skill_runtime", "screenshots", "1", "1520")
+            actual_file = os.path.join(screenshot_dir, "case_1520_step1.png")
+            self._write_file(actual_file)
+
+            with patch.dict(
+                os.environ,
+                {"SCREENSHOT_DIR": screenshot_dir},
+                clear=False,
+            ):
+                result = whart_tools.upload_screenshot(
+                    1, 1520, "步骤1_登录成功.png", "步骤1 登录成功"
+                )
+
+        self.assertEqual(result, {"message": "截图 '步骤1 登录成功' 上传成功"})
+        mock_post.assert_called_once()
+
     @patch.object(whart_tools.requests, "get")
     def test_get_testcases_returns_api_total_and_case_ids(self, mock_get):
         response = MagicMock()

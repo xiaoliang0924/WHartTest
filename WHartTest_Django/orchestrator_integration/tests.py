@@ -29,6 +29,7 @@ from .builtin_tools.skill_tools import (
     _prepare_skill_screenshots_dir,
     _SKILL_DIR_STALE_SECONDS,
     _sanitize_runtime_path_segment,
+    _with_failure_reminder,
 )
 from .builtin_tools.output_sanitizer import strip_terminal_control_sequences
 from .middleware_config import get_user_friendly_llm_error, _model_retry_should_retry
@@ -552,3 +553,22 @@ class TerminalOutputSanitizerTests(SimpleTestCase):
         raw = "\x1b[32m✓\x1b[0m Browser closed"
 
         self.assertEqual(strip_terminal_control_sequences(raw), "✓ Browser closed")
+
+
+class SkillFailureReminderTests(SimpleTestCase):
+    def test_result_fail_appends_full_report_reminder(self):
+        output = _with_failure_reminder(
+            "RESULT=FAIL: 筛选未生效，列表仍为混合状态",
+            skill_name="playwright-skill",
+        )
+        self.assertIn("必须输出完整测试报告", output)
+        self.assertIn("## 测试执行结果: 不通过", output)
+
+    def test_missing_file_on_whart_test_appends_retry_then_report_reminder(self):
+        output = _with_failure_reminder(
+            "文件不存在: /tmp/case_1520_step1.png",
+            skill_name="whart-test",
+        )
+        self.assertIn("脚本错误，请修正后重试", output)
+        self.assertIn("测试执行结果: 不通过", output)
+

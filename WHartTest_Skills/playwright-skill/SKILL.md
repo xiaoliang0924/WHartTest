@@ -26,6 +26,9 @@ await helpers.dismissBlockingDialogs(page);
 
 只关「我知道了」这类一次性提示，不要点业务弹窗的「确定/取消」。
 
+登录页是**左右双栏**：左侧企微扫码，**右侧**才是账号密码（`请输入用户名` / `请输入密码` / 按钮 `登 录`）。  
+**禁止**看到「企业微信扫码登录」就判定无法账号登录。
+
 ### 3. 禁止使用会变的选择器
 
 **禁止** `#el-id-*`、`#el-id-847-3` 等 Element Plus 自动生成 ID（每次刷新都变）。
@@ -66,6 +69,11 @@ chromium.launch({ headless: true })
 - **一步一脚本**：该步只执行筛选（选下拉 → 点「查询」→ 等列表刷新 → 验收 → 截图），**禁止**在同一段脚本里点击「处理/领取/进入详情」。
 - **禁止跳步**：不得跳过筛选，直接在混合状态列表里找「待处理」行点击。
 - **验收**：检查「当前状态」列是否**全部**为目标状态；若仍混合多种状态，输出 `RESULT=FAIL: 筛选未生效` 并停止，总结里不得标记该步通过。
+- **禁止** `page.getByText('处理中').click()`：表格多行同文案会 **strict mode violation**。必须用：
+  ```javascript
+  await helpers.filterWorkOrdersByStatus(page, '处理中');
+  // 或 helpers.selectFormDropdownOption(page, '工单状态', '处理中') 后点「查询」
+  ```
 - **截图**：文件名含 `step{步骤号}`，画面必须是筛选后的列表页。
 
 示例流程（步骤 3 = 筛选「待处理」）：
@@ -91,7 +99,7 @@ node run.js "your playwright code here"
 
 ## 截图路径约定
 
-**必须使用 `process.env.SCREENSHOT_DIR`**。命名建议：`case_{case_id}_step{step_number}.png`
+**必须使用 `process.env.SCREENSHOT_DIR`**。文件名只用英文和数字，例如 `case_{case_id}_step{step_number}.png`。**禁止**中文文件名（如 `步骤1_登录成功.png`），上传会对不上。
 
 ```javascript
 const dir = process.env.SCREENSHOT_DIR;

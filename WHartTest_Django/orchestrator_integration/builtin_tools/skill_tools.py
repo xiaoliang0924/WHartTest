@@ -17,7 +17,7 @@ import mimetypes
 import re
 import signal
 import shlex
-from typing import Optional
+from typing import Optional, Tuple
 
 from langchain_core.tools import tool as langchain_tool
 from django.conf import settings
@@ -535,6 +535,64 @@ def _collect_skill_artifacts(
     return collected
 
 
+_FAILURE_REMINDER = (
+    "\n\n【必须输出完整测试报告】这是用例步骤未通过。"
+    "请立即在对话中输出完整报告，不要等待用户追问，格式如下：\n"
+    "## 测试执行结果: 不通过\n"
+    "### 基本信息\n- 测试用例ID:\n- 名称:\n- 优先级:\n"
+    "### 执行过程与结果\n| 步骤 | 操作 | 结果 |\n|------|------|------|\n"
+    "| N | … | 通过/失败：原因/未执行 |\n"
+    "### 问题分析\n- 失败步骤:\n- 失败原因:\n- 建议:\n"
+    "### 结论\n未执行步骤标「未执行」。然后保存执行记录为 fail。"
+)
+
+_RETRY_REMINDER = (
+    "\n\n【脚本错误，请修正后重试】"
+    "这是执行脚本问题，不是被测功能失败。请继续当前步骤："
+    "持久化会话已有 page / chromium / helpers，禁止再次 "
+    "`const { chromium } = require('playwright')`，禁止 chromium.launch()。"
+    "登录用右侧「请输入用户名/请输入密码」。截图文件名用英文如 case_1520_step1.png。"
+    "筛选工单状态必须用 helpers.filterWorkOrdersByStatus(page,'处理中') 或 "
+    "helpers.selectFormDropdownOption(page,'工单状态','处理中')，禁止 getByText('处理中').click()。"
+    "若已重试仍无法继续，必须立刻输出完整「## 测试执行结果: 不通过」报告"
+    "（基本信息、步骤表、问题分析、结论），禁止沉默结束。"
+)
+
+_ASSERTION_FAIL_MARKERS = ("RESULT=FAIL",)
+
+_SCRIPT_ERROR_MARKERS = (
+    "SyntaxError",
+    "already been declared",
+    "ERR_BLOCKED_BY_CLIENT",
+    "strict mode violation",
+    "命令执行失败",
+    "Process exited with code",
+    "Automation error",
+    "process.exit(",
+    "文件不存在",
+)
+
+
+def _contains_any(output: str, markers: Tuple[str, ...]) -> bool:
+    if not output:
+        return False
+    return any(marker in output for marker in markers)
+
+
+def _with_failure_reminder(output: str, *, skill_name: str) -> str:
+    if not output:
+        return output
+    if "【必须输出完整测试报告】" in output or "【脚本错误，请修正后重试】" in output:
+        return output
+    if _contains_any(output, _ASSERTION_FAIL_MARKERS):
+        return f"{output.rstrip()}{_FAILURE_REMINDER}"
+    if skill_name in ("playwright-skill", "whart-test") and _contains_any(
+        output, _SCRIPT_ERROR_MARKERS
+    ):
+        return f"{output.rstrip()}{_RETRY_REMINDER}"
+    return output
+
+
 def _finalize_skill_result(
     result_output: str,
     *,
@@ -821,6 +879,9 @@ def get_skill_tools(
                         )
                         cleaned_output = strip_terminal_control_sequences(output)
                         cleaned_output = _truncate_skill_output(cleaned_output)
+                        cleaned_output = _with_failure_reminder(
+                            cleaned_output, skill_name=skill_name
+                        )
                         result_output = (
                             cleaned_output.strip()
                             if cleaned_output.strip()
@@ -842,13 +903,19 @@ def get_skill_tools(
                         logger.error(
                             "[execute_skill_script] 持久化 Playwright 执行超时"
                         )
-                        return "错误: 命令执行超时（120秒）"
+                        return _with_failure_reminder(
+                            "错误: 命令执行超时（120秒）",
+                            skill_name=skill_name,
+                        )
                     except Exception as e:
                         logger.error(
                             f"[execute_skill_script] 持久化 Playwright 执行失败: {e}",
                             exc_info=True,
                         )
-                        return f"错误: {str(e)}"
+                        return _with_failure_reminder(
+                            f"错误: {str(e)}",
+                            skill_name=skill_name,
+                        )
 
             # playwright-cli 在只读的 skill 目录下以相对文件名保存截图会 EACCES，
             # 改在可写的截图目录执行，使截图默认落入 SCREENSHOT_DIR
@@ -879,6 +946,9 @@ def get_skill_tools(
             if output:
                 logger.debug(f"[execute_skill_script] output: {output[:500]}")
             result_output = output.strip() if output.strip() else "(无输出)"
+            result_output = _with_failure_reminder(
+                result_output, skill_name=skill_name
+            )
 
             # playwright-skill 未带 session_id 时提醒：裸 JS 也会被规范化成 run.js，不能只检查原始 command
             if skill_name == "playwright-skill" and not session_id:
@@ -906,7 +976,10 @@ def get_skill_tools(
 
         except subprocess.TimeoutExpired:
             logger.error("[execute_skill_script] 执行超时")
-            return "错误: 命令执行超时（120秒）"
+            return _with_failure_reminder(
+                "错误: 命令执行超时（120秒）",
+                skill_name=skill_name,
+            )
         except Exception as e:
             logger.error(f"[execute_skill_script] 执行失败: {e}", exc_info=True)
             return f"错误: {str(e)}"
