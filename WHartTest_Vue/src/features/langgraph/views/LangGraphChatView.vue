@@ -186,7 +186,13 @@ import type { LlmConfig } from '@/features/langgraph/types/llmConfig';
 import { useProjectStore } from '@/store/projectStore';
 import { useLlmConfigRefresh } from '@/composables/useLlmConfigRefresh';
 import { useAppI18n } from '@/composables/useAppI18n';
-import { clearSessionRunning, isSessionRunning, RUNNING_SESSION_EVENT } from '@/features/langgraph/utils/runningSession';
+import {
+  clearSessionRunning,
+  isSessionRunning,
+  RUNNING_SESSION_EVENT,
+  STREAM_COMPLETE_EVENT,
+  STREAM_COMPLETE_STORAGE_KEY,
+} from '@/features/langgraph/utils/runningSession';
 import {
   extractFirstExecutionReport,
   isExecutionReportContent,
@@ -446,6 +452,7 @@ const syncRemoteGenerating = () => {
 };
 
 const applyRunningSessionChange = () => {
+  const wasRemoteGenerating = isRemoteGenerating.value;
   syncRemoteGenerating();
   if (isRemoteGenerating.value) {
     isLoading.value = true;
@@ -453,12 +460,32 @@ const applyRunningSessionChange = () => {
     return;
   }
   stopRemoteSessionPolling();
+  const currentId = sessionId.value || getSessionIdFromStorage();
+  if (wasRemoteGenerating && currentId) {
+    handleStreamCompleteSignal(currentId);
+    return;
+  }
   safeStopLoading();
 };
 
 const handleRunningSessionStorage = (event: StorageEvent) => {
-  if (event.key !== 'langgraph_running_session') return;
-  applyRunningSessionChange();
+  if (event.key === 'langgraph_running_session') {
+    applyRunningSessionChange();
+    return;
+  }
+  if (event.key === STREAM_COMPLETE_STORAGE_KEY && event.newValue) {
+    try {
+      const payload = JSON.parse(event.newValue) as { sessionId?: string };
+      handleStreamCompleteSignal(payload.sessionId);
+    } catch {
+      // ignore malformed payload
+    }
+  }
+};
+
+const handleStreamCompleteEvent = (event: Event) => {
+  const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
+  handleStreamCompleteSignal(detail?.sessionId);
 };
 
 const isGenerating = computed(() => {
@@ -562,7 +589,7 @@ watch(isRemoteGenerating, async (running, wasRunning) => {
     return;
   }
   if (wasRunning && sessionId.value) {
-    await attachExecutionReportIfMissing(sessionId.value);
+    handleStreamCompleteSignal(sessionId.value);
   }
 });
 
@@ -1157,6 +1184,49 @@ const findExecuteTestCaseId = (msgs: ChatMessage[]): number | null => {
   return null;
 };
 
+const findExecuteTestCaseIdForSession = (chatSessionId: string): number | null => {
+  const fromMessages = findExecuteTestCaseId(messages.value);
+  if (fromMessages) return fromMessages;
+
+  const stream = activeStreams.value[chatSessionId];
+  if (stream?.userMessage) {
+    return parseTestCaseIdFromExecuteMessage(stream.userMessage);
+  }
+  return null;
+};
+
+const hasExecutionReportMessage = () => (
+  messages.value.some((m) => m.messageType === 'execution_report')
+);
+
+const appendExecutionReportMessage = (summary: string, status: 'pass' | 'fail') => {
+  if (!summary || hasExecutionReportMessage()) return;
+  messages.value.push({
+    content: summary,
+    isUser: false,
+    time: getCurrentTime(),
+    messageType: 'execution_report',
+    executionStatus: status,
+  });
+};
+
+/** 执行流式会话时 userMessage 可能只在 stream 上，需固化到 messages 供报告兜底识别 case_id */
+const ensureStreamUserMessageSolidified = (stream?: (typeof activeStreams.value)[string]) => {
+  if (!stream?.userMessage?.trim()) return;
+
+  const exists = messages.value.some(
+    (msg) => msg.isUser && msg.content === stream.userMessage
+  );
+  if (exists) return;
+
+  messages.value.push({
+    content: stream.userMessage,
+    isUser: true,
+    time: stream.userMessageTime || getCurrentTime(),
+    messageType: 'human',
+  });
+};
+
 /** 将历史 AI 消息中的报告 markdown 提升为 execution_report 卡片 */
 const promoteExecutionReportInMessages = (msgs: ChatMessage[]): ChatMessage[] => {
   if (msgs.some((m) => m.messageType === 'execution_report')) {
@@ -1200,16 +1270,28 @@ const promoteExecutionReportInMessages = (msgs: ChatMessage[]): ChatMessage[] =>
 const attachExecutionReportIfMissing = async (chatSessionId: string) => {
   if (!chatSessionId || !projectStore.currentProjectId) return false;
 
-  if (messages.value.some((m) => m.messageType === 'execution_report')) {
+  if (hasExecutionReportMessage()) {
     return false;
   }
 
-  const caseId = findExecuteTestCaseId(messages.value);
+  const stream = activeStreams.value[chatSessionId];
+  ensureStreamUserMessageSolidified(stream);
+
+  const caseId = findExecuteTestCaseIdForSession(chatSessionId);
   if (!caseId) return false;
 
-  const stream = activeStreams.value[chatSessionId];
   if (stream && !stream.isComplete && !stream.error) {
     return false;
+  }
+
+  if (stream?.executionReport?.content) {
+    appendExecutionReportMessage(
+      stream.executionReport.content,
+      stream.executionReport.status
+    );
+    await nextTick();
+    chatMessagesRef.value?.scrollToBottom();
+    return true;
   }
 
   for (let attempt = 0; attempt < 6; attempt += 1) {
@@ -1233,13 +1315,7 @@ const attachExecutionReportIfMissing = async (chatSessionId: string) => {
         applyTestCaseRunReportToStream(stream, record);
       }
 
-      messages.value.push({
-        content: summary,
-        isUser: false,
-        time: getCurrentTime(),
-        messageType: 'execution_report',
-        executionStatus: status,
-      });
+      appendExecutionReportMessage(summary, status);
       await nextTick();
       chatMessagesRef.value?.scrollToBottom();
       return true;
@@ -1248,6 +1324,63 @@ const attachExecutionReportIfMissing = async (chatSessionId: string) => {
   }
 
   return false;
+};
+
+/** 执行结束后刷新历史并补全报告卡片（本页/跨标签页均适用） */
+const finalizeInFlight = new Map<string, Promise<void>>();
+
+const finalizeSessionDisplayAfterRunEnd = (chatSessionId: string): Promise<void> => {
+  const existing = finalizeInFlight.get(chatSessionId);
+  if (existing) return existing;
+
+  const task = (async () => {
+    if (!chatSessionId || !projectStore.currentProjectId) return;
+
+    const viewingId = sessionId.value || getSessionIdFromStorage();
+    if (viewingId !== chatSessionId) return;
+
+    const localStream = activeStreams.value[chatSessionId];
+    if (localStream?.isComplete) {
+      solidifyStreamContent();
+    }
+
+    try {
+      const response = await getChatHistory(chatSessionId, projectStore.currentProjectId);
+      if (response.status === 'success' && response.data) {
+        applyChatHistoryResponse(response.data);
+      }
+    } catch (error) {
+      console.warn('执行结束后刷新会话历史失败:', error);
+    }
+
+    if (!hasExecutionReportMessage()) {
+      await attachExecutionReportIfMissing(chatSessionId);
+    }
+
+    messages.value = messages.value.slice();
+    await nextTick();
+    chatMessagesRef.value?.scrollToBottom();
+    safeStopLoading();
+  })();
+
+  finalizeInFlight.set(chatSessionId, task);
+  void task.finally(() => {
+    if (finalizeInFlight.get(chatSessionId) === task) {
+      finalizeInFlight.delete(chatSessionId);
+    }
+  });
+  return task;
+};
+
+const shouldFinalizeStreamComplete = (chatSessionId?: string | null) => {
+  if (!chatSessionId) return false;
+  const viewingId = sessionId.value || getSessionIdFromStorage();
+  return viewingId === chatSessionId;
+};
+
+const handleStreamCompleteSignal = (chatSessionId?: string | null) => {
+  if (!shouldFinalizeStreamComplete(chatSessionId)) return;
+  void finalizeSessionDisplayAfterRunEnd(chatSessionId!);
 };
 
 // 加载聊天历史记录
@@ -1435,6 +1568,8 @@ const solidifyStreamContent = () => {
       return;
     }
 
+    ensureStreamUserMessageSolidified(stream);
+
     const hasContent = !!(stream.content && stream.content.trim());
     const hasTools = !!(stream.messages && stream.messages.length > 0);
     const hasReport = !!stream.executionReport?.content;
@@ -1487,15 +1622,17 @@ const solidifyStreamContent = () => {
         });
       }
       if (stream.executionReport?.content) {
-        messages.value.push({
-          content: stream.executionReport.content,
-          isUser: false,
-          time: getCurrentTime(),
-          messageType: 'execution_report',
-          executionStatus: stream.executionReport.status,
-        });
+        appendExecutionReportMessage(
+          stream.executionReport.content,
+          stream.executionReport.status
+        );
       }
       console.log('✅ 已固化LLM流式内容到messages.value');
+    } else if (stream.executionReport?.content) {
+      appendExecutionReportMessage(
+        stream.executionReport.content,
+        stream.executionReport.status
+      );
     }
     clearStreamState(sessionId.value);
   }
@@ -1951,13 +2088,16 @@ const switchSession = async (id: string) => {
 
       // ✅ 使用纯函数处理历史记录,自动插入步骤分隔符
       const tempMessages = enrichMessagesWithSeparators(response.data.history, formatHistoryTime);
-      
-      // 🎨 合并连续的思考过程消息
-      messages.value = mergeThinkingProcessMessages(tempMessages);
+
+      // 🎨 合并连续的思考过程消息，并补全执行报告卡片
+      messages.value = mergeThinkingProcessMessages(promoteExecutionReportInMessages(tempMessages));
 
       // 更新会话信息（不更新时间，因为这是加载历史记录）
       updateSessionInList(id, undefined, false);
       startRemoteSessionPolling();
+      if (!isRemoteGenerating.value) {
+        void attachExecutionReportIfMissing(id);
+      }
     } else {
       Message.error(pageText.value.loadSessionHistoryFailed);
     }
@@ -2760,7 +2900,6 @@ watch(
       console.log(`会话 ${sessionId.value} 的流已完成。`);
 
       const currentSessionId = sessionId.value;
-      notifyChatExecutionEnded();
 
       // 本窗口流已结束：立即清除 running 标记（同窗口改 localStorage 不会触发 storage）
       if (currentSessionId) {
@@ -2769,18 +2908,11 @@ watch(
       syncRemoteGenerating();
       stopRemoteSessionPolling();
 
-      // 🔧 流完成后立即固化内容到messages.value，避免清理后内容丢失
-      solidifyStreamContent();
-
       if (currentSessionId) {
-        void attachExecutionReportIfMissing(currentSessionId).then((attached) => {
-          if (!attached) {
-            chatMessagesRef.value?.scrollToBottom();
-          }
-        });
+        await finalizeSessionDisplayAfterRunEnd(currentSessionId);
+        notifyChatExecutionEnded();
       } else {
-        await nextTick();
-        chatMessagesRef.value?.scrollToBottom();
+        notifyChatExecutionEnded();
       }
 
       // 后端标题总结是异步写库，这里短轮询当前会话标题，不阻塞消息完成态。
@@ -2852,6 +2984,7 @@ onMounted(async () => {
   syncRemoteGenerating();
   window.addEventListener('storage', handleRunningSessionStorage);
   window.addEventListener(RUNNING_SESSION_EVENT, applyRunningSessionChange);
+  window.addEventListener(STREAM_COMPLETE_EVENT, handleStreamCompleteEvent as EventListener);
   window.addEventListener('message', handleDiagramPreviewMessage);
   document.addEventListener('fullscreenchange', syncHtmlPreviewFullscreenState);
 
@@ -2949,6 +3082,7 @@ onUnmounted(() => {
   stopRemoteSessionPolling();
   window.removeEventListener('storage', handleRunningSessionStorage);
   window.removeEventListener(RUNNING_SESSION_EVENT, applyRunningSessionChange);
+  window.removeEventListener(STREAM_COMPLETE_EVENT, handleStreamCompleteEvent as EventListener);
   window.removeEventListener('message', handleDiagramPreviewMessage);
   document.removeEventListener('fullscreenchange', syncHtmlPreviewFullscreenState);
   pendingTitleRefreshTimers.forEach(timer => window.clearTimeout(timer));

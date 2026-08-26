@@ -1,5 +1,7 @@
 const RUNNING_SESSION_KEY = 'langgraph_running_session';
 export const RUNNING_SESSION_EVENT = 'langgraph-running-session-change';
+export const STREAM_COMPLETE_STORAGE_KEY = 'langgraph_stream_complete';
+export const STREAM_COMPLETE_EVENT = 'langgraph-stream-complete';
 
 function notifyRunningSessionChange(): void {
   if (typeof window === 'undefined') return;
@@ -28,4 +30,18 @@ export function getRunningSessionId(): string | null {
 export function isSessionRunning(sessionId?: string | null): boolean {
   if (!sessionId) return false;
   return getRunningSessionId() === sessionId;
+}
+
+/** 跨标签页广播：某会话 Agent Loop 已收到 SSE complete */
+export function notifyStreamComplete(sessionId: string): void {
+  if (!sessionId || typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(
+      STREAM_COMPLETE_STORAGE_KEY,
+      JSON.stringify({ sessionId, at: Date.now() })
+    );
+  } catch {
+    // ignore quota / private mode
+  }
+  window.dispatchEvent(new CustomEvent(STREAM_COMPLETE_EVENT, { detail: { sessionId } }));
 }

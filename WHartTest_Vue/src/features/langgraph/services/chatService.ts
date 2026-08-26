@@ -11,7 +11,11 @@ import type {
 } from '@/features/langgraph/types/chat';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
 import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolResultParser';
-import { clearSessionRunning, markSessionRunning } from '@/features/langgraph/utils/runningSession';
+import {
+  clearSessionRunning,
+  markSessionRunning,
+  notifyStreamComplete,
+} from '@/features/langgraph/utils/runningSession';
 import {
   extractFirstExecutionReport,
   isExecutionReportContent,
@@ -599,7 +603,8 @@ export async function sendChatMessageStream(
         if (jsonData === '[DONE]') {
             if (streamSessionId && activeStreams.value[streamSessionId]) {
                 // HITL: 如果正在等待审批，不设置 isComplete，让 resumeAgentLoop 处理后续流程
-                if (!activeStreams.value[streamSessionId].isWaitingForApproval) {
+                if (!activeStreams.value[streamSessionId].isWaitingForApproval
+                    && !activeStreams.value[streamSessionId].isComplete) {
                     activeStreams.value[streamSessionId].isComplete = true;
                     clearSessionRunning(streamSessionId);
                 }
@@ -830,6 +835,7 @@ export async function sendChatMessageStream(
             }
 
             clearSessionRunning(streamSessionId);
+            notifyStreamComplete(streamSessionId);
             hooks?.onComplete?.(streamSessionId, parsed as Record<string, unknown>);
           }
         } catch (e) {
