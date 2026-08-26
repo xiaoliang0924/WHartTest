@@ -33,6 +33,16 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
 - **浏览器执行**：优先 `playwright-skill`（或 `agent-browser-skill`）。
 - **截图回传**：使用 `whart-test` 的 `upload_screenshot` / `upload_screenshots`，`case_id` 与上述 test_case_id 相同。
 
+## 【步骤执行纪律】（违反会导致跳步、虚报通过）
+
+1. **逐步执行**：必须按 `get_testcase_detail` 返回的步骤编号顺序执行，**一步一脚本、一步一截图**；禁止跳步、合并步骤或省略任何一步。
+2. **筛选步骤单独成步**：若某步描述含「筛选条件」「工单状态」「查询」：
+   - 该步的 `execute_skill_script` **只能**做：点击工单状态下拉 → 选择目标状态（如「待处理」）→ 点击蓝色「查询」→ 等待列表刷新；
+   - **禁止**在同一段脚本里继续点击「处理/领取/进入详情」；
+   - **禁止**未筛选就在混合状态列表里直接找行点击。
+3. **筛选后必须验收**：刷新后逐行检查「当前状态」列；若仍出现「处理中」「已完成」「已关闭」等非目标状态，输出 `RESULT=FAIL: 筛选未生效，列表仍为混合状态` 并**停止**，不得进入下一步，**不得**在总结里标记该步通过。
+4. **截图与步骤对齐**：每步截图 title/文件名必须含 `步骤N`；第 N 步截图必须是完成第 N 步后的页面（筛选步必须是筛选后的列表页，不能是详情页）。
+
 ## 【Playwright 执行铁律】不遵守会出现「命令执行失败 (退出码 1)」
 
 1. **全程同一个 session_id**：所有 `execute_skill_script(skill_name="playwright-skill")` 必须带 `session_id="case_<test_case_id>"`。直接使用已有 `page`，禁止 `chromium.launch()` / `newPage()` / `browser.close()`。
