@@ -647,6 +647,67 @@ export interface BatchMoveResponse {
   statusCode?: number;
 }
 
+export interface BatchMoveByModuleResponse {
+  success: boolean;
+  message?: string;
+  data?: {
+    message: string;
+    moved_count: number;
+    source_module: { id: number; name: string };
+    target_module: { id: number; name: string };
+  };
+  error?: string;
+  statusCode?: number;
+}
+
+export const batchMoveTestCasesByModule = async (
+  projectId: number,
+  sourceModuleId: number,
+  targetModuleId: number,
+): Promise<BatchMoveByModuleResponse> => {
+  const authStore = useAuthStore();
+  const accessToken = authStore.getAccessToken;
+
+  if (!accessToken) {
+    return { success: false, error: '未登录或会话已过期' };
+  }
+
+  try {
+    const response = await axios.post(
+      `${API_BASE_URL}/projects/${projectId}/testcases/batch-move-by-module/`,
+      { source_module_id: sourceModuleId, target_module_id: targetModuleId },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+      },
+    );
+
+    if (response.data?.status === 'success') {
+      return {
+        success: true,
+        message: response.data.message,
+        data: response.data.data,
+        statusCode: response.data.code,
+      };
+    }
+
+    return {
+      success: false,
+      error: response.data?.message || response.data?.error || '批量移动测试用例失败',
+      statusCode: response.data?.code,
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      error: error.response?.data?.message || error.response?.data?.error || error.message || '批量移动测试用例失败',
+      statusCode: error.response?.status,
+    };
+  }
+};
+
 export const batchMoveTestCases = async (
   projectId: number,
   testCaseIds: number[],

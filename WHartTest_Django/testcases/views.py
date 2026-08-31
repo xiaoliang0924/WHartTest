@@ -657,6 +657,100 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
+    @action(detail=False, methods=["post"], url_path="batch-move-by-module")
+    @permission_required("testcases.change_testcase")
+    def batch_move_by_module(self, request, project_pk=None, **kwargs):
+        """Move a module subtree under another module in the same project."""
+        source_module_id = request.data.get("source_module_id")
+        target_module_id = request.data.get("target_module_id")
+
+        if source_module_id is None or target_module_id is None:
+            return Response(
+                {"error": "请提供源模块和目标模块"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            source_module_id = int(source_module_id)
+            target_module_id = int(target_module_id)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "源模块ID和目标模块ID必须为数字"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if source_module_id == target_module_id:
+            return Response(
+                {"error": "源模块与目标模块不能相同"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        project = get_object_or_404(Project, pk=project_pk)
+        source_module = get_object_or_404(
+            TestCaseModule,
+            pk=source_module_id,
+            project=project,
+        )
+        target_module = get_object_or_404(
+            TestCaseModule,
+            pk=target_module_id,
+            project=project,
+        )
+
+        descendant_ids = source_module.get_all_descendant_ids()
+        if target_module.id in descendant_ids:
+            return Response(
+                {"error": "无法移动模块到自身或其子模块下"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if target_module.level >= MAX_MODULE_LEVEL:
+            return Response(
+                {"error": "模块级别不能超过6级"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        subtree_depth = source_module.get_max_depth()
+        if target_module.level + subtree_depth > MAX_MODULE_LEVEL:
+            return Response(
+                {
+                    "error": (
+                        f"移动后模块层级将超过6级限制（当前子树深度: {subtree_depth}）"
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            old_parent_id = source_module.parent_id
+            source_module.parent = target_module
+            source_module.level = target_module.level + 1
+            source_module.save(update_fields=["parent", "level", "updated_at"])
+
+            module_viewset = TestCaseModuleViewSet()
+            reordered = module_viewset._normalize_sibling_order(
+                project, target_module.id
+            )
+            reordered = [
+                module for module in reordered if module.id != source_module.id
+            ]
+            reordered.append(source_module)
+            module_viewset._persist_sibling_order(reordered)
+
+            if old_parent_id != source_module.parent_id:
+                module_viewset._normalize_sibling_order(project, old_parent_id)
+
+        return Response(
+            {
+                "message": (
+                    f"已将模块 {source_module.name} 及其子模块移动到 {target_module.name} 下"
+                ),
+                "source_module": {"id": source_module.id, "name": source_module.name},
+                "target_module": {"id": target_module.id, "name": target_module.name},
+            },
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=["post"], url_path="upload-screenshots")
     @permission_required("testcases.add_testcasescreenshot")
     def upload_screenshots(self, request, project_pk=None, pk=None):

@@ -36,6 +36,7 @@ export interface TestCaseModule {
   // 可能的附加字段
   children_count?: number;
   test_case_count?: number;
+  testcase_count?: number;
   // 前端构建树时可能需要
   children?: TestCaseModule[];
   key?: number | string; // for a-tree

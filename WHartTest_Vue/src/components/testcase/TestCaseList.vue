@@ -250,6 +250,7 @@
         :placeholder="pageText.selectTargetModule"
         allow-search
         allow-clear
+        :filter-tree-node="filterTreeNodeByName"
         :field-names="{ key: 'key', title: 'title', children: 'children' }"
       />
     </a-modal>
@@ -276,6 +277,7 @@ import {
   type ReviewStatus,
 } from '@/services/testcaseService';
 import { formatDate, getLevelColor, getReviewStatusColor } from '@/utils/formatters';
+import { filterTreeNodeByName } from '@/utils/filterTreeNode';
 import type { TableColumnData, TreeNodeData } from '@arco-design/web-vue';
 
 const router = useRouter();

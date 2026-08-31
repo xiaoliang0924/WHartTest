@@ -515,12 +515,9 @@ const handleModuleSelected = (moduleId: number | null) => {
 };
 
 const handleModuleUpdated = () => {
-  // 模块更新后，可能需要刷新模块面板自身（如果它没有自动刷新的话）
-  // modulePanelRef.value?.refreshModules(); // 假设 ModuleManagementPanel 有此方法
-  // 同时刷新模块数据给表单用
+  modulePanelRef.value?.refreshModules();
+  testCaseListRef.value?.refreshTestCases();
   fetchAllModulesForForm();
-  // 如果用例列表依赖模块信息（比如显示模块名），也可能需要刷新用例列表
-  // 如需强制刷新用例列表，可在此调用列表刷新方法。
 };
 
 const showAddTestCaseForm = () => {

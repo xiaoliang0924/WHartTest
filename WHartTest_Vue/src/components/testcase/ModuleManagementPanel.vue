@@ -48,6 +48,7 @@
                 <a-doption value="addRoot" class="centered-dropdown-item">添加根模块</a-doption>
                 <a-doption value="addChild" :disabled="!canAddChildModule" class="centered-dropdown-item">添加子模块</a-doption>
                 <a-doption value="edit" :disabled="!selectedModuleKey" class="centered-dropdown-item">编辑模块</a-doption>
+                <a-doption value="moveModule" :disabled="!selectedModuleKey" class="centered-dropdown-item">移动模块</a-doption>
                 <a-doption value="delete" :disabled="!selectedModuleKey" class="centered-dropdown-item">删除模块</a-doption>
               </template>
             </a-dropdown>
@@ -90,6 +91,26 @@
         @submit="handleModuleSubmit"
         @close="closeModuleModal"
       />
+      <a-modal
+        v-model:visible="moveModuleModalVisible"
+        title="移动模块"
+        ok-text="移动"
+        :ok-loading="movingModuleTree"
+        @before-ok="handleConfirmMoveModule"
+      >
+        <p v-if="selectedModule" class="batch-move-modal-hint">
+          将模块「{{ selectedModule.name }}」及其所有子模块（共 {{ selectedSubmoduleCount }} 个子模块、{{ getModuleCaseCount(selectedModule) }} 条用例）移动到：
+        </p>
+        <a-tree-select
+          v-model="moveModuleTargetId"
+          :data="moduleTreeForMoveTarget"
+          placeholder="请选择目标模块"
+          allow-search
+          allow-clear
+          :filter-tree-node="filterTreeNodeByName"
+          :field-names="{ key: 'key', title: 'title', children: 'children' }"
+        />
+      </a-modal>
     </a-card>
     <div
       class="module-panel-resizer"
@@ -112,6 +133,7 @@ import {
 } from '@/services/testcaseModuleService';
 import { IconUp, IconDown } from '@arco-design/web-vue/es/icon';
 import ModuleEditModal from './ModuleEditModal.vue'; // 引入模块编辑模态框
+import { filterTreeNodeByName } from '@/utils/filterTreeNode';
 
 const props = defineProps<{
   currentProjectId: number | null;
@@ -203,6 +225,11 @@ const moduleForm = reactive<CreateTestCaseModuleRequest & { id?: number }>({
 });
 const isEditingModule = ref(false);
 
+// 移动模块（含子模块树）相关
+const moveModuleModalVisible = ref(false);
+const moveModuleTargetId = ref<number | undefined>(undefined);
+const movingModuleTree = ref(false);
+
 
 // 获取模块列表
 const fetchTestCaseModules = async () => {
@@ -228,6 +255,10 @@ const fetchTestCaseModules = async () => {
 const getModuleParentId = (module: TestCaseModule): number | null => {
   return module.parent_id ?? module.parent ?? null;
 };
+
+const getModuleCaseCount = (module: TestCaseModule): number => (
+  module.testcase_count ?? module.test_case_count ?? 0
+);
 
 const sortModules = (modules: TestCaseModule[]): TestCaseModule[] => {
   return [...modules].sort((a, b) => {
@@ -283,6 +314,22 @@ const canMoveDown = computed(() => (
   selectedSiblingIndex.value >= 0 &&
   selectedSiblingIndex.value < selectedSiblingModules.value.length - 1
 ));
+
+const selectedSubmoduleCount = computed(() => {
+  if (!selectedModuleKey.value) return 0;
+  return getAllChildModuleIds(testCaseModules.value, selectedModuleKey.value).size;
+});
+
+// 用于移动模块的目标模块树（排除源模块及其子模块）
+const moduleTreeForMoveTarget = computed(() => {
+  if (!selectedModuleKey.value) return moduleTreeData.value;
+  const excludeIds = getAllChildModuleIds(testCaseModules.value, selectedModuleKey.value);
+  excludeIds.add(selectedModuleKey.value);
+  const filteredModules = testCaseModules.value.filter(
+    module => !excludeIds.has(module.id),
+  );
+  return buildModuleTree(filteredModules);
+});
 
 // 用于 TreeSelect 的模块树数据 (排除当前编辑的模块及其子模块，防止循环引用)
 const moduleTreeForSelect = computed(() => {
@@ -492,6 +539,14 @@ const handleModuleAction = async (action: string | number | Record<string, any> 
         Message.warning('请先选择要编辑的模块');
       }
       break;
+    case 'moveModule':
+      if (!selectedModuleKey.value || !selectedModule.value) {
+        Message.warning('请先选择要移动的模块');
+        break;
+      }
+      moveModuleTargetId.value = undefined;
+      moveModuleModalVisible.value = true;
+      break;
     case 'delete':
       if (selectedModuleKey.value) {
         const moduleToDelete = testCaseModules.value.find(m => m.id === selectedModuleKey.value);
@@ -535,6 +590,44 @@ const handleModuleAction = async (action: string | number | Record<string, any> 
         Message.warning('请先选择要删除的模块');
       }
       break;
+  }
+};
+
+const handleConfirmMoveModule = async (): Promise<boolean> => {
+  if (!currentProjectId.value || !selectedModuleKey.value || !selectedModule.value) {
+    Message.warning('请先选择源模块');
+    return false;
+  }
+  if (!moveModuleTargetId.value) {
+    Message.warning('请选择目标模块');
+    return false;
+  }
+
+  movingModuleTree.value = true;
+  try {
+    const response = await moveTestCaseModule(
+      currentProjectId.value,
+      selectedModuleKey.value,
+      { target_id: moveModuleTargetId.value, drop_position: 0 },
+    );
+    if (!response.success) {
+      Message.error(response.error || '移动模块失败');
+      return false;
+    }
+
+    const targetModule = testCaseModules.value.find(module => module.id === moveModuleTargetId.value);
+    const targetModuleName = targetModule?.name || '';
+    Message.success(`已将模块「${selectedModule.value.name}」及其子模块移动到「${targetModuleName}」下`);
+    await fetchTestCaseModules();
+    selectedModuleKeys.value = [selectedModuleKey.value];
+    emit('moduleUpdated');
+    return true;
+  } catch (error) {
+    console.error('移动模块出错:', error);
+    Message.error('移动模块时发生错误');
+    return false;
+  } finally {
+    movingModuleTree.value = false;
   }
 };
 
@@ -772,5 +865,10 @@ defineExpose({
 :deep(.arco-dropdown-menu) {
   width: 100%;
   padding: 4px 0;
+}
+
+.batch-move-modal-hint {
+  margin-bottom: 12px;
+  color: var(--color-text-2);
 }
 </style>

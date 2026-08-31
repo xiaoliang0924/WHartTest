@@ -64,6 +64,61 @@ class TestCaseBatchMoveTests(DjangoTestCase):
             2,
         )
 
+    def test_moves_module_subtree_under_target_module(self):
+        child_module = TestCaseModule.objects.create(
+            project=self.project,
+            name="Child module",
+            parent=self.source_module,
+            creator=self.user,
+        )
+        TestCaseModel.objects.create(
+            project=self.project,
+            module=child_module,
+            name="Case in child module",
+            creator=self.user,
+        )
+
+        response = self.client.post(
+            f"/api/projects/{self.project.id}/testcases/batch-move-by-module/",
+            {
+                "source_module_id": self.source_module.id,
+                "target_module_id": self.target_module.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.source_module.refresh_from_db()
+        child_module.refresh_from_db()
+        self.assertEqual(self.source_module.parent_id, self.target_module.id)
+        self.assertEqual(child_module.parent_id, self.source_module.id)
+        self.assertEqual(
+            TestCaseModel.objects.filter(module=child_module).count(),
+            1,
+        )
+        self.assertEqual(
+            TestCaseModel.objects.filter(module=self.target_module).count(),
+            0,
+        )
+
+    def test_rejects_move_module_to_descendant(self):
+        child_module = TestCaseModule.objects.create(
+            project=self.project,
+            name="Child module",
+            parent=self.source_module,
+            creator=self.user,
+        )
+        response = self.client.post(
+            f"/api/projects/{self.project.id}/testcases/batch-move-by-module/",
+            {
+                "source_module_id": self.source_module.id,
+                "target_module_id": child_module.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+
 
 class AssignedTestCaseDeletionTests(DjangoTestCase):
     def setUp(self):

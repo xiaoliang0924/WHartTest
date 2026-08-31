@@ -18,6 +18,7 @@
           placeholder="请选择父模块 (不选则为根模块)"
           allow-clear
           allow-search
+          :filter-tree-node="filterTreeNodeByName"
           :field-names="{ key: 'id', title: 'name' }"
         />
       </a-form-item>
@@ -35,6 +36,7 @@ import {
   type CreateTestCaseModuleRequest,
   type UpdateTestCaseModuleRequest,
 } from '@/services/testcaseModuleService';
+import { filterTreeNodeByName } from '@/utils/filterTreeNode';
 
 const props = defineProps<{
   visible: boolean;
