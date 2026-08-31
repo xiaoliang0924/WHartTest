@@ -69,6 +69,25 @@
           <template #icon><icon-folder /></template>
           {{ pageText.batchMoveButton(selectedTestCaseIds.length) }}
         </a-button>
+        <a-dropdown
+          v-if="selectedTestCaseIds.length > 0"
+          trigger="click"
+          @select="handleBatchReviewStatusChange"
+        >
+          <a-button type="outline">
+            {{ pageText.batchReviewStatusButton(selectedTestCaseIds.length) }}
+            <icon-down style="margin-left: 4px;" />
+          </a-button>
+          <template #content>
+            <a-doption
+              v-for="option in reviewStatusOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              <a-tag :color="option.color" size="small">{{ option.label }}</a-tag>
+            </a-doption>
+          </template>
+        </a-dropdown>
         <a-button
           v-if="selectedTestCaseIds.length > 0"
           type="primary"
@@ -271,6 +290,7 @@ import {
   copyTestCase as copyTestCaseService,
   batchDeleteTestCases,
   batchMoveTestCases,
+  batchUpdateTestCaseReviewStatus,
   reorderTestCases,
   updateTestCaseReviewStatus,
   type TestCase,
@@ -326,6 +346,10 @@ const pageText = computed(() => (
         import: 'Import',
         batchDeleteButton: (count: number) => `Batch delete (${count})`,
         batchMoveButton: (count: number) => `Move (${count})`,
+        batchReviewStatusButton: (count: number) => `Review status (${count})`,
+        batchReviewStatusSuccess: (count: number, status: string) => `Updated review status to ${status} for ${count} test case(s)`,
+        batchReviewStatusFailed: 'Failed to batch update review status',
+        batchReviewStatusError: 'An error occurred while batch updating review status',
         move: 'Move',
         moveCasesTitle: 'Move test cases',
         moveCasesHint: (count: number) => `Select a target module for ${count} test case(s).`,
@@ -395,6 +419,10 @@ const pageText = computed(() => (
         import: '导入',
         batchDeleteButton: (count: number) => `批量删除 (${count})`,
         batchMoveButton: (count: number) => `移动 (${count})`,
+        batchReviewStatusButton: (count: number) => `修改审核状态 (${count})`,
+        batchReviewStatusSuccess: (count: number, status: string) => `已将 ${count} 条用例的审核状态更新为「${status}」`,
+        batchReviewStatusFailed: '批量更新审核状态失败',
+        batchReviewStatusError: '批量更新审核状态时发生错误',
         move: '移动',
         moveCasesTitle: '移动测试用例',
         moveCasesHint: (count: number) => `请选择 ${count} 条测试用例的目标模块`,
@@ -903,6 +931,43 @@ const handleReviewStatusChange = async (record: TestCase, newStatus: string) => 
     }
   } catch (error) {
     Message.error(pageText.value.reviewStatusUpdateError);
+  }
+};
+
+const handleBatchReviewStatusChange = async (newStatus: string | number | Record<string, unknown> | undefined) => {
+  if (!currentProjectId.value || selectedTestCaseIds.value.length === 0) return;
+
+  const reviewStatus = String(newStatus) as ReviewStatus;
+  if (reviewStatus === 'needs_optimization') {
+    Message.warning(isEnglish.value
+      ? 'Batch update to "Optimize" is not supported. Please update cases individually.'
+      : '批量修改为「优化」暂不支持，请逐条修改并填写优化说明。');
+    return;
+  }
+
+  try {
+    const response = await batchUpdateTestCaseReviewStatus(
+      currentProjectId.value,
+      selectedTestCaseIds.value,
+      reviewStatus,
+    );
+    if (!response.success) {
+      Message.error(response.error || pageText.value.batchReviewStatusFailed);
+      return;
+    }
+
+    const updatedCount = response.data?.updated_count ?? selectedTestCaseIds.value.length;
+    const statusLabel = getReviewStatusLabel(reviewStatus);
+    Message.success(pageText.value.batchReviewStatusSuccess(updatedCount, statusLabel));
+
+    const selectedIdSet = new Set(selectedTestCaseIds.value);
+    testCaseData.value.forEach((testCase) => {
+      if (selectedIdSet.has(testCase.id)) {
+        testCase.review_status = reviewStatus;
+      }
+    });
+  } catch (error) {
+    Message.error(pageText.value.batchReviewStatusError);
   }
 };
 

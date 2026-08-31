@@ -120,6 +120,64 @@ class TestCaseBatchMoveTests(DjangoTestCase):
         self.assertEqual(response.status_code, 400)
 
 
+class TestCaseBatchReviewStatusTests(DjangoTestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_superuser(
+            username="batch-review-admin",
+            password="test-password",
+            email="batch-review-admin@example.com",
+        )
+        self.project = Project.objects.create(name="Batch review project", creator=self.user)
+        self.module = TestCaseModule.objects.create(
+            project=self.project,
+            name="Review module",
+            creator=self.user,
+        )
+        self.testcases = [
+            TestCaseModel.objects.create(
+                project=self.project,
+                module=self.module,
+                name=f"Case {index}",
+                review_status="pending_review",
+                creator=self.user,
+            )
+            for index in range(3)
+        ]
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_updates_review_status_for_selected_testcases(self):
+        response = self.client.post(
+            f"/api/projects/{self.project.id}/testcases/batch-update-review-status/",
+            {
+                "ids": [testcase.id for testcase in self.testcases],
+                "review_status": "approved",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            TestCaseModel.objects.filter(
+                id__in=[testcase.id for testcase in self.testcases],
+                review_status="approved",
+            ).count(),
+            3,
+        )
+
+    def test_rejects_invalid_review_status(self):
+        response = self.client.post(
+            f"/api/projects/{self.project.id}/testcases/batch-update-review-status/",
+            {
+                "ids": [self.testcases[0].id],
+                "review_status": "invalid_status",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+
 class AssignedTestCaseDeletionTests(DjangoTestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_superuser(

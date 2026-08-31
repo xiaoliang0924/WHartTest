@@ -751,6 +751,57 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
+    @action(detail=False, methods=["post"], url_path="batch-update-review-status")
+    @permission_required("testcases.change_testcase")
+    def batch_update_review_status(self, request, project_pk=None, **kwargs):
+        """Batch update review status for multiple test cases in the same project."""
+        ids_data = request.data.get("ids", [])
+        review_status = request.data.get("review_status")
+
+        if not ids_data:
+            return Response(
+                {"error": "请选择要更新的测试用例"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        valid_statuses = {choice[0] for choice in TestCase.REVIEW_STATUS_CHOICES}
+        if review_status not in valid_statuses:
+            return Response(
+                {"error": "无效的审核状态"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            testcase_ids = list(dict.fromkeys(int(testcase_id) for testcase_id in ids_data))
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "用例ID必须为数字列表"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        testcases_to_update = self.get_queryset().filter(id__in=testcase_ids)
+        found_ids = set(testcases_to_update.values_list("id", flat=True))
+        missing_ids = [testcase_id for testcase_id in testcase_ids if testcase_id not in found_ids]
+        if missing_ids:
+            return Response(
+                {"error": "部分测试用例不存在或不属于当前项目", "missing_ids": missing_ids},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            updated_count = testcases_to_update.exclude(review_status=review_status).update(
+                review_status=review_status
+            )
+
+        return Response(
+            {
+                "message": f"已更新 {updated_count} 条测试用例的审核状态",
+                "updated_count": updated_count,
+                "review_status": review_status,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=["post"], url_path="upload-screenshots")
     @permission_required("testcases.add_testcasescreenshot")
     def upload_screenshots(self, request, project_pk=None, pk=None):
