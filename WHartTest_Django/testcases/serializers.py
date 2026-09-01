@@ -493,6 +493,16 @@ class TestSuiteSerializer(serializers.ModelSerializer):
     )
     testcases_detail = TestCaseSerializer(source="testcases", many=True, read_only=True)
     testcase_count = serializers.SerializerMethodField()
+    pre_data_plan_name = serializers.CharField(
+        source="pre_data_plan.name",
+        read_only=True,
+        default=None,
+    )
+    pre_data_environment_name = serializers.CharField(
+        source="pre_data_environment.name",
+        read_only=True,
+        default=None,
+    )
 
     class Meta:
         model = TestSuite
@@ -505,6 +515,12 @@ class TestSuiteSerializer(serializers.ModelSerializer):
             "testcases_detail",
             "testcase_count",
             "max_concurrent_tasks",
+            "pre_data_plan",
+            "pre_data_plan_name",
+            "pre_data_params",
+            "pre_data_environment",
+            "pre_data_environment_name",
+            "pre_data_fail_fast",
             "creator",
             "creator_detail",
             "created_at",
@@ -569,6 +585,19 @@ class TestSuiteSerializer(serializers.ModelSerializer):
             if not testcases:
                 raise serializers.ValidationError("测试套件至少需要包含一个测试用例")
 
+        project_id = self.instance.project_id if self.instance else self.context.get("project_id")
+        pre_data_plan = attrs.get("pre_data_plan")
+        if pre_data_plan is None and self.instance:
+            pre_data_plan = self.instance.pre_data_plan
+        if pre_data_plan and project_id and pre_data_plan.project_id != project_id:
+            raise serializers.ValidationError({"pre_data_plan": "造数计划必须属于当前项目"})
+
+        pre_data_environment = attrs.get("pre_data_environment")
+        if pre_data_environment is None and self.instance:
+            pre_data_environment = self.instance.pre_data_environment
+        if pre_data_environment and project_id and pre_data_environment.project_id != project_id:
+            raise serializers.ValidationError({"pre_data_environment": "造数环境必须属于当前项目"})
+
         return attrs
 
     def validate_max_concurrent_tasks(self, value):
@@ -594,6 +623,14 @@ class TestSuiteSerializer(serializers.ModelSerializer):
         instance.max_concurrent_tasks = validated_data.get(
             "max_concurrent_tasks", instance.max_concurrent_tasks
         )
+        if "pre_data_plan" in validated_data:
+            instance.pre_data_plan = validated_data.get("pre_data_plan")
+        if "pre_data_params" in validated_data:
+            instance.pre_data_params = validated_data.get("pre_data_params") or {}
+        if "pre_data_environment" in validated_data:
+            instance.pre_data_environment = validated_data.get("pre_data_environment")
+        if "pre_data_fail_fast" in validated_data:
+            instance.pre_data_fail_fast = validated_data.get("pre_data_fail_fast")
         instance.save()
 
         if testcases is not None:
@@ -686,6 +723,7 @@ class TestExecutionSerializer(serializers.ModelSerializer):
     results = TestCaseResultSerializer(many=True, read_only=True)
     duration = serializers.ReadOnlyField()
     pass_rate = serializers.ReadOnlyField()
+    data_generation_run_detail = serializers.SerializerMethodField()
 
     class Meta:
         model = TestExecution
@@ -708,6 +746,8 @@ class TestExecutionSerializer(serializers.ModelSerializer):
             "pass_rate",
             "results",
             "generate_playwright_script",
+            "data_generation_run",
+            "data_generation_run_detail",
             "created_at",
             "updated_at",
         ]
@@ -727,6 +767,21 @@ class TestExecutionSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def get_data_generation_run_detail(self, obj):
+        run = getattr(obj, 'data_generation_run', None)
+        if not run:
+            return None
+        return {
+            'id': run.id,
+            'status': run.status,
+            'plan_name': run.plan.name if run.plan_id else None,
+            'output_snapshot': run.output_snapshot,
+            'error_message': run.error_message,
+            'step_logs': run.step_logs,
+            'started_at': run.started_at,
+            'finished_at': run.finished_at,
+        }
 
 
 class TestExecutionCreateSerializer(serializers.Serializer):

@@ -13,6 +13,12 @@ export interface TestSuite {
   project: number;
   testcase_count: number;
   max_concurrent_tasks: number;
+  pre_data_plan?: number | null;
+  pre_data_plan_name?: string | null;
+  pre_data_params?: Record<string, unknown>;
+  pre_data_environment?: number | null;
+  pre_data_environment_name?: string | null;
+  pre_data_fail_fast?: boolean;
   testcases_detail?: TestCase[];
   creator: number;
   creator_detail: {
@@ -30,6 +36,10 @@ export interface CreateTestSuiteRequest {
   description?: string;
   testcase_ids?: number[];
   max_concurrent_tasks?: number;
+  pre_data_plan?: number | null;
+  pre_data_params?: Record<string, unknown>;
+  pre_data_environment?: number | null;
+  pre_data_fail_fast?: boolean;
 }
 
 // 更新测试套件请求参数
@@ -38,6 +48,10 @@ export interface UpdateTestSuiteRequest {
   description?: string;
   testcase_ids?: number[];
   max_concurrent_tasks?: number;
+  pre_data_plan?: number | null;
+  pre_data_params?: Record<string, unknown>;
+  pre_data_environment?: number | null;
+  pre_data_fail_fast?: boolean;
 }
 
 // 测试套件列表响应接口

@@ -41,6 +41,48 @@
         </div>
       </a-form-item>
 
+      <a-divider orientation="left">套件跑前造数</a-divider>
+      <a-row :gutter="16">
+        <a-col :span="12">
+          <a-form-item label="造数计划">
+            <a-select
+              v-model="formData.pre_data_plan"
+              placeholder="可选：执行套件前自动造数"
+              allow-clear
+              :loading="planLoading"
+            >
+              <a-option v-for="plan in dataPlans" :key="plan.id" :value="plan.id">
+                {{ plan.name }}
+              </a-option>
+            </a-select>
+          </a-form-item>
+        </a-col>
+        <a-col :span="12">
+          <a-form-item label="造数 API 环境">
+            <a-select
+              v-model="formData.pre_data_environment"
+              placeholder="选择 API 环境"
+              allow-clear
+              :loading="envLoading"
+            >
+              <a-option v-for="env in environments" :key="env.id" :value="env.id">
+                {{ env.name }}
+              </a-option>
+            </a-select>
+          </a-form-item>
+        </a-col>
+      </a-row>
+      <a-form-item label="造数参数 (JSON)">
+        <a-textarea
+          v-model="preDataParamsJson"
+          :auto-size="{ minRows: 2, maxRows: 5 }"
+          placeholder='例如 {"count": 1}'
+        />
+      </a-form-item>
+      <a-form-item label="造数失败阻断执行">
+        <a-switch v-model="formData.pre_data_fail_fast" />
+      </a-form-item>
+
       <!-- 选择测试用例 -->
       <a-form-item required>
         <template #label>
@@ -117,6 +159,8 @@ import {
   getTestSuiteDetail,
   type CreateTestSuiteRequest,
 } from '@/services/testSuiteService';
+import { getEnvironments } from '@/features/api-testing/services/environmentService';
+import { getDataGenerationPlans } from '@/features/data-generation/services/dataGenerationService';
 import { getTestCaseDetail, type TestCase } from '@/services/testcaseService';
 import TestCaseSelectorTable from './TestCaseSelectorTable.vue';
 
@@ -216,12 +260,21 @@ const showTestCaseSelector = ref(false);
 const selectedTestCaseIds = ref<number[]>([]);
 const selectedTestCases = ref<TestCase[]>([]);
 const loading = ref(false);
+const planLoading = ref(false);
+const envLoading = ref(false);
+const dataPlans = ref<Array<{ id: number; name: string }>>([]);
+const environments = ref<Array<{ id: number; name: string }>>([]);
+const preDataParamsJson = ref('{}');
 
 const formData = ref<CreateTestSuiteRequest>({
   name: '',
   description: '',
   testcase_ids: [],
   max_concurrent_tasks: 1,
+  pre_data_plan: null,
+  pre_data_environment: null,
+  pre_data_params: {},
+  pre_data_fail_fast: true,
 });
 
 const rules = computed(() => ({
@@ -287,6 +340,15 @@ const handleSubmit = async () => {
   try {
     await formRef.value?.validate();
 
+    try {
+      formData.value.pre_data_params = preDataParamsJson.value
+        ? JSON.parse(preDataParamsJson.value)
+        : {};
+    } catch {
+      Message.error('造数参数 JSON 格式无效');
+      return false;
+    }
+
     loading.value = true;
     formData.value.testcase_ids = selectedTestCaseIds.value;
 
@@ -316,8 +378,31 @@ const handleCancel = () => {
   formRef.value?.resetFields();
   selectedTestCaseIds.value = [];
   selectedTestCases.value = [];
+  preDataParamsJson.value = '{}';
   emit('update:visible', false);
 };
+
+async function loadDataGenerationOptions() {
+  if (!props.currentProjectId) return;
+  planLoading.value = true;
+  envLoading.value = true;
+  try {
+    const [planResp, envResp] = await Promise.all([
+      getDataGenerationPlans(props.currentProjectId, { is_active: true, page_size: 200 }),
+      getEnvironments({ project: props.currentProjectId }),
+    ]);
+    dataPlans.value = planResp.results.map((item) => ({ id: item.id, name: item.name }));
+    environments.value = (envResp.results || envResp.data || envResp || []).map((item: any) => ({
+      id: item.id,
+      name: item.name,
+    }));
+  } catch (error) {
+    console.error('加载造数配置选项失败:', error);
+  } finally {
+    planLoading.value = false;
+    envLoading.value = false;
+  }
+}
 
 // 加载套件详情
 const loadSuiteDetail = async () => {
@@ -335,6 +420,11 @@ const loadSuiteDetail = async () => {
       formData.value.name = suite.name;
       formData.value.description = suite.description || '';
       formData.value.max_concurrent_tasks = suite.max_concurrent_tasks || 1;
+      formData.value.pre_data_plan = suite.pre_data_plan ?? null;
+      formData.value.pre_data_environment = suite.pre_data_environment ?? null;
+      formData.value.pre_data_fail_fast = suite.pre_data_fail_fast ?? true;
+      formData.value.pre_data_params = suite.pre_data_params || {};
+      preDataParamsJson.value = JSON.stringify(suite.pre_data_params || {}, null, 2);
 
       // 获取用例ID列表
       if (suite.testcases_detail && suite.testcases_detail.length > 0) {
@@ -357,6 +447,7 @@ watch(
   () => props.visible,
   async (newVal) => {
     if (newVal) {
+      await loadDataGenerationOptions();
       if (isEditing.value && props.suiteId) {
         await loadSuiteDetail();
       } else {

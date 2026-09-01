@@ -337,6 +337,35 @@ class TestSuite(models.Model):
         default=1,
         help_text=_('同时执行的测试用例数量，1表示串行执行，建议值2-5')
     )
+    pre_data_plan = models.ForeignKey(
+        'data_generation.DataGenerationPlan',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bound_test_suites',
+        verbose_name=_('造数计划'),
+        help_text=_('套件执行前自动运行的造数计划'),
+    )
+    pre_data_params = models.JSONField(
+        _('造数参数'),
+        default=dict,
+        blank=True,
+        help_text=_('传递给造数计划的运行时参数'),
+    )
+    pre_data_environment = models.ForeignKey(
+        'api_environments.ApiEnvironment',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bound_test_suites',
+        verbose_name=_('造数 API 环境'),
+        help_text=_('造数步骤默认使用的 API 环境'),
+    )
+    pre_data_fail_fast = models.BooleanField(
+        _('造数失败阻断'),
+        default=True,
+        help_text=_('造数失败时是否阻断套件执行'),
+    )
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
     updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
     
@@ -397,6 +426,14 @@ class TestExecution(models.Model):
         _('生成脚本'),
         default=False,
         help_text=_('执行功能测试用例时是否自动生成Playwright脚本')
+    )
+    data_generation_run = models.ForeignKey(
+        'data_generation.DataGenerationRun',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='linked_test_executions',
+        verbose_name=_('造数执行记录'),
     )
 
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)

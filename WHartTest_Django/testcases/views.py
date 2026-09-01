@@ -1375,7 +1375,7 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
             project = get_object_or_404(Project, pk=project_pk)
             return TestSuite.objects.filter(project=project).prefetch_related(
                 "testcases", "creator"
-            )
+            ).select_related("pre_data_plan", "pre_data_environment")
         return TestSuite.objects.none()
 
     def get_serializer_class(self):
@@ -1427,7 +1427,7 @@ class TestExecutionViewSet(viewsets.ModelViewSet):
             project = get_object_or_404(Project, pk=project_pk)
             return (
                 TestExecution.objects.filter(suite__project=project)
-                .select_related("suite", "executor")
+                .select_related("suite", "executor", "data_generation_run", "data_generation_run__plan")
                 .prefetch_related("results")
             )
         return TestExecution.objects.none()

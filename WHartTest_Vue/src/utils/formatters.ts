@@ -2,12 +2,18 @@ export const formatDateTime = (dateString?: string): string => {
   if (!dateString) return '-';
   try {
     const date = new Date(dateString);
-    // 检查日期是否有效
     if (isNaN(date.getTime())) {
       return '-';
     }
-    // 使用 toLocaleString 来同时显示日期和时间
-    return date.toLocaleString();
+    return date.toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
   } catch (error) {
     console.error("Error formatting datetime:", dateString, error);
     return '-';

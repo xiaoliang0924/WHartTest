@@ -204,6 +204,21 @@
             </a-menu-item>
           </a-sub-menu>
 
+          <a-sub-menu key="data-generation" v-if="hasDataGenerationPermission">
+            <template #icon><icon-storage /></template>
+            <template #title>
+              <span @click="handleDataGenerationClick">{{ dataGenerationMenuLabel }}</span>
+            </template>
+            <a-menu-item key="data-generation-plans">
+              <template #icon><icon-file /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/data-generation')">{{ dataGenerationPlansLabel }}</a>
+            </a-menu-item>
+            <a-menu-item key="data-generation-runs">
+              <template #icon><icon-history /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/data-generation?tab=runs')">{{ dataGenerationRunsLabel }}</a>
+            </a-menu-item>
+          </a-sub-menu>
+
           <a-menu-item key="langgraph-chat" v-if="hasLangGraphChatPermission">
             <template #icon><icon-message /></template>
             <a href="#" @click="checkProjectAndNavigate($event, '/langgraph-chat')">{{ chatMenuLabel }}</a>
@@ -382,6 +397,9 @@ const testManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Test
 const caseManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Cases' : tl('用例管理')));
 const suitesMenuLabel = computed(() => (locale.value === 'en-US' ? 'Suites' : tl('测试套件')));
 const executionHistoryMenuLabel = computed(() => (locale.value === 'en-US' ? 'History' : tl('执行历史')));
+const dataGenerationMenuLabel = computed(() => (locale.value === 'en-US' ? 'Data Gen' : '造数管理'));
+const dataGenerationPlansLabel = computed(() => (locale.value === 'en-US' ? 'Plans' : '造数计划'));
+const dataGenerationRunsLabel = computed(() => (locale.value === 'en-US' ? 'Runs' : '执行记录'));
 const manualExecutionMenuLabel = computed(() => (locale.value === 'en-US' ? 'Case Execution' : tl('用例执行')));
 const chatMenuLabel = computed(() => (locale.value === 'en-US' ? 'Chat' : tl('LLM对话')));
 const systemMenuLabel = computed(() => (locale.value === 'en-US' ? 'Admin' : tl('系统管理')));
@@ -438,6 +456,7 @@ const activeMenu = computed(() => {
   if (path.startsWith('/api-testing')) return 'api-testing';
   if (path.startsWith('/ui-automation')) return 'ui-automation';
   if (path.startsWith('/testsuites')) return 'testsuites'; // 添加对测试套件路由的识别
+  if (path.startsWith('/data-generation')) return 'data-generation-plans';
   if (path.startsWith('/test-executions')) return 'test-executions'; // 添加对执行历史路由的识别
   if (path.startsWith('/manual-test-executions')) return 'manual-test-executions';
   if (path.startsWith('/testcases')) return 'testcases';
@@ -481,6 +500,11 @@ const hasTestSuitesPermission = computed(() => {
 
 const hasTestExecutionsPermission = computed(() => {
   return authStore.hasPermission('testcases.view_testexecution');
+});
+
+const hasDataGenerationPermission = computed(() => {
+  return authStore.hasPermission('data_generation.view_datagenerationplan')
+    || authStore.hasPermission('testcases.view_testsuite');
 });
 
 const hasLangGraphChatPermission = computed(() => {
@@ -599,6 +623,20 @@ const handleTestManagementClick = (event: MouseEvent) => {
   nextTick(() => {
     console.log('测试管理菜单状态更新:', openKeys.value);
   });
+};
+
+const handleDataGenerationClick = (event: MouseEvent) => {
+  if (event) {
+    event.stopPropagation();
+  }
+  if (collapsed.value) {
+    collapsed.value = false;
+    openKeys.value = ['data-generation'];
+  } else if (openKeys.value.includes('data-generation')) {
+    openKeys.value = openKeys.value.filter((key) => key !== 'data-generation');
+  } else {
+    openKeys.value.push('data-generation');
+  }
 };
 
 // 处理点击系统管理图标的事件
