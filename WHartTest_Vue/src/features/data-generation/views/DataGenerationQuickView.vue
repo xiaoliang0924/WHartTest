@@ -4,48 +4,52 @@
       <a-empty description="请先选择项目" />
     </div>
 
-    <div v-else>
-      <a-alert type="info" style="margin-bottom: 16px">
+    <div v-else class="quick-view-body">
+      <a-alert type="info" class="quick-view-alert">
         选择常用模板一键造数，执行结果会写入环境变量与 UI 公共数据。
       </a-alert>
 
-      <a-spin :loading="loading">
+      <a-spin :loading="loading" class="quick-view-spin">
         <a-empty
           v-if="!loading && templates.length === 0"
           description="暂无可用模板，请刷新页面或前往「造数计划」新建计划"
         />
-        <a-row v-else :gutter="16">
-          <a-col v-for="template in templates" :key="template.template_key" :span="8">
-            <a-card :title="template.name" class="template-card">
-              <p class="template-desc">{{ template.description }}</p>
-              <a-form layout="vertical" size="small">
-                <a-form-item
-                  v-for="(schema, key) in template.params_schema || {}"
-                  :key="key"
-                  :label="schema.label || key"
-                >
-                  <a-input
-                    v-if="schema.type !== 'number'"
-                    v-model="formValues[template.template_key][key]"
-                  />
-                  <a-input-number
-                    v-else
-                    v-model="formValues[template.template_key][key]"
-                    style="width: 100%"
-                  />
-                </a-form-item>
-              </a-form>
-              <a-button
-                type="primary"
-                long
+
+        <template v-else>
+          <section v-if="stepTestTemplates.length" class="template-section">
+            <div class="section-header">
+              <span class="section-title">步骤能力测试</span>
+              <span class="section-subtitle">每种执行步骤类型各一条，便于逐项验证</span>
+            </div>
+            <div class="template-grid">
+              <TemplateCard
+                v-for="template in stepTestTemplates"
+                :key="template.template_key"
+                :template="template"
+                :form-values="formValues[template.template_key]"
                 :loading="runningKey === template.template_key"
-                @click="handleRunTemplate(template)"
-              >
-                一键执行
-              </a-button>
-            </a-card>
-          </a-col>
-        </a-row>
+                @run="handleRunTemplate(template)"
+              />
+            </div>
+          </section>
+
+          <section v-if="businessTemplates.length" class="template-section">
+            <div class="section-header">
+              <span class="section-title">业务造数模板</span>
+              <span class="section-subtitle">常用工单造数场景</span>
+            </div>
+            <div class="template-grid">
+              <TemplateCard
+                v-for="template in businessTemplates"
+                :key="template.template_key"
+                :template="template"
+                :form-values="formValues[template.template_key]"
+                :loading="runningKey === template.template_key"
+                @run="handleRunTemplate(template)"
+              />
+            </div>
+          </section>
+        </template>
       </a-spin>
     </div>
   </div>
@@ -55,6 +59,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { useProjectStore } from '@/store/projectStore';
+import TemplateCard from '@/features/data-generation/components/DataGenerationTemplateCard.vue';
 import {
   getDataGenerationTemplates,
   runDataGenerationPlan,
@@ -70,6 +75,14 @@ const loading = ref(false);
 const runningKey = ref<string | null>(null);
 const templates = ref<DataGenerationTemplate[]>([]);
 const formValues = reactive<Record<string, Record<string, unknown>>>({});
+
+const stepTestTemplates = computed(() =>
+  templates.value.filter((item) => item.template_key.startsWith('test_step_')),
+);
+
+const businessTemplates = computed(() =>
+  templates.value.filter((item) => !item.template_key.startsWith('test_step_')),
+);
 
 const DEFAULT_PARAMS_SCHEMA = {
   summary: { type: 'string', label: '工单摘要', default: '快速造数测试' },
@@ -111,18 +124,19 @@ function mergeTemplates(builtin: DataGenerationTemplate[], saved: DataGeneration
   return [...builtinList, ...savedList.filter((item) => !builtinKeys.has(item.template_key))];
 }
 
+function sortTemplates(list: DataGenerationTemplate[]) {
+  return [...list].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+}
+
 async function fetchTemplates() {
   if (!currentProjectId.value) return;
   loading.value = true;
   try {
     const data = await getDataGenerationTemplates(currentProjectId.value);
-    templates.value = mergeTemplates(data.builtin || [], data.saved || []);
-    templates.value.sort((a, b) => {
-      const aIsStepTest = a.template_key.startsWith('test_step_') ? 0 : 1;
-      const bIsStepTest = b.template_key.startsWith('test_step_') ? 0 : 1;
-      if (aIsStepTest !== bIsStepTest) return aIsStepTest - bIsStepTest;
-      return a.name.localeCompare(b.name, 'zh-CN');
-    });
+    const merged = mergeTemplates(data.builtin || [], data.saved || []);
+    const stepTests = sortTemplates(merged.filter((item) => item.template_key.startsWith('test_step_')));
+    const business = sortTemplates(merged.filter((item) => !item.template_key.startsWith('test_step_')));
+    templates.value = [...stepTests, ...business];
     templates.value.forEach(ensureFormValues);
   } catch (error: any) {
     Message.error(error.message || '加载模板失败');
@@ -168,15 +182,65 @@ onMounted(fetchTemplates);
 </script>
 
 <style scoped>
-.template-card {
+.data-generation-quick-view {
+  height: 100%;
+  overflow: auto;
+}
+
+.quick-view-body {
+  min-height: 100%;
+}
+
+.quick-view-alert {
   margin-bottom: 16px;
-  min-height: 280px;
 }
-.template-desc {
-  min-height: 48px;
-  color: var(--color-text-2);
+
+.quick-view-spin {
+  width: 100%;
+}
+
+.template-section + .template-section {
+  margin-top: 24px;
+}
+
+.section-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border-2);
+}
+
+.section-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text-1);
+}
+
+.section-subtitle {
   font-size: 13px;
+  color: var(--color-text-3);
 }
+
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+@media (max-width: 1400px) {
+  .template-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .template-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .no-project-selected {
   padding: 48px 0;
 }
