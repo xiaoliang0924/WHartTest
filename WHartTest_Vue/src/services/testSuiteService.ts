@@ -19,6 +19,7 @@ export interface TestSuite {
   pre_data_environment?: number | null;
   pre_data_environment_name?: string | null;
   pre_data_fail_fast?: boolean;
+  post_data_cleanup?: boolean;
   testcases_detail?: TestCase[];
   creator: number;
   creator_detail: {
@@ -40,6 +41,7 @@ export interface CreateTestSuiteRequest {
   pre_data_params?: Record<string, unknown>;
   pre_data_environment?: number | null;
   pre_data_fail_fast?: boolean;
+  post_data_cleanup?: boolean;
 }
 
 // 更新测试套件请求参数
@@ -52,6 +54,7 @@ export interface UpdateTestSuiteRequest {
   pre_data_params?: Record<string, unknown>;
   pre_data_environment?: number | null;
   pre_data_fail_fast?: boolean;
+  post_data_cleanup?: boolean;
 }
 
 // 测试套件列表响应接口

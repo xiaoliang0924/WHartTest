@@ -366,6 +366,11 @@ class TestSuite(models.Model):
         default=True,
         help_text=_('造数失败时是否阻断套件执行'),
     )
+    post_data_cleanup = models.BooleanField(
+        _('造数后自动清理'),
+        default=False,
+        help_text=_('套件执行完成后自动运行造数计划的 cleanup_steps'),
+    )
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
     updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
     

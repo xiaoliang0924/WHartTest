@@ -32,8 +32,18 @@ class DataGenerationPlan(models.Model):
     steps = models.JSONField(
         _('步骤配置'),
         default=list,
-        help_text=_('JSON 步骤列表，支持 api_call / set_env_var / set_public_data'),
+        help_text=_('JSON 步骤列表，支持 api_call / set_env_var / set_public_data / sql / custom_function / delay'),
     )
+    cleanup_steps = models.JSONField(
+        _('清理步骤'),
+        default=list,
+        blank=True,
+        help_text=_('执行完成后可选的清理/回滚步骤'),
+    )
+    is_template = models.BooleanField(_('是否模板'), default=False)
+    template_key = models.CharField(_('模板标识'), max_length=100, blank=True, default='')
+    template_icon = models.CharField(_('模板图标'), max_length=50, blank=True, default='')
+    template_params_schema = models.JSONField(_('模板参数定义'), default=dict, blank=True)
     default_environment = models.ForeignKey(
         'api_environments.ApiEnvironment',
         on_delete=models.SET_NULL,
@@ -80,9 +90,11 @@ class DataGenerationRun(models.Model):
 
     TRIGGER_MANUAL = 'manual'
     TRIGGER_SUITE_PRE = 'suite_pre'
+    TRIGGER_CLEANUP = 'cleanup'
     TRIGGER_CHOICES = [
         (TRIGGER_MANUAL, _('手动执行')),
         (TRIGGER_SUITE_PRE, _('套件前置')),
+        (TRIGGER_CLEANUP, _('清理执行')),
     ]
 
     plan = models.ForeignKey(
@@ -121,6 +133,26 @@ class DataGenerationRun(models.Model):
     output_snapshot = models.JSONField(_('输出快照'), default=dict, blank=True)
     step_logs = models.JSONField(_('步骤日志'), default=list, blank=True)
     error_message = models.TextField(_('错误信息'), blank=True, default='')
+    is_cleaned = models.BooleanField(_('已清理'), default=False)
+    cleanup_status = models.CharField(
+        _('清理状态'),
+        max_length=20,
+        blank=True,
+        default='',
+    )
+    CLEANUP_SUCCESS = 'success'
+    CLEANUP_FAILED = 'failed'
+    CLEANUP_SKIPPED = 'skipped'
+    cleanup_logs = models.JSONField(_('清理日志'), default=list, blank=True)
+    cleanup_error_message = models.TextField(_('清理错误'), blank=True, default='')
+    parent_run = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='child_runs',
+        verbose_name=_('来源执行记录'),
+    )
     triggered_by = models.ForeignKey(
         User,
         on_delete=models.SET_NULL,

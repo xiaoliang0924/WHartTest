@@ -3,15 +3,28 @@ import { API_BASE_URL } from '@/config/api';
 import { useAuthStore } from '@/store/authStore';
 import { normalizeListPayload } from '@/features/api-testing/services/responseHelpers';
 
-export type DataGenerationStepType = 'api_call' | 'set_env_var' | 'set_public_data';
+export type DataGenerationStepType =
+  | 'api_call'
+  | 'set_env_var'
+  | 'set_public_data'
+  | 'sql'
+  | 'custom_function'
+  | 'delay';
 
 export interface DataGenerationStep {
   type: DataGenerationStepType;
   name?: string;
   interface_id?: number;
   environment_id?: number;
+  database_config_id?: number;
+  function_id?: number;
+  sql?: string;
+  method?: string;
+  seconds?: number | string;
+  output_var?: string;
   variables?: Record<string, unknown>;
   extract?: Record<string, string>;
+  args?: Record<string, unknown>;
   items?: Array<{ key: string; value: unknown; type?: number }>;
 }
 
@@ -22,10 +35,16 @@ export interface DataGenerationPlan {
   description?: string;
   target_type: 'api' | 'ui' | 'both';
   steps: DataGenerationStep[];
+  cleanup_steps?: DataGenerationStep[];
   default_environment?: number | null;
   default_environment_name?: string | null;
   is_active: boolean;
+  is_template?: boolean;
+  template_key?: string;
+  template_icon?: string;
+  template_params_schema?: Record<string, unknown>;
   step_count?: number;
+  cleanup_step_count?: number;
   created_by?: number;
   created_by_name?: string;
   created_at: string;
@@ -38,18 +57,46 @@ export interface DataGenerationRun {
   plan_name?: string;
   project: number;
   status: 'pending' | 'running' | 'success' | 'failed';
-  trigger_type: 'manual' | 'suite_pre';
+  trigger_type: 'manual' | 'suite_pre' | 'cleanup';
   test_execution?: number | null;
   input_params?: Record<string, unknown>;
   output_snapshot?: Record<string, unknown>;
   step_logs?: Array<Record<string, unknown>>;
   error_message?: string;
+  is_cleaned?: boolean;
+  cleanup_status?: string;
+  cleanup_logs?: Array<Record<string, unknown>>;
+  cleanup_error_message?: string;
+  parent_run?: number | null;
   triggered_by?: number | null;
   triggered_by_name?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
   duration?: number | null;
   created_at: string;
+}
+
+export interface DataGenerationTemplate {
+  template_key: string;
+  name: string;
+  description?: string;
+  target_type?: string;
+  icon?: string;
+  params_schema?: Record<string, { type?: string; label?: string; default?: unknown; required?: boolean }>;
+  steps?: DataGenerationStep[];
+  cleanup_steps?: DataGenerationStep[];
+  /** 项目内已保存的造数计划 ID（快速造数直接试跑） */
+  plan_id?: number;
+}
+
+export interface SuiteVariableGapAnalysis {
+  suite_id: number;
+  suite_name: string;
+  required_variables: string[];
+  available_variables: string[];
+  missing_variables: string[];
+  testcases: Array<{ id: number; name: string; variables: string[] }>;
+  suggestions: Array<Record<string, unknown>>;
 }
 
 function authHeaders() {
@@ -145,12 +192,112 @@ export async function getDataGenerationRun(projectId: number, runId: number) {
   return (response.data?.data ?? response.data) as DataGenerationRun;
 }
 
-export const DEFAULT_API_CALL_STEP: DataGenerationStep = {
-  type: 'api_call',
-  name: '调用接口',
-  interface_id: undefined,
-  extract: {},
-};
+export async function rerunDataGenerationRun(projectId: number, runId: number) {
+  const response = await axios.post(
+    `${API_BASE_URL}/projects/${projectId}/data-generation-runs/${runId}/rerun/`,
+    {},
+    { headers: authHeaders() },
+  );
+  return response.data;
+}
+
+export async function cleanupDataGenerationRun(projectId: number, runId: number) {
+  const response = await axios.post(
+    `${API_BASE_URL}/projects/${projectId}/data-generation-runs/${runId}/cleanup/`,
+    {},
+    { headers: authHeaders() },
+  );
+  return response.data;
+}
+
+function unwrapTemplatePayload(payload: unknown): {
+  builtin: DataGenerationTemplate[];
+  saved: DataGenerationPlan[];
+} {
+  let current: any = payload;
+  for (let i = 0; i < 5; i += 1) {
+    if (!current || typeof current !== 'object') break;
+    if (Array.isArray(current.builtin) || Array.isArray(current.saved)) {
+      return {
+        builtin: current.builtin || [],
+        saved: current.saved || [],
+      };
+    }
+    if (current.data && typeof current.data === 'object') {
+      current = current.data;
+      continue;
+    }
+    break;
+  }
+  return { builtin: [], saved: [] };
+}
+
+export async function getDataGenerationTemplates(projectId: number) {
+  const response = await axios.get(
+    `${API_BASE_URL}/projects/${projectId}/data-generation-plans/templates/`,
+    { headers: authHeaders() },
+  );
+  return unwrapTemplatePayload(response.data);
+}
+
+export async function runDataGenerationTemplate(
+  projectId: number,
+  templateKey: string,
+  inputParams?: Record<string, unknown>,
+  defaultEnvironment?: number | null,
+) {
+  const response = await axios.post(
+    `${API_BASE_URL}/projects/${projectId}/data-generation-plans/run_template/`,
+    {
+      template_key: templateKey,
+      input_params: inputParams || {},
+      default_environment: defaultEnvironment ?? null,
+    },
+    { headers: authHeaders() },
+  );
+  return response.data;
+}
+
+export async function generateDataGenerationPlan(
+  projectId: number,
+  description: string,
+  defaultEnvironment?: number | null,
+) {
+  const response = await axios.post(
+    `${API_BASE_URL}/projects/${projectId}/data-generation-plans/generate/`,
+    {
+      description,
+      default_environment: defaultEnvironment ?? null,
+    },
+    { headers: authHeaders() },
+  );
+  return response.data;
+}
+
+export async function analyzeSuiteVariableGaps(
+  projectId: number,
+  suiteId: number,
+  environmentId?: number | null,
+) {
+  const response = await axios.post(
+    `${API_BASE_URL}/projects/${projectId}/data-generation-plans/analyze_suite/`,
+    {
+      suite_id: suiteId,
+      environment_id: environmentId ?? null,
+    },
+    { headers: authHeaders() },
+  );
+  return (response.data?.data ?? response.data) as SuiteVariableGapAnalysis;
+}
+
+export const STEP_TYPE_OPTIONS = [
+  { value: 'api_call', label: 'API 调用' },
+  { value: 'set_env_var', label: '写入环境变量' },
+  { value: 'set_public_data', label: '写入 UI 公共数据' },
+  { value: 'sql', label: 'SQL 执行' },
+  { value: 'custom_function', label: '自定义函数' },
+  { value: 'delay', label: '等待' },
+];
 
 export const EXAMPLE_PLAN_STEPS: DataGenerationStep[] = [
   {
@@ -179,5 +326,15 @@ export const EXAMPLE_PLAN_STEPS: DataGenerationStep[] = [
       { key: 'ticketNo', value: '{{ticketNo}}', type: 0 },
       { key: 'work_order_id', value: '{{ticketId}}', type: 0 },
     ],
+  },
+];
+
+export const EXAMPLE_CLEANUP_STEPS: DataGenerationStep[] = [
+  {
+    type: 'sql',
+    name: '删除测试工单',
+    database_config_id: 1,
+    sql: 'DELETE FROM ticket WHERE id = {{ticketId}}',
+    method: 'delete',
   },
 ];

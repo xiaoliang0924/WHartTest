@@ -3,6 +3,7 @@ export const INTERNAL_PLATFORM_SKILL_NAMES = new Set([
   'whart-test',
   'api-automation',
   'ui-automation',
+  'data-generation',
 ])
 
 export function isInternalPlatformSkill(name: string | undefined | null): boolean {

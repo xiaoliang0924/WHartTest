@@ -2,40 +2,72 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import re
-from typing import Any, Dict, Optional
+import tempfile
+import time
+import uuid
+from typing import Any, Dict, List, Optional
 
 import jmespath
 from django.db import transaction
 from django.utils import timezone
 
 from api_environments.models import ApiEnvironment, ApiEnvironmentVariable
+from api_functions.models import ApiCustomFunction
 from api_interfaces.models import ApiInterface
 from api_interfaces.runner import InterfaceRunner
 from api_interfaces.logging_utils import new_trace_id
 from ui_automation.models import UiPublicData
 
+from .exceptions import DataGenerationError
 from .models import DataGenerationPlan, DataGenerationRun
+from .sql_utils import execute_sql_step, extract_sql_result
 
 logger = logging.getLogger(__name__)
 
 _TEMPLATE_PATTERN = re.compile(r'\{\{([^}]+)\}\}')
-
-
-class DataGenerationError(Exception):
-    """造数执行失败。"""
+_DYNAMIC_GENERATORS = {
+    'uuid': lambda _ctx: str(uuid.uuid4()),
+    'timestamp': lambda _ctx: str(int(timezone.now().timestamp())),
+    'random_int': lambda ctx: str(int(time.time() * 1000) % 100000),
+}
 
 
 def substitute_templates(value: Any, context: Dict[str, Any]) -> Any:
-    """递归替换 {{var}} 模板变量。"""
+    """递归替换 {{var}} 模板变量，支持 uuid/timestamp 等动态变量。"""
+
+    def _resolve_key(key: str) -> Any:
+        key = key.strip()
+        if key in context:
+            return context[key]
+        if key in _DYNAMIC_GENERATORS:
+            generated = _DYNAMIC_GENERATORS[key](context)
+            context[key] = generated
+            return generated
+        if key.startswith('faker.'):
+            suffix = key.split('.', 1)[1]
+            generated = f'{suffix}_{uuid.uuid4().hex[:8]}'
+            context[key] = generated
+            return generated
+        return None
+
     if isinstance(value, str):
+        full_match = _TEMPLATE_PATTERN.fullmatch(value.strip())
+        if full_match:
+            resolved = _resolve_key(full_match.group(1))
+            if resolved is not None:
+                return resolved
+
         def _replace(match: re.Match) -> str:
             key = match.group(1).strip()
-            if key not in context:
+            resolved = _resolve_key(key)
+            if resolved is None:
                 return match.group(0)
-            return str(context[key])
+            return str(resolved)
+
         return _TEMPLATE_PATTERN.sub(_replace, value)
     if isinstance(value, dict):
         return {k: substitute_templates(v, context) for k, v in value.items()}
@@ -81,7 +113,14 @@ def _extract_values(source: Any, mapping: Dict[str, str]) -> Dict[str, Any]:
 class PlanExecutor:
     """执行造数计划。"""
 
-    SUPPORTED_STEP_TYPES = {'api_call', 'set_env_var', 'set_public_data'}
+    SUPPORTED_STEP_TYPES = {
+        'api_call',
+        'set_env_var',
+        'set_public_data',
+        'sql',
+        'custom_function',
+        'delay',
+    }
 
     def __init__(
         self,
@@ -92,16 +131,20 @@ class PlanExecutor:
         triggered_by=None,
         test_execution=None,
         default_environment_id: Optional[int] = None,
+        steps_override: Optional[List[Dict[str, Any]]] = None,
+        parent_run: Optional[DataGenerationRun] = None,
     ):
         self.plan = plan
         self.trigger_type = trigger_type
         self.input_params = dict(input_params or {})
         self.triggered_by = triggered_by
         self.test_execution = test_execution
+        self.parent_run = parent_run
         self.default_environment_id = (
             default_environment_id
             or (plan.default_environment_id if plan.default_environment_id else None)
         )
+        self.steps_override = steps_override
         self.context: Dict[str, Any] = dict(self.input_params)
         if 'summary' not in self.context:
             self.context['summary'] = f"造数{int(timezone.now().timestamp()) % 100000}"[:20]
@@ -116,14 +159,15 @@ class PlanExecutor:
             test_execution=self.test_execution,
             input_params=self.input_params,
             triggered_by=self.triggered_by,
+            parent_run=self.parent_run,
             started_at=timezone.now(),
         )
 
         try:
-            if not self.plan.is_active:
+            if not self.plan.is_active and self.trigger_type != DataGenerationRun.TRIGGER_CLEANUP:
                 raise DataGenerationError('造数计划未启用')
 
-            steps = self.plan.steps if isinstance(self.plan.steps, list) else []
+            steps = self._resolve_steps()
             if not steps:
                 raise DataGenerationError('造数计划没有配置步骤')
 
@@ -170,6 +214,12 @@ class PlanExecutor:
             )
             return run
 
+    def _resolve_steps(self) -> List[Dict[str, Any]]:
+        if self.steps_override is not None:
+            return self.steps_override
+        steps = self.plan.steps if isinstance(self.plan.steps, list) else []
+        return steps
+
     def _execute_step(self, index: int, step: Dict[str, Any]) -> None:
         step_type = (step.get('type') or '').strip()
         step_name = step.get('name') or f'步骤{index}'
@@ -192,6 +242,15 @@ class PlanExecutor:
                 log_entry.update(result)
             elif step_type == 'set_public_data':
                 result = self._set_public_data(step)
+                log_entry.update(result)
+            elif step_type == 'sql':
+                result = self._run_sql(step)
+                log_entry.update(result)
+            elif step_type == 'custom_function':
+                result = self._run_custom_function(step)
+                log_entry.update(result)
+            elif step_type == 'delay':
+                result = self._run_delay(step)
                 log_entry.update(result)
         except DataGenerationError:
             log_entry['status'] = 'failed'
@@ -361,6 +420,104 @@ class PlanExecutor:
 
         return {'items': saved}
 
+    def _run_sql(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        database_config_id = substitute_templates(
+            step.get('database_config_id'),
+            self.context,
+        )
+        if not database_config_id:
+            raise DataGenerationError('sql 步骤缺少 database_config_id')
+
+        sql = substitute_templates(step.get('sql') or '', self.context)
+        method = substitute_templates(step.get('method') or 'fetchall', self.context)
+        result = execute_sql_step(
+            database_config_id=int(database_config_id),
+            project_id=self.plan.project_id,
+            sql=str(sql),
+            method=str(method),
+        )
+
+        custom_extract = step.get('extract') or {}
+        extracted: Dict[str, Any] = {}
+        if custom_extract:
+            extracted = extract_sql_result(result, custom_extract)
+            self.context.update(extracted)
+        elif step.get('output_var'):
+            output_var = str(step.get('output_var'))
+            self.context[output_var] = result
+            extracted[output_var] = result
+
+        return {
+            'database_config_id': database_config_id,
+            'method': method,
+            'result': result,
+            'extracted': extracted,
+        }
+
+    def _run_custom_function(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        function_id = step.get('function_id')
+        if not function_id:
+            raise DataGenerationError('custom_function 步骤缺少 function_id')
+
+        try:
+            func_obj = ApiCustomFunction.objects.get(
+                id=function_id,
+                project_id=self.plan.project_id,
+                is_active=True,
+            )
+        except ApiCustomFunction.DoesNotExist as exc:
+            raise DataGenerationError(f'自定义函数不存在: {function_id}') from exc
+
+        args = substitute_templates(step.get('args') or {}, self.context)
+        if not isinstance(args, dict):
+            args = {}
+
+        temp_file = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as handle:
+                handle.write(func_obj.code)
+                temp_file = handle.name
+
+            spec = importlib.util.spec_from_file_location('dg_custom_function', temp_file)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            func_name = func_obj.name
+            if not hasattr(module, func_name):
+                func_name = func_obj.code.split('def ')[1].split('(')[0].strip()
+            func = getattr(module, func_name)
+            result = func(**args) if args else func()
+        finally:
+            if temp_file:
+                import os
+                try:
+                    os.unlink(temp_file)
+                except OSError:
+                    pass
+
+        output_var = step.get('output_var') or func_obj.name
+        self.context[str(output_var)] = result
+
+        return {
+            'function_id': func_obj.id,
+            'function_name': func_obj.name,
+            'output_var': output_var,
+            'result': result,
+        }
+
+    def _run_delay(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        seconds_raw = substitute_templates(step.get('seconds', 1), self.context)
+        try:
+            seconds = float(seconds_raw)
+        except (TypeError, ValueError) as exc:
+            raise DataGenerationError('delay 步骤 seconds 无效') from exc
+        if seconds < 0:
+            raise DataGenerationError('delay 步骤 seconds 不能为负数')
+        if seconds > 300:
+            raise DataGenerationError('delay 步骤 seconds 不能超过 300 秒')
+        time.sleep(seconds)
+        return {'seconds': seconds}
+
 
 def execute_plan(
     plan: DataGenerationPlan,
@@ -370,6 +527,8 @@ def execute_plan(
     triggered_by=None,
     test_execution=None,
     default_environment_id: Optional[int] = None,
+    steps_override: Optional[List[Dict[str, Any]]] = None,
+    parent_run: Optional[DataGenerationRun] = None,
 ) -> DataGenerationRun:
     executor = PlanExecutor(
         plan,
@@ -378,8 +537,55 @@ def execute_plan(
         triggered_by=triggered_by,
         test_execution=test_execution,
         default_environment_id=default_environment_id,
+        steps_override=steps_override,
+        parent_run=parent_run,
     )
     return executor.execute()
+
+
+def execute_cleanup_steps(
+    run: DataGenerationRun,
+    *,
+    triggered_by=None,
+) -> DataGenerationRun:
+    """执行造数计划的 cleanup_steps，使用原 run 的 output_snapshot 作为上下文。"""
+    plan = run.plan
+    cleanup_steps = plan.cleanup_steps if isinstance(plan.cleanup_steps, list) else []
+    if not cleanup_steps:
+        run.cleanup_status = DataGenerationRun.CLEANUP_SKIPPED
+        run.save(update_fields=['cleanup_status'])
+        return run
+
+    context = dict(run.output_snapshot or {})
+    context.update(run.input_params or {})
+
+    cleanup_run = execute_plan(
+        plan,
+        trigger_type=DataGenerationRun.TRIGGER_CLEANUP,
+        input_params=context,
+        triggered_by=triggered_by,
+        default_environment_id=plan.default_environment_id,
+        steps_override=cleanup_steps,
+        parent_run=run,
+    )
+
+    run.is_cleaned = cleanup_run.status == DataGenerationRun.STATUS_SUCCESS
+    run.cleanup_status = (
+        DataGenerationRun.CLEANUP_SUCCESS
+        if cleanup_run.status == DataGenerationRun.STATUS_SUCCESS
+        else DataGenerationRun.CLEANUP_FAILED
+    )
+    run.cleanup_logs = cleanup_run.step_logs
+    run.cleanup_error_message = cleanup_run.error_message or ''
+    run.save(
+        update_fields=[
+            'is_cleaned',
+            'cleanup_status',
+            'cleanup_logs',
+            'cleanup_error_message',
+        ]
+    )
+    return run
 
 
 def run_suite_pre_data_generation(suite, test_execution, triggered_by=None) -> Optional[DataGenerationRun]:
@@ -415,3 +621,15 @@ def run_suite_pre_data_generation(suite, test_execution, triggered_by=None) -> O
         if getattr(suite, 'pre_data_fail_fast', True):
             raise DataGenerationError(run.error_message or '造数失败，已阻断套件执行')
     return run
+
+
+def run_suite_post_data_cleanup(suite, test_execution, triggered_by=None) -> Optional[DataGenerationRun]:
+    """测试套件执行后的造数清理钩子。"""
+    if not getattr(suite, 'post_data_cleanup', False):
+        return None
+
+    run = getattr(test_execution, 'data_generation_run', None)
+    if run is None:
+        return None
+
+    return execute_cleanup_steps(run, triggered_by=triggered_by)

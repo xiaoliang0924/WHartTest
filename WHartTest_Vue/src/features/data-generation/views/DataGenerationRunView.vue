@@ -43,7 +43,26 @@
           {{ formatDate(record.started_at) }}
         </template>
         <template #operations="{ record }">
-          <a-button type="text" size="small" @click="openDetail(record)">详情</a-button>
+          <a-space>
+            <a-button type="text" size="small" @click="openDetail(record)">详情</a-button>
+            <a-button
+              type="text"
+              size="small"
+              :loading="rerunningId === record.id"
+              @click="handleRerun(record)"
+            >
+              重跑
+            </a-button>
+            <a-button
+              type="text"
+              size="small"
+              :disabled="record.is_cleaned"
+              :loading="cleaningId === record.id"
+              @click="handleCleanup(record)"
+            >
+              清理
+            </a-button>
+          </a-space>
         </template>
       </a-table>
     </div>
@@ -73,6 +92,20 @@
 
         <a-divider orientation="left">步骤日志</a-divider>
         <pre class="json-block">{{ formatJson(selectedRun.step_logs) }}</pre>
+
+        <template v-if="selectedRun.cleanup_logs?.length || selectedRun.cleanup_status">
+          <a-divider orientation="left">清理日志</a-divider>
+          <a-tag :color="selectedRun.is_cleaned ? 'green' : 'orange'" style="margin-bottom: 8px">
+            {{ cleanupStatusLabel(selectedRun.cleanup_status) }}
+          </a-tag>
+          <a-alert
+            v-if="selectedRun.cleanup_error_message"
+            type="error"
+            :title="selectedRun.cleanup_error_message"
+            style="margin-bottom: 8px"
+          />
+          <pre class="json-block">{{ formatJson(selectedRun.cleanup_logs) }}</pre>
+        </template>
       </template>
     </a-modal>
   </div>
@@ -85,7 +118,9 @@ import { IconRefresh } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
 import { formatDate } from '@/utils/formatters';
 import {
+  cleanupDataGenerationRun,
   getDataGenerationRuns,
+  rerunDataGenerationRun,
   type DataGenerationRun,
 } from '@/features/data-generation/services/dataGenerationService';
 
@@ -97,6 +132,8 @@ const runs = ref<DataGenerationRun[]>([]);
 const statusFilter = ref<string | undefined>();
 const detailVisible = ref(false);
 const selectedRun = ref<DataGenerationRun | null>(null);
+const rerunningId = ref<number | null>(null);
+const cleaningId = ref<number | null>(null);
 const pagination = ref({ current: 1, pageSize: 10, total: 0 });
 
 const columns = [
@@ -106,7 +143,7 @@ const columns = [
   { title: '触发方式', slotName: 'trigger_type', width: 120 },
   { title: '触发人', dataIndex: 'triggered_by_name', width: 120 },
   { title: '开始时间', slotName: 'started_at', width: 180 },
-  { title: '操作', slotName: 'operations', width: 100 },
+  { title: '操作', slotName: 'operations', width: 200 },
 ];
 
 function statusColor(status: string) {
@@ -169,6 +206,54 @@ function onPageSizeChange(size: number) {
   pagination.value.pageSize = size;
   pagination.value.current = 1;
   fetchRuns();
+}
+
+function cleanupStatusLabel(status?: string) {
+  const map: Record<string, string> = {
+    success: '清理成功',
+    failed: '清理失败',
+    skipped: '未配置清理',
+  };
+  return map[status || ''] || status || '-';
+}
+
+async function handleRerun(run: DataGenerationRun) {
+  if (!currentProjectId.value) return;
+  rerunningId.value = run.id;
+  try {
+    const resp = await rerunDataGenerationRun(currentProjectId.value, run.id);
+    if (resp.status === 'success') {
+      Message.success('重跑成功');
+      fetchRuns();
+    } else {
+      Message.error(resp.message || '重跑失败');
+    }
+  } catch (error: any) {
+    Message.error(error.response?.data?.message || error.message || '重跑失败');
+  } finally {
+    rerunningId.value = null;
+  }
+}
+
+async function handleCleanup(run: DataGenerationRun) {
+  if (!currentProjectId.value) return;
+  cleaningId.value = run.id;
+  try {
+    const resp = await cleanupDataGenerationRun(currentProjectId.value, run.id);
+    if (resp.status === 'success') {
+      Message.success(resp.message || '清理完成');
+      fetchRuns();
+      if (selectedRun.value?.id === run.id) {
+        selectedRun.value = { ...selectedRun.value, ...(resp.data || {}) };
+      }
+    } else {
+      Message.error(resp.message || '清理失败');
+    }
+  } catch (error: any) {
+    Message.error(error.response?.data?.message || error.message || '清理失败');
+  } finally {
+    cleaningId.value = null;
+  }
 }
 
 function openDetail(run: DataGenerationRun) {

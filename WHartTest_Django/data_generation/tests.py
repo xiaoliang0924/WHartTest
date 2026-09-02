@@ -7,6 +7,7 @@ from django.test import TestCase
 
 from api_environments.models import ApiEnvironment
 from data_generation.models import DataGenerationPlan, DataGenerationRun
+from data_generation.exceptions import DataGenerationError
 from data_generation.services import PlanExecutor, substitute_templates
 from projects.models import Project
 
@@ -15,6 +16,11 @@ class SubstituteTemplatesTests(TestCase):
     def test_replace_simple_variable(self):
         result = substitute_templates('工单{{work_order_id}}', {'work_order_id': 123})
         self.assertEqual(result, '工单123')
+
+    def test_replace_dynamic_uuid(self):
+        result = substitute_templates('{{uuid}}', {})
+        self.assertTrue(isinstance(result, str))
+        self.assertGreater(len(result), 10)
 
     def test_replace_nested_dict(self):
         result = substitute_templates(

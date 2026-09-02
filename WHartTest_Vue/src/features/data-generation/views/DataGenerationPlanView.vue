@@ -140,7 +140,7 @@ function openCreate() {
 }
 
 function openEdit(plan: DataGenerationPlan) {
-  editingPlan.value = plan;
+  editingPlan.value = JSON.parse(JSON.stringify(plan));
   modalVisible.value = true;
 }
 

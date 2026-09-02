@@ -119,6 +119,18 @@ def execute_test_suite(self, execution_id):
         execution.status = 'completed' if execution.status != 'cancelled' else 'cancelled'
         execution.completed_at = timezone.now()
         execution.save(update_fields=['status', 'completed_at', 'updated_at'])
+
+        if getattr(suite, 'post_data_cleanup', False):
+            from data_generation.services import run_suite_post_data_cleanup
+            try:
+                run_suite_post_data_cleanup(suite, execution, triggered_by=execution.executor)
+            except Exception as cleanup_exc:
+                logger.warning(
+                    'Suite post-data cleanup failed: execution_id=%s error=%s',
+                    execution.id,
+                    cleanup_exc,
+                )
+
         notify_test_suite_execution(execution)
         
         logger.info(f"测试套件执行完成: {suite.name}, "

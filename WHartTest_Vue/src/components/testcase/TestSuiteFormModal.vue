@@ -82,6 +82,25 @@
       <a-form-item label="造数失败阻断执行">
         <a-switch v-model="formData.pre_data_fail_fast" />
       </a-form-item>
+      <a-form-item label="套件完成后自动清理">
+        <a-switch v-model="formData.post_data_cleanup" />
+      </a-form-item>
+      <a-space v-if="isEditing && props.suiteId" style="margin-bottom: 16px">
+        <a-button size="small" :loading="gapAnalyzing" @click="handleAnalyzeGaps">
+          分析变量缺口
+        </a-button>
+      </a-space>
+      <a-alert
+        v-if="gapAnalysis"
+        type="warning"
+        style="margin-bottom: 16px"
+        :title="`缺失变量 ${gapAnalysis.missing_variables.length} 个`"
+      >
+        <div v-if="gapAnalysis.missing_variables.length">
+          {{ gapAnalysis.missing_variables.join('、') }}
+        </div>
+        <div v-else>当前套件引用的变量已在公共数据/环境变量中找到。</div>
+      </a-alert>
 
       <!-- 选择测试用例 -->
       <a-form-item required>
@@ -160,7 +179,7 @@ import {
   type CreateTestSuiteRequest,
 } from '@/services/testSuiteService';
 import { getEnvironments } from '@/features/api-testing/services/environmentService';
-import { getDataGenerationPlans } from '@/features/data-generation/services/dataGenerationService';
+import { getDataGenerationPlans, analyzeSuiteVariableGaps } from '@/features/data-generation/services/dataGenerationService';
 import { getTestCaseDetail, type TestCase } from '@/services/testcaseService';
 import TestCaseSelectorTable from './TestCaseSelectorTable.vue';
 
@@ -265,6 +284,10 @@ const envLoading = ref(false);
 const dataPlans = ref<Array<{ id: number; name: string }>>([]);
 const environments = ref<Array<{ id: number; name: string }>>([]);
 const preDataParamsJson = ref('{}');
+const gapAnalyzing = ref(false);
+const gapAnalysis = ref<{
+  missing_variables: string[];
+} | null>(null);
 
 const formData = ref<CreateTestSuiteRequest>({
   name: '',
@@ -275,6 +298,7 @@ const formData = ref<CreateTestSuiteRequest>({
   pre_data_environment: null,
   pre_data_params: {},
   pre_data_fail_fast: true,
+  post_data_cleanup: false,
 });
 
 const rules = computed(() => ({
@@ -382,6 +406,22 @@ const handleCancel = () => {
   emit('update:visible', false);
 };
 
+async function handleAnalyzeGaps() {
+  if (!props.currentProjectId || !props.suiteId) return;
+  gapAnalyzing.value = true;
+  try {
+    gapAnalysis.value = await analyzeSuiteVariableGaps(
+      props.currentProjectId,
+      props.suiteId,
+      formData.value.pre_data_environment ?? null,
+    );
+  } catch (error: any) {
+    Message.error(error.message || '分析失败');
+  } finally {
+    gapAnalyzing.value = false;
+  }
+}
+
 async function loadDataGenerationOptions() {
   if (!props.currentProjectId) return;
   planLoading.value = true;
@@ -423,6 +463,7 @@ const loadSuiteDetail = async () => {
       formData.value.pre_data_plan = suite.pre_data_plan ?? null;
       formData.value.pre_data_environment = suite.pre_data_environment ?? null;
       formData.value.pre_data_fail_fast = suite.pre_data_fail_fast ?? true;
+      formData.value.post_data_cleanup = suite.post_data_cleanup ?? false;
       formData.value.pre_data_params = suite.pre_data_params || {};
       preDataParamsJson.value = JSON.stringify(suite.pre_data_params || {}, null, 2);
 

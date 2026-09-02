@@ -124,7 +124,7 @@
       </div>
     </a-layout-header>
 
-    <a-layout class="inner-layout">
+    <a-layout class="inner-layout" has-sider>
       <!-- 左侧菜单栏 -->
       <a-layout-sider
         :width="170"
@@ -216,6 +216,10 @@
             <a-menu-item key="data-generation-runs">
               <template #icon><icon-history /></template>
               <a href="#" @click="checkProjectAndNavigate($event, '/data-generation?tab=runs')">{{ dataGenerationRunsLabel }}</a>
+            </a-menu-item>
+            <a-menu-item key="data-generation-quick">
+              <template #icon><icon-thunderbolt /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/data-generation?tab=quick')">{{ dataGenerationQuickLabel }}</a>
             </a-menu-item>
           </a-sub-menu>
 
@@ -354,6 +358,7 @@ import {
   IconMoonFill,
   IconList,
   IconRelation,
+  IconThunderbolt,
 } from '@arco-design/web-vue/es/icon';
 import '@arco-design/web-vue/dist/arco.css'; // 引入 Arco Design 样式
 
@@ -400,6 +405,7 @@ const executionHistoryMenuLabel = computed(() => (locale.value === 'en-US' ? 'Hi
 const dataGenerationMenuLabel = computed(() => (locale.value === 'en-US' ? 'Data Gen' : '造数管理'));
 const dataGenerationPlansLabel = computed(() => (locale.value === 'en-US' ? 'Plans' : '造数计划'));
 const dataGenerationRunsLabel = computed(() => (locale.value === 'en-US' ? 'Runs' : '执行记录'));
+const dataGenerationQuickLabel = computed(() => (locale.value === 'en-US' ? 'Quick Run' : '快速造数'));
 const manualExecutionMenuLabel = computed(() => (locale.value === 'en-US' ? 'Case Execution' : tl('用例执行')));
 const chatMenuLabel = computed(() => (locale.value === 'en-US' ? 'Chat' : tl('LLM对话')));
 const systemMenuLabel = computed(() => (locale.value === 'en-US' ? 'Admin' : tl('系统管理')));
@@ -456,7 +462,12 @@ const activeMenu = computed(() => {
   if (path.startsWith('/api-testing')) return 'api-testing';
   if (path.startsWith('/ui-automation')) return 'ui-automation';
   if (path.startsWith('/testsuites')) return 'testsuites'; // 添加对测试套件路由的识别
-  if (path.startsWith('/data-generation')) return 'data-generation-plans';
+  if (path.startsWith('/data-generation')) {
+    const tab = router.currentRoute.value.query.tab;
+    if (tab === 'runs') return 'data-generation-runs';
+    if (tab === 'quick') return 'data-generation-quick';
+    return 'data-generation-plans';
+  }
   if (path.startsWith('/test-executions')) return 'test-executions'; // 添加对执行历史路由的识别
   if (path.startsWith('/manual-test-executions')) return 'manual-test-executions';
   if (path.startsWith('/testcases')) return 'testcases';
@@ -668,8 +679,8 @@ const handleSystemManagementClick = (event: MouseEvent) => {
 
 // 检查是否选择了项目，用于需要项目的菜单项
 const checkProjectAndNavigate = (event: MouseEvent, path: string) => {
+  event.preventDefault();
   if (!projectStore.currentProjectId) {
-    event.preventDefault();
     Message.warning(tl('请先选择或创建项目'));
     return;
   }
@@ -746,6 +757,16 @@ watch(showEnvironmentSelector, (show) => {
     environmentStore.fetchEnvironments(projectStore.currentProjectId);
   }
 });
+
+watch(
+  () => router.currentRoute.value.path,
+  (path) => {
+    if (path.startsWith('/data-generation') && !openKeys.value.includes('data-generation')) {
+      openKeys.value = [...openKeys.value, 'data-generation'];
+    }
+  },
+  { immediate: true },
+);
 
 // 在组件挂载时检查认证状态并加载项目列表
 onMounted(async () => {
@@ -1102,6 +1123,9 @@ onMounted(async () => {
   border-radius: 8px;
   box-shadow: 0 0 12px rgba(0, 0, 0, 0.25), 0 0 4px rgba(0, 0, 0, 0.15);
   height: auto; /* 让 flex 自动撑开 */
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 2;
 }
 
 .menu {
@@ -1253,6 +1277,9 @@ onMounted(async () => {
 }
 
 .inner-layout {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
   height: calc(100vh - 71px); /* Header(56px) + header-margin-top(10px) + header-margin-bottom(5px) = 71px */
 }
 
@@ -1264,6 +1291,8 @@ onMounted(async () => {
   overflow: hidden; /* 让子组件自行控制滚动 */
   border-radius: 8px;
   box-shadow: 0 0 12px rgba(0, 0, 0, 0.25), 0 0 4px rgba(0, 0, 0, 0.15);
+  flex: 1;
+  min-width: 0;
 }
 
 .sider-footer {

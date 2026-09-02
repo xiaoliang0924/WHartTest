@@ -521,6 +521,7 @@ class TestSuiteSerializer(serializers.ModelSerializer):
             "pre_data_environment",
             "pre_data_environment_name",
             "pre_data_fail_fast",
+            "post_data_cleanup",
             "creator",
             "creator_detail",
             "created_at",
@@ -631,6 +632,8 @@ class TestSuiteSerializer(serializers.ModelSerializer):
             instance.pre_data_environment = validated_data.get("pre_data_environment")
         if "pre_data_fail_fast" in validated_data:
             instance.pre_data_fail_fast = validated_data.get("pre_data_fail_fast")
+        if "post_data_cleanup" in validated_data:
+            instance.post_data_cleanup = validated_data.get("post_data_cleanup")
         instance.save()
 
         if testcases is not None:
