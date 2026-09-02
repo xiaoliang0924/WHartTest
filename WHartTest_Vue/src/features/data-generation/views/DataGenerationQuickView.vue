@@ -117,6 +117,12 @@ async function fetchTemplates() {
   try {
     const data = await getDataGenerationTemplates(currentProjectId.value);
     templates.value = mergeTemplates(data.builtin || [], data.saved || []);
+    templates.value.sort((a, b) => {
+      const aIsStepTest = a.template_key.startsWith('test_step_') ? 0 : 1;
+      const bIsStepTest = b.template_key.startsWith('test_step_') ? 0 : 1;
+      if (aIsStepTest !== bIsStepTest) return aIsStepTest - bIsStepTest;
+      return a.name.localeCompare(b.name, 'zh-CN');
+    });
     templates.value.forEach(ensureFormValues);
   } catch (error: any) {
     Message.error(error.message || '加载模板失败');
