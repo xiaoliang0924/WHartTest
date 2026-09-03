@@ -191,7 +191,7 @@ def _sync_template_plans(templates, label: str) -> None:
             project_id=PROJECT_ID,
             template_key=key,
             is_template=True,
-        ).first()
+        ).order_by('id').first()
 
         if plan is None:
             legacy_key = legacy_by_target.get(key)
@@ -232,6 +232,18 @@ def _sync_template_plans(templates, label: str) -> None:
         plan.is_active = True
         plan.template_key = key
         plan.save()
+
+        removed = (
+            DataGenerationPlan.objects.filter(
+                project_id=PROJECT_ID,
+                template_key=key,
+                is_template=True,
+            )
+            .exclude(id=plan.id)
+            .delete()[0]
+        )
+        if removed:
+            print(f"  removed {removed} duplicate plan(s) for {key}")
 
         print(f"  synced {label} plan: {key} (id={plan.id})")
 

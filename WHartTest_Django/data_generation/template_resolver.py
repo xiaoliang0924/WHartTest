@@ -56,20 +56,35 @@ def get_project_template_bindings(
     *,
     plan_bindings: Optional[Dict[str, Any]] = None,
     default_environment_id: Optional[int] = None,
+    template_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     from .models import DataGenerationPlan
 
     project_bindings: Dict[str, Any] = {}
-    template_plan = (
-        DataGenerationPlan.objects.filter(
-            project_id=project_id,
-            is_template=True,
-            is_active=True,
+    template_plan = None
+    if template_key:
+        template_plan = (
+            DataGenerationPlan.objects.filter(
+                project_id=project_id,
+                template_key=template_key,
+                is_template=True,
+                is_active=True,
+            )
+            .exclude(template_bindings={})
+            .order_by('-updated_at', 'id')
+            .first()
         )
-        .exclude(template_bindings={})
-        .order_by('-updated_at')
-        .first()
-    )
+    if template_plan is None:
+        template_plan = (
+            DataGenerationPlan.objects.filter(
+                project_id=project_id,
+                is_template=True,
+                is_active=True,
+            )
+            .exclude(template_bindings={})
+            .order_by('-updated_at', 'id')
+            .first()
+        )
     if template_plan and isinstance(template_plan.template_bindings, dict):
         project_bindings = template_plan.template_bindings
 
@@ -208,6 +223,7 @@ def resolve_template_steps(
     bindings: Optional[Dict[str, Any]] = None,
     plan_bindings: Optional[Dict[str, Any]] = None,
     default_environment_id: Optional[int] = None,
+    template_key: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     if not isinstance(steps, list):
         return []
@@ -216,6 +232,7 @@ def resolve_template_steps(
         project_id,
         plan_bindings=plan_bindings or bindings,
         default_environment_id=default_environment_id,
+        template_key=template_key,
     )
     resolved_steps: List[Dict[str, Any]] = []
     for step in steps:
@@ -244,16 +261,19 @@ def resolve_template_definition(
         template.get('template_bindings'),
         plan_bindings,
     )
+    template_key = str(template.get('template_key') or '')
     result['steps'] = resolve_template_steps(
         result.get('steps'),
         project_id=project_id,
         plan_bindings=bindings,
         default_environment_id=default_environment_id,
+        template_key=template_key or None,
     )
     result['cleanup_steps'] = resolve_template_steps(
         result.get('cleanup_steps'),
         project_id=project_id,
         plan_bindings=bindings,
         default_environment_id=default_environment_id,
+        template_key=template_key or None,
     )
     return result

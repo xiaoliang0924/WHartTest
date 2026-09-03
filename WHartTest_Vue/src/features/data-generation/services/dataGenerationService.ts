@@ -99,7 +99,7 @@ export interface ParamSchemaField {
   required?: boolean;
 }
 
-export type GenerationMethod = 'rule_match' | 'llm' | 'fallback';
+export type GenerationMethod = 'rule_match' | 'llm' | 'fallback' | 'rules';
 
 export interface GenerationSummary {
   mode: 'template' | 'custom';
@@ -442,6 +442,7 @@ export function getGenerationMethodLabel(method?: GenerationMethod): string {
     rule_match: '规则匹配',
     llm: 'LLM 生成',
     fallback: 'LLM 失败已回退',
+    rules: '规则引擎',
   };
   return method ? map[method] : '';
 }

@@ -290,6 +290,18 @@ class LlmGenerateIntegrationTests(TestCase):
             or plan.get('source', '').startswith('rule:')
         )
 
+    def test_rules_when_use_llm_false_no_match(self):
+        plan = generate_plan_from_description_with_llm(
+            'xyz 完全无法匹配的自定义造数描述 abc123',
+            project_id=self.project.id,
+            default_environment_id=self.environment.id,
+            use_llm=False,
+        )
+        self.assertFalse(plan.get('llm_used', True))
+        self.assertEqual(plan.get('generation_method'), 'rules')
+        self.assertEqual(plan.get('generation_summary', {}).get('mode'), 'custom')
+        self.assertEqual(plan.get('source'), 'rules:custom')
+
     def test_rules_when_use_llm_false(self):
         plan = generate_plan_from_description_with_llm(
             '创建工单',

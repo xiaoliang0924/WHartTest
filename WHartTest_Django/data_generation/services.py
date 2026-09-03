@@ -264,19 +264,25 @@ class PlanExecutor:
             return run
 
     def _resolve_steps(self) -> List[Dict[str, Any]]:
+        plan_bindings = (
+            self.plan.template_bindings if isinstance(self.plan.template_bindings, dict) else None
+        )
+        template_key = self.plan.template_key or None
         if self.steps_override is not None:
             return resolve_template_steps(
                 self.steps_override,
                 project_id=self.plan.project_id,
-                plan_bindings=self.plan.template_bindings if isinstance(self.plan.template_bindings, dict) else None,
+                plan_bindings=plan_bindings,
                 default_environment_id=self.default_environment_id,
+                template_key=template_key,
             )
         steps = self.plan.steps if isinstance(self.plan.steps, list) else []
         return resolve_template_steps(
             steps,
             project_id=self.plan.project_id,
-            plan_bindings=self.plan.template_bindings if isinstance(self.plan.template_bindings, dict) else None,
+            plan_bindings=plan_bindings,
             default_environment_id=self.default_environment_id,
+            template_key=template_key,
         )
 
     def _execute_step(self, index: int, step: Dict[str, Any]) -> None:

@@ -57,3 +57,53 @@ class TemplateResolverTests(TestCase):
             plan_bindings={'default_environment_id': self.environment.id},
         )
         self.assertEqual(steps[0]['interface_id'], self.interface.id)
+
+    def test_bindings_lookup_by_template_key(self):
+        from data_generation.models import DataGenerationPlan
+        from data_generation.template_resolver import get_project_template_bindings
+
+        other_iface = ApiInterface.objects.create(
+            name='分配工单',
+            project=self.project,
+            created_by=self.user,
+            type=ApiInterface.TYPE_HTTP,
+        )
+        DataGenerationPlan.objects.create(
+            project=self.project,
+            name='全局模板',
+            is_template=True,
+            template_key='biz_create_type_a',
+            template_bindings={
+                'default_environment_id': self.environment.id,
+                'interfaces': {'create_ticket': self.interface.id},
+            },
+            created_by=self.user,
+        )
+        DataGenerationPlan.objects.create(
+            project=self.project,
+            name='转派模板',
+            is_template=True,
+            template_key='biz_create_and_transfer',
+            template_bindings={
+                'default_environment_id': self.environment.id,
+                'interfaces': {'create_ticket': other_iface.id},
+            },
+            created_by=self.user,
+        )
+
+        transfer_bindings = get_project_template_bindings(
+            self.project.id,
+            template_key='biz_create_and_transfer',
+        )
+        self.assertEqual(
+            transfer_bindings['interfaces']['create_ticket'],
+            other_iface.id,
+        )
+        type_a_bindings = get_project_template_bindings(
+            self.project.id,
+            template_key='biz_create_type_a',
+        )
+        self.assertEqual(
+            type_a_bindings['interfaces']['create_ticket'],
+            self.interface.id,
+        )

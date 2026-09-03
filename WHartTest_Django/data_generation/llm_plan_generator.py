@@ -128,6 +128,8 @@ def _build_generation_summary(
             method = 'llm'
         elif 'fallback' in source:
             method = 'fallback'
+        elif source.startswith('rules:'):
+            method = 'rules'
         else:
             method = 'rule_match'
 
@@ -164,6 +166,7 @@ def _resolve_plan_steps_for_project(
                 project_id=project_id,
                 plan_bindings=plan_bindings,
                 default_environment_id=default_environment_id,
+                template_key=plan.get('template_key') or None,
             )
         except DataGenerationError as exc:
             logger.info('Skip step resolution for project=%s: %s', project_id, exc)
@@ -236,6 +239,7 @@ def _expand_template_plan(
         'rule_match': '规则匹配模板',
         'llm': 'AI 匹配模板',
         'fallback': '规则回退模板',
+        'rules': '规则引擎模板',
     }.get(generation_method, '匹配模板')
 
     plan = {
@@ -441,10 +445,12 @@ def generate_plan_from_description_with_llm(
             )
             plan = _finalize_generated_plan(
                 plan,
-                generation_method='rule_match',
+                generation_method='rules',
                 llm_used=False,
             )
-        plan['source'] = plan.get('source') or 'rules'
+            plan['source'] = 'rules:custom'
+        else:
+            plan['source'] = plan.get('source') or 'rules'
         return plan
 
     rule_plan = _try_rule_match_plan(

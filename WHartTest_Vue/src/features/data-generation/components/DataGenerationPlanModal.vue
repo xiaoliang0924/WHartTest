@@ -299,6 +299,8 @@ async function handleAiGenerate() {
       Message.info(
         `规则匹配：${generated.generation_summary?.template_name || generated.template_key || '造数计划'}`,
       );
+    } else if (method === 'rules') {
+      Message.info(summaryText || '已生成基础造数计划骨架，请检查步骤与环境配置');
     } else if (method === 'fallback') {
       Message.warning(generated.hint || 'LLM 失败，已回退规则模板');
     } else if (generated.generation_summary?.mode === 'template') {
