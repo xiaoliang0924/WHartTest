@@ -2,20 +2,20 @@
   <div class="data-generation-layout">
     <a-tabs v-model:active-key="activeTab" type="rounded" lazy-load>
       <a-tab-pane key="plans" title="造数计划">
-        <DataGenerationPlanView />
+        <DataGenerationPlanView @run-completed="handleRunCompleted" />
       </a-tab-pane>
       <a-tab-pane key="runs" title="执行记录">
-        <DataGenerationRunView />
+        <DataGenerationRunView ref="runViewRef" />
       </a-tab-pane>
       <a-tab-pane key="quick" title="快速造数">
-        <DataGenerationQuickView />
+        <DataGenerationQuickView @run-completed="handleRunCompleted" />
       </a-tab-pane>
     </a-tabs>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { nextTick, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import DataGenerationPlanView from '@/features/data-generation/views/DataGenerationPlanView.vue';
 import DataGenerationRunView from '@/features/data-generation/views/DataGenerationRunView.vue';
@@ -23,6 +23,16 @@ import DataGenerationQuickView from '@/features/data-generation/views/DataGenera
 
 const route = useRoute();
 const activeTab = ref('plans');
+const runViewRef = ref<InstanceType<typeof DataGenerationRunView> | null>(null);
+
+async function refreshRunList(resetPage = false) {
+  await nextTick();
+  await runViewRef.value?.refresh?.({ resetPage });
+}
+
+function handleRunCompleted() {
+  refreshRunList(true);
+}
 
 watch(
   () => route.query.tab,
@@ -33,6 +43,12 @@ watch(
   },
   { immediate: true },
 );
+
+watch(activeTab, (tab) => {
+  if (tab === 'runs') {
+    refreshRunList(true);
+  }
+});
 </script>
 
 <style scoped>

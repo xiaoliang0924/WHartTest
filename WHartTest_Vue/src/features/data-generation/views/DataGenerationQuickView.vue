@@ -6,7 +6,8 @@
 
     <div v-else class="quick-view-body">
       <a-alert type="info" class="quick-view-alert">
-        选择常用模板一键造数，执行结果会写入环境变量与 UI 公共数据。
+        此处展示<strong>内置模板</strong>与勾选「保存为模板」的计划，供日常<strong>一键造数</strong>。
+        完整计划的创建、编辑与 AI 生成请前往「造数计划」。
       </a-alert>
 
       <a-spin :loading="loading" class="quick-view-spin">
@@ -67,6 +68,10 @@ import {
   type DataGenerationPlan,
   type DataGenerationTemplate,
 } from '@/features/data-generation/services/dataGenerationService';
+
+const emit = defineEmits<{
+  (event: 'run-completed'): void;
+}>();
 
 const projectStore = useProjectStore();
 const currentProjectId = computed(() => projectStore.currentProjectId);
@@ -166,12 +171,14 @@ async function handleRunTemplate(template: DataGenerationTemplate) {
       );
     }
 
+    emit('run-completed');
     if (resp.status === 'success') {
       Message.success('造数执行成功');
     } else {
       Message.error(resp.message || '造数执行失败');
     }
   } catch (error: any) {
+    emit('run-completed');
     Message.error(error.response?.data?.message || error.message || '造数执行失败');
   } finally {
     runningKey.value = null;

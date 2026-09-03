@@ -12,13 +12,29 @@ _ASSIGNEE_PATTERNS = (
     re.compile(r'处理人[是为：:]\s*([^\s，,。.；;]+)'),
 )
 
-# Ordered rules: first match wins.
+_CREATE_ONLY_KEYWORDS = ('仅创建', '只创建', '仅生成', '不要分配', '无需分配', '不分配', '不要指派', '无需指派')
+_NEGATED_ASSIGN_PATTERN = re.compile(r'(?:不要|无需|不(?:要)?)(?:分配|指派)')
+
+
+def _wants_create_only(text: str) -> bool:
+    return any(keyword in text for keyword in _CREATE_ONLY_KEYWORDS)
+
+
+def _mentions_assign_action(text: str) -> bool:
+    """True when user wants assign/指派, excluding 待分配 and 不要分配."""
+    if '待分配' in text or 'pending_assign' in text.lower():
+        return False
+    if _NEGATED_ASSIGN_PATTERN.search(text):
+        return False
+    return any(keyword in text or keyword in text.lower() for keyword in ('分配', '指派', 'assign'))
+
+
+# Ordered rules: first match wins (more specific keywords before generic ones).
 _INTENT_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (('转派',), 'biz_create_and_transfer'),
     (('完成', '闭环', 'resolve'), 'biz_create_assign_resolve'),
     (('领取', 'claimed'), 'biz_create_and_claim'),
     (('待处理', 'pending_process', '处理中', '我的工单'), 'biz_create_and_assign'),
-    (('分配', '指派'), 'biz_create_and_assign'),
     (('待分配', 'pending_assign'), 'biz_create_type_a'),
 )
 
@@ -46,6 +62,10 @@ def infer_business_template_key(description: str) -> Optional[str]:
     if not text:
         return None
 
+    if _wants_create_only(text):
+        ticket_type = infer_ticket_type(text, fallback='TYPE_A')
+        return 'biz_create_type_b' if ticket_type == 'TYPE_B' else 'biz_create_type_a'
+
     for keywords, template_key in _INTENT_RULES:
         if any(keyword in text or keyword in text.lower() for keyword in keywords):
             if template_key == 'biz_create_type_a':
@@ -54,10 +74,13 @@ def infer_business_template_key(description: str) -> Optional[str]:
                     return 'biz_create_type_b'
             return template_key
 
+    if _mentions_assign_action(text):
+        return 'biz_create_and_assign'
+
     if re.search(r'创建.*工单|工单.*创建', text):
-        if any(keyword in text for keyword in ('仅创建', '只创建', '仅生成', '不要分配', '无需分配')):
-            ticket_type = infer_ticket_type(text)
-            return 'biz_create_type_b' if ticket_type == 'TYPE_B' else 'biz_create_type_a'
+        ticket_type = infer_ticket_type(text)
+        if ticket_type == 'TYPE_C':
+            return 'biz_create_and_assign'
 
     return None
 
@@ -93,7 +116,10 @@ def build_input_params(description: str, llm_payload: Dict[str, Any]) -> Dict[st
     params.update(_collect_step_params(llm_payload.get('steps') or []))
 
     ticket_type = infer_ticket_type(description)
-    params.setdefault('ticketType', ticket_type)
+    if _TICKET_TYPE_PATTERN.search(description or ''):
+        params['ticketType'] = ticket_type
+    else:
+        params.setdefault('ticketType', ticket_type)
 
     assignee_name = extract_assignee_name(description)
     if assignee_name:

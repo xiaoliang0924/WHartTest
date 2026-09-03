@@ -4,10 +4,16 @@ from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from rest_framework.exceptions import ValidationError
 
 from api_environments.models import ApiEnvironment
 from data_generation.models import DataGenerationPlan, DataGenerationRun
 from data_generation.exceptions import DataGenerationError
+from data_generation.plan_validation import (
+    ensure_plan_has_environment,
+    plan_requires_default_environment,
+)
+from data_generation.serializers import DataGenerationPlanSerializer
 from data_generation.services import PlanExecutor, substitute_templates
 from projects.models import Project
 
@@ -92,3 +98,37 @@ class PlanExecutorValidationTests(TestCase):
         self.assertEqual(run.status, DataGenerationRun.STATUS_SUCCESS)
         self.assertEqual(run.output_snapshot.get('token'), 'abc')
         self.assertEqual(run.output_snapshot.get('work_order_id'), 99)
+
+
+class PlanEnvironmentValidationTests(TestCase):
+    def test_detects_missing_step_environment(self):
+        steps = [{'type': 'api_call', 'interface_id': 445}]
+        self.assertTrue(plan_requires_default_environment(steps))
+
+    def test_allows_when_step_has_environment(self):
+        steps = [{'type': 'api_call', 'interface_id': 445, 'environment_id': 4}]
+        self.assertFalse(plan_requires_default_environment(steps))
+
+    def test_requires_default_environment_when_steps_need_it(self):
+        with self.assertRaises(ValidationError):
+            ensure_plan_has_environment(
+                steps=[{'type': 'set_env_var', 'variables': {'ticketId': '1'}}],
+                default_environment_id=None,
+            )
+
+    def test_serializer_rejects_plan_without_environment(self):
+        user_model = get_user_model()
+        user = user_model.objects.create_user(username='env_user', password='pass')
+        project = Project.objects.create(name='Env Project', creator=user)
+        serializer = DataGenerationPlanSerializer(
+            data={
+                'name': 'missing-env-plan',
+                'target_type': 'both',
+                'steps': [{'type': 'api_call', 'interface_id': 445}],
+                'cleanup_steps': [],
+                'is_active': True,
+            },
+            context={'project_id': project.id},
+        )
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('default_environment', serializer.errors)

@@ -32,7 +32,7 @@ SYSTEM_PROMPT = """你是 WHartTest 平台的造数计划生成器。根据用�
 支持两种 generation_mode：
 1. template — 需求与已有模板高度匹配时优先使用
    字段：generation_mode, template_key, name(可选), description(可选), target_type(可选), input_params(可选)
-2. custom — 需要自定义步骤时使用
+2. custom — 仅当没有任何模板可匹配时使用
    字段：generation_mode, name, description, target_type, steps, cleanup_steps(可选)
 
 规则：
@@ -107,6 +107,31 @@ def _validate_plan_dict(plan: Dict[str, Any], project_id: int) -> None:
     serializer.is_valid(raise_exception=True)
 
 
+def _build_generation_summary(
+    plan: Dict[str, Any],
+    *,
+    input_params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    source = str(plan.get('source') or '')
+    template_key = plan.get('template_key')
+    mode = 'template' if template_key or source.startswith('llm:template:') else 'custom'
+    if mode == 'template' and not template_key and source.startswith('llm:template:'):
+        template_key = source.split(':', 2)[-1]
+
+    summary: Dict[str, Any] = {
+        'mode': mode,
+        'template_key': template_key,
+        'template_name': plan.get('name') if mode == 'template' else None,
+        'step_count': len(plan.get('steps') or []),
+        'input_params': input_params or plan.get('suggested_input_params') or {},
+    }
+    if template_key:
+        template = get_template_by_key(str(template_key))
+        if template:
+            summary['template_name'] = template.get('name')
+    return summary
+
+
 def _expand_template_plan(
     llm_payload: Dict[str, Any],
     *,
@@ -142,6 +167,15 @@ def _expand_template_plan(
         'suggested_input_params': input_params,
         'source': f'llm:template:{template_key}',
         'hint': f'已匹配模板「{template.get("name")}」，AI 参数已保存为试跑默认值',
+        'generation_summary': _build_generation_summary(
+            {
+                'source': f'llm:template:{template_key}',
+                'template_key': template.get('template_key') or template_key,
+                'name': template.get('name'),
+                'steps': template.get('steps') or [],
+            },
+            input_params=input_params,
+        ),
     }
 
 
@@ -161,6 +195,7 @@ def _expand_custom_plan(
         'source': 'llm:custom',
         'hint': llm_payload.get('hint') or '已生成自定义步骤，请确认 interface_id 与环境 ID 后试跑',
     }
+    plan['generation_summary'] = _build_generation_summary(plan)
     return plan
 
 

@@ -112,7 +112,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { IconRefresh } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
@@ -192,6 +192,15 @@ async function fetchRuns() {
   }
 }
 
+async function refresh(options?: { resetPage?: boolean }) {
+  if (options?.resetPage) {
+    pagination.value.current = 1;
+  }
+  await fetchRuns();
+}
+
+defineExpose({ refresh });
+
 function handleStatusFilterChange() {
   pagination.value.current = 1;
   fetchRuns();
@@ -265,8 +274,6 @@ watch(currentProjectId, () => {
   pagination.value.current = 1;
   fetchRuns();
 });
-
-onMounted(fetchRuns);
 </script>
 
 <style scoped>

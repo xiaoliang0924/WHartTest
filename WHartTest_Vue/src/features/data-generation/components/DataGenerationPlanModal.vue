@@ -31,7 +31,7 @@
 
       <a-row :gutter="16">
         <a-col :span="8">
-          <a-form-item label="默认 API 环境" field="default_environment">
+          <a-form-item label="默认 API 环境" field="default_environment" :required="needsDefaultEnvironment">
             <a-select
               v-model="formData.default_environment"
               placeholder="选择环境"
@@ -55,6 +55,24 @@
           </a-form-item>
         </a-col>
       </a-row>
+
+      <a-alert
+        v-if="aiGenerationSummary"
+        type="success"
+        closable
+        style="margin-bottom: 12px"
+        @close="aiGenerationSummary = ''"
+      >
+        {{ aiGenerationSummary }}
+      </a-alert>
+
+      <a-alert
+        v-if="needsDefaultEnvironment && !formData.default_environment"
+        type="warning"
+        style="margin-bottom: 12px"
+      >
+        当前步骤包含 API 调用或写入环境变量，请选择默认 API 环境后再保存或试跑。
+      </a-alert>
 
       <a-space style="margin-bottom: 12px">
         <a-button size="small" @click="applyExample">填入示例</a-button>
@@ -95,9 +113,13 @@ import {
   EXAMPLE_CLEANUP_STEPS,
   EXAMPLE_PLAN_STEPS,
   generateDataGenerationPlan,
+  formatGenerationSummary,
+  planRequiresDefaultEnvironment,
   updateDataGenerationPlan,
+  validatePlanEnvironment,
   type DataGenerationPlan,
   type DataGenerationStep,
+  type GeneratedDataGenerationPlan,
 } from '@/features/data-generation/services/dataGenerationService';
 
 const props = defineProps<{
@@ -120,6 +142,7 @@ const isEdit = computed(() => !!props.plan?.id);
 const formRef = ref();
 const envLoading = ref(false);
 const generating = ref(false);
+const aiGenerationSummary = ref('');
 const editorMode = ref('visual');
 const environments = ref<Array<{ id: number; name: string }>>([]);
 
@@ -140,9 +163,36 @@ const formData = reactive({
 
 const rules = {
   name: [{ required: true, message: '请输入计划名称' }],
+  default_environment: [{
+    validator: (_value: number | undefined, callback: (error?: string) => void) => {
+      if (!needsDefaultEnvironment.value) {
+        callback();
+        return;
+      }
+      if (!formData.default_environment) {
+        callback('请选择默认 API 环境');
+        return;
+      }
+      callback();
+    },
+  }],
 };
 
+const needsDefaultEnvironment = computed(() => {
+  if (editorMode.value === 'json') {
+    try {
+      const steps = JSON.parse(formData.steps_json || '[]');
+      const cleanupSteps = JSON.parse(formData.cleanup_steps_json || '[]');
+      return planRequiresDefaultEnvironment(steps, cleanupSteps);
+    } catch {
+      return false;
+    }
+  }
+  return planRequiresDefaultEnvironment(formData.steps, formData.cleanup_steps);
+});
+
 function resetForm(plan?: DataGenerationPlan | null) {
+  aiGenerationSummary.value = '';
   formData.name = plan?.name || '';
   formData.description = plan?.description || '';
   formData.target_type = plan?.target_type || 'both';
@@ -207,7 +257,7 @@ async function handleAiGenerate() {
       formData.description,
       formData.default_environment ?? null,
     );
-    const generated = resp;
+    const generated = resp as GeneratedDataGenerationPlan;
     formData.name = formData.name.trim() || generated.name || '';
     formData.target_type = generated.target_type || formData.target_type;
     formData.steps = generated.steps || [];
@@ -216,7 +266,13 @@ async function handleAiGenerate() {
     formData.template_params_schema = generated.template_params_schema || {};
     formData.steps_json = JSON.stringify(formData.steps, null, 2);
     formData.cleanup_steps_json = JSON.stringify(formData.cleanup_steps, null, 2);
-    if (generated.hint) {
+
+    const summaryText = formatGenerationSummary(generated.generation_summary);
+    aiGenerationSummary.value = summaryText || generated.hint || '';
+
+    if (generated.generation_summary?.mode === 'template') {
+      Message.success(`AI 已匹配模板「${generated.generation_summary.template_name || generated.template_key}」`);
+    } else if (generated.hint) {
       Message.info(generated.hint);
     } else if (generated.llm_used) {
       Message.success('LLM 已生成造数计划');
@@ -260,6 +316,16 @@ async function handleSubmit() {
     parsed = resolveStepsForSubmit();
   } catch (error: any) {
     Message.error(error.message || '步骤 JSON 无效');
+    return false;
+  }
+
+  const envError = validatePlanEnvironment({
+    default_environment: formData.default_environment ?? null,
+    steps: parsed.steps,
+    cleanup_steps: parsed.cleanup_steps,
+  });
+  if (envError) {
+    Message.warning(envError);
     return false;
   }
 

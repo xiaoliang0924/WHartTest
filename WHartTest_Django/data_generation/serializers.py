@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from .models import DataGenerationPlan, DataGenerationRun
+from .plan_validation import ensure_plan_has_environment
 
 
 class DataGenerationPlanSerializer(serializers.ModelSerializer):
@@ -120,6 +121,28 @@ class DataGenerationPlanSerializer(serializers.ModelSerializer):
         if project_id and str(value.project_id) != str(project_id):
             raise serializers.ValidationError('默认环境必须属于当前项目')
         return value
+
+    def validate(self, attrs):
+        steps = attrs.get('steps')
+        if steps is None and self.instance is not None:
+            steps = self.instance.steps
+        cleanup_steps = attrs.get('cleanup_steps')
+        if cleanup_steps is None and self.instance is not None:
+            cleanup_steps = self.instance.cleanup_steps
+
+        default_environment = attrs.get('default_environment')
+        if default_environment is None and self.instance is not None:
+            default_environment = self.instance.default_environment
+
+        default_environment_id = (
+            default_environment.id if default_environment is not None else None
+        )
+        ensure_plan_has_environment(
+            steps=steps,
+            cleanup_steps=cleanup_steps,
+            default_environment_id=default_environment_id,
+        )
+        return attrs
 
 
 class DataGenerationRunSerializer(serializers.ModelSerializer):

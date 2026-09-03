@@ -95,6 +95,35 @@ class TemplateExpandTests(TestCase):
             'biz_create_and_assign',
         )
 
+    def test_infer_type_c_create_routes_to_assign_template(self):
+        self.assertEqual(
+            infer_business_template_key('创建 TYPE_C 工单'),
+            'biz_create_and_assign',
+        )
+
+    def test_create_only_without_assign_routes_to_type_a_template(self):
+        description = '仅创建 TYPE_A 工单，不要分配'
+        self.assertEqual(
+            infer_business_template_key(description),
+            'biz_create_type_a',
+        )
+        payload = route_llm_payload(
+            description,
+            {
+                'generation_mode': 'template',
+                'template_key': 'biz_create_and_assign',
+                'input_params': {'summary': '仅创建TYPE_A工单', 'ticketType': 'TYPE_A'},
+            },
+        )
+        self.assertEqual(payload['template_key'], 'biz_create_type_a')
+        self.assertEqual(payload['input_params']['ticketType'], 'TYPE_A')
+
+    def test_pending_assign_does_not_trigger_assign_template(self):
+        self.assertEqual(
+            infer_business_template_key('创建待分配 TYPE_A 工单'),
+            'biz_create_type_a',
+        )
+
     def test_normalize_custom_step_body_to_variables(self):
         steps = normalize_custom_steps([{
             'type': 'api_call',

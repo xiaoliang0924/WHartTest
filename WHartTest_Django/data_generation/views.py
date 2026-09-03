@@ -24,6 +24,7 @@ from .serializers import (
     DataGenerationRunSerializer,
     DataGenerationTemplateRunSerializer,
 )
+from .plan_validation import ensure_plan_has_environment
 from .services import execute_cleanup_steps, execute_plan
 from .templates import get_builtin_templates, get_template_by_key
 
@@ -51,6 +52,8 @@ class DataGenerationPlanViewSet(BaseModelViewSet):
         is_template = self.request.query_params.get('is_template')
         if is_template in ('true', '1'):
             queryset = queryset.filter(is_template=True)
+        elif is_template in ('false', '0'):
+            queryset = queryset.filter(is_template=False)
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(name__icontains=search.strip())
@@ -68,6 +71,11 @@ class DataGenerationPlanViewSet(BaseModelViewSet):
     @action(detail=True, methods=['post'])
     def run(self, request, **kwargs):
         plan = self.get_object()
+        ensure_plan_has_environment(
+            steps=plan.steps,
+            cleanup_steps=plan.cleanup_steps,
+            default_environment_id=plan.default_environment_id,
+        )
         payload = DataGenerationRunRequestSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
         run = execute_plan(
@@ -120,6 +128,7 @@ class DataGenerationPlanViewSet(BaseModelViewSet):
             is_active=True,
         ).first()
 
+        template = None
         if plan is None:
             template = get_template_by_key(template_key)
             if template is None:
@@ -127,6 +136,17 @@ class DataGenerationPlanViewSet(BaseModelViewSet):
                     {'status': 'error', 'message': f'模板不存在: {template_key}'},
                     status=status.HTTP_404_NOT_FOUND,
                 )
+
+        ensure_plan_has_environment(
+            steps=plan.steps if plan is not None else template.get('steps'),
+            cleanup_steps=plan.cleanup_steps if plan is not None else template.get('cleanup_steps'),
+            default_environment_id=(
+                default_environment_id
+                or (plan.default_environment_id if plan is not None else None)
+            ),
+        )
+
+        if plan is None:
             project = get_object_or_404(Project, pk=project_pk)
             plan = DataGenerationPlan.objects.create(
                 project=project,

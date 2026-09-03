@@ -83,11 +83,34 @@ export interface DataGenerationTemplate {
   description?: string;
   target_type?: string;
   icon?: string;
-  params_schema?: Record<string, { type?: string; label?: string; default?: unknown; required?: boolean }>;
+  params_schema?: Record<string, ParamSchemaField>;
   steps?: DataGenerationStep[];
   cleanup_steps?: DataGenerationStep[];
   /** 项目内已保存的造数计划 ID（快速造数直接试跑） */
   plan_id?: number;
+}
+
+export interface ParamSchemaField {
+  type?: string;
+  label?: string;
+  default?: unknown;
+  required?: boolean;
+}
+
+export interface GenerationSummary {
+  mode: 'template' | 'custom';
+  template_key?: string | null;
+  template_name?: string | null;
+  step_count?: number;
+  input_params?: Record<string, unknown>;
+}
+
+export interface GeneratedDataGenerationPlan extends Partial<DataGenerationPlan> {
+  source?: string;
+  hint?: string;
+  llm_used?: boolean;
+  generation_summary?: GenerationSummary;
+  suggested_input_params?: Record<string, unknown>;
 }
 
 export interface SuiteVariableGapAnalysis {
@@ -342,3 +365,72 @@ export const EXAMPLE_CLEANUP_STEPS: DataGenerationStep[] = [
     method: 'delete',
   },
 ];
+
+const ENV_REQUIRED_STEP_TYPES: DataGenerationStepType[] = ['api_call', 'set_env_var'];
+
+export const PLAN_ENV_REQUIRED_MESSAGE =
+  '请选择默认 API 环境（存在未指定环境的 API / 写入环境变量步骤）';
+
+export function planRequiresDefaultEnvironment(
+  steps: DataGenerationStep[] = [],
+  cleanupSteps: DataGenerationStep[] = [],
+): boolean {
+  return [...steps, ...cleanupSteps].some(
+    (step) =>
+      ENV_REQUIRED_STEP_TYPES.includes(step.type) && !step.environment_id,
+  );
+}
+
+export function validatePlanEnvironment(payload: {
+  default_environment?: number | null;
+  steps?: DataGenerationStep[];
+  cleanup_steps?: DataGenerationStep[];
+}): string | null {
+  if (!planRequiresDefaultEnvironment(payload.steps, payload.cleanup_steps)) {
+    return null;
+  }
+  if (!payload.default_environment) {
+    return PLAN_ENV_REQUIRED_MESSAGE;
+  }
+  return null;
+}
+
+export function getParamSchemaEntries(
+  schema?: Record<string, ParamSchemaField>,
+): Array<[string, ParamSchemaField]> {
+  if (!schema || typeof schema !== 'object') {
+    return [];
+  }
+  return Object.entries(schema).filter(
+    (entry): entry is [string, ParamSchemaField] =>
+      typeof entry[1] === 'object' && entry[1] !== null,
+  );
+}
+
+export function buildDefaultInputParams(
+  schema?: Record<string, ParamSchemaField>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  getParamSchemaEntries(schema).forEach(([key, field]) => {
+    result[key] = field.default ?? (field.type === 'number' ? 0 : '');
+  });
+  return result;
+}
+
+export function formatGenerationSummary(summary?: GenerationSummary): string {
+  if (!summary) return '';
+  if (summary.mode === 'template') {
+    const params = summary.input_params || {};
+    const paramText = Object.entries(params)
+      .map(([key, value]) => `${key}=${value}`)
+      .join('，');
+    return [
+      `匹配模板：${summary.template_name || summary.template_key || '未知'}`,
+      `步骤数：${summary.step_count ?? '-'}`,
+      paramText ? `参数：${paramText}` : '',
+    ]
+      .filter(Boolean)
+      .join('；');
+  }
+  return `自定义计划，共 ${summary.step_count ?? 0} 步（请检查步骤与环境配置）`;
+}
