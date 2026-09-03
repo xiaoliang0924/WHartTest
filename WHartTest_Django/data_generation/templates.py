@@ -4,147 +4,358 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+# 智慧AI工单系统 — 测试环境接口 ID（project_id=1）
+ENV_TEST = 4
+IFACE_CREATE_TICKET = 445
+IFACE_ASSIGN_TICKET = 484
+IFACE_TRANSFER_TICKET = 491
+IFACE_CLAIM_TICKET = 490
+IFACE_RESOLVE_TICKET = 520
+IFACE_UPDATE_SUBJECT = 479
+IFACE_TICKET_DETAIL = 509
 
-BUILTIN_TEMPLATES: List[Dict[str, Any]] = [
-    {
-        'template_key': 'create_score_test_ticket_type_a',
-        'name': '创建得分测试工单 TYPE_A',
-        'description': '一键创建 TYPE_A 工单并写入 ticketId/ticketNo，适用于得分测试、UI/功能回归。',
-        'target_type': 'both',
-        'icon': 'star',
-        'params_schema': {
-            'summary': {'type': 'string', 'label': '工单摘要', 'default': '得分测试工单'},
+
+def _create_ticket_step() -> Dict[str, Any]:
+    return {
+        'type': 'api_call',
+        'name': '创建工单',
+        'interface_id': IFACE_CREATE_TICKET,
+        'environment_id': ENV_TEST,
+        'variables': {
+            'summary': '{{summary}}',
+            'ticketType': '{{ticketType}}',
         },
-        'steps': [
-            {
-                'type': 'api_call',
-                'name': '创建工单 TYPE_A',
-                'interface_id': 445,
-                'environment_id': 4,
-                'variables': {'summary': '{{summary}}'},
-                'extract': {'ticketId': 'ticketId', 'ticketNo': 'ticketNo'},
-            },
-            {
-                'type': 'set_env_var',
-                'name': '写入环境变量',
-                'environment_id': 4,
-                'variables': {
-                    'ticketId': '{{ticketId}}',
-                    'ticketNo': '{{ticketNo}}',
-                    'processingTicketId': '{{ticketId}}',
-                    'work_order_id': '{{ticketId}}',
-                },
-            },
-            {
-                'type': 'set_public_data',
-                'name': '写入 UI 公共数据',
-                'items': [
-                    {'key': 'ticketId', 'value': '{{ticketId}}', 'type': 0},
-                    {'key': 'ticketNo', 'value': '{{ticketNo}}', 'type': 0},
-                    {'key': 'work_order_id', 'value': '{{ticketId}}', 'type': 0},
-                ],
-            },
-        ],
-        'cleanup_steps': [],
-    },
+        'extract': {'ticketId': 'ticketId', 'ticketNo': 'ticketNo'},
+    }
+
+
+def _write_env_vars_step(**extra: str) -> Dict[str, Any]:
+    variables = {
+        'ticketId': '{{ticketId}}',
+        'ticketNo': '{{ticketNo}}',
+        'processingTicketId': '{{ticketId}}',
+        'work_order_id': '{{ticketId}}',
+    }
+    variables.update(extra)
+    return {
+        'type': 'set_env_var',
+        'name': '写入环境变量',
+        'environment_id': ENV_TEST,
+        'variables': variables,
+    }
+
+
+def _write_public_data_step(**extra: str) -> Dict[str, Any]:
+    items = [
+        {'key': 'ticketId', 'value': '{{ticketId}}', 'type': 0},
+        {'key': 'ticketNo', 'value': '{{ticketNo}}', 'type': 0},
+        {'key': 'work_order_id', 'value': '{{ticketId}}', 'type': 0},
+        {'key': 'processingTicketId', 'value': '{{ticketId}}', 'type': 0},
+    ]
+    for key, value in extra.items():
+        items.append({'key': key, 'value': value, 'type': 0})
+    return {
+        'type': 'set_public_data',
+        'name': '写入 UI 公共数据',
+        'items': items,
+    }
+
+
+BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
     {
-        'template_key': 'create_ticket_type_a',
+        'template_key': 'biz_create_type_a',
         'name': '创建待分配工单 TYPE_A',
-        'description': '调用创建工单接口，写入环境变量与 UI 公共数据，适用于功能/UI 回归。',
+        'description': 'POST /api/tickets 创建 TYPE_A 工单（状态 pending_process），写入 ticketId/ticketNo。',
         'target_type': 'both',
         'icon': 'file',
         'params_schema': {
-            'summary': {'type': 'string', 'label': '工单摘要', 'default': '造数测试工单'},
+            'summary': {'type': 'string', 'label': '工单摘要', 'default': '待分配测试工单'},
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_A'},
         },
         'steps': [
+            _create_ticket_step(),
+            _write_env_vars_step(),
+            _write_public_data_step(),
+        ],
+        'cleanup_steps': [],
+    },
+    {
+        'template_key': 'biz_create_type_b',
+        'name': '创建 TYPE_B 工单',
+        'description': '创建 TYPE_B 类型工单，适用于非待分配类工单场景测试。',
+        'target_type': 'both',
+        'icon': 'file',
+        'params_schema': {
+            'summary': {'type': 'string', 'label': '工单摘要', 'default': 'TYPE_B测试工单'},
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_B'},
+        },
+        'steps': [
+            _create_ticket_step(),
+            _write_env_vars_step(),
+            _write_public_data_step(),
+        ],
+        'cleanup_steps': [],
+    },
+    {
+        'template_key': 'biz_create_and_assign',
+        'name': '创建并分配工单',
+        'description': '创建 TYPE_A 工单后调用「分配工单」接口，写入 processingTicketId 供处理中场景使用。',
+        'target_type': 'both',
+        'icon': 'user-add',
+        'params_schema': {
+            'summary': {'type': 'string', 'label': '工单摘要', 'default': '分配测试工单'},
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_C'},
+            'assigneeUserId': {'type': 'number', 'label': '分配用户 ID', 'default': 46},
+            'assigneeName': {'type': 'string', 'label': '分配用户名', 'default': '李亮'},
+            'assigneeDepartment': {'type': 'string', 'label': '分配部门', 'default': '客服部'},
+            'assigneeRole': {'type': 'string', 'label': '分配角色', 'default': 'customer_service'},
+        },
+        'steps': [
+            _create_ticket_step(),
             {
                 'type': 'api_call',
-                'name': '创建工单 TYPE_A',
-                'interface_id': 445,
-                'environment_id': 4,
-                'variables': {'summary': '{{summary}}'},
-                'extract': {'ticketId': 'ticketId', 'ticketNo': 'ticketNo'},
-            },
-            {
-                'type': 'set_env_var',
-                'name': '写入环境变量',
-                'environment_id': 4,
+                'name': '分配工单',
+                'interface_id': IFACE_ASSIGN_TICKET,
+                'environment_id': ENV_TEST,
                 'variables': {
-                    'ticketId': '{{ticketId}}',
-                    'ticketNo': '{{ticketNo}}',
-                    'processingTicketId': '{{ticketId}}',
-                    'work_order_id': '{{ticketId}}',
+                    'assigneeUserId': '{{assigneeUserId}}',
+                    'assigneeName': '{{assigneeName}}',
+                    'assigneeDepartment': '{{assigneeDepartment}}',
+                    'assigneeRole': '{{assigneeRole}}',
+                },
+            },
+            _write_env_vars_step(ticketStatus='assigned'),
+            _write_public_data_step(ticketStatus='assigned'),
+        ],
+        'cleanup_steps': [],
+    },
+    {
+        'template_key': 'biz_create_and_transfer',
+        'name': '创建并转派工单',
+        'description': '创建 TYPE_C 工单，分配并领取后调用「转派工单」接口，将工单转派给指定处理人。',
+        'target_type': 'both',
+        'icon': 'swap',
+        'params_schema': {
+            'summary': {'type': 'string', 'label': '工单摘要', 'default': '转派测试工单'},
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_C'},
+            'assigneeUserId': {'type': 'number', 'label': '目标用户 ID', 'default': 46},
+            'assigneeName': {'type': 'string', 'label': '目标用户名', 'default': '李亮'},
+            'assigneeDepartment': {'type': 'string', 'label': '目标部门', 'default': '客服部'},
+            'assigneeRole': {'type': 'string', 'label': '目标角色', 'default': 'customer_service'},
+            'transferReason': {'type': 'string', 'label': '转派原因', 'default': '自动化测试转派'},
+            'sourceAssigneeUserId': {'type': 'number', 'label': '当前处理人 ID', 'default': 39},
+            'sourceAssigneeName': {'type': 'string', 'label': '当前处理人', 'default': '李清云'},
+            'sourceAssigneeDepartment': {
+                'type': 'string',
+                'label': '当前处理人部门',
+                'default': 'AI与数字化中心/数据质量与测试组',
+            },
+            'sourceAssigneeRole': {
+                'type': 'string',
+                'label': '当前处理人角色',
+                'default': 'customer_service',
+            },
+        },
+        'steps': [
+            _create_ticket_step(),
+            {
+                'type': 'api_call',
+                'name': '分配给当前处理人',
+                'interface_id': IFACE_ASSIGN_TICKET,
+                'environment_id': ENV_TEST,
+                'variables': {
+                    'assigneeUserId': '{{sourceAssigneeUserId}}',
+                    'assigneeName': '{{sourceAssigneeName}}',
+                    'assigneeDepartment': '{{sourceAssigneeDepartment}}',
+                    'assigneeRole': '{{sourceAssigneeRole}}',
                 },
             },
             {
-                'type': 'set_public_data',
-                'name': '写入 UI 公共数据',
-                'items': [
-                    {'key': 'ticketId', 'value': '{{ticketId}}', 'type': 0},
-                    {'key': 'ticketNo', 'value': '{{ticketNo}}', 'type': 0},
-                    {'key': 'work_order_id', 'value': '{{ticketId}}', 'type': 0},
-                ],
+                'type': 'api_call',
+                'name': '当前处理人领取工单',
+                'interface_id': IFACE_CLAIM_TICKET,
+                'environment_id': ENV_TEST,
+                'variables': {},
             },
+            {
+                'type': 'api_call',
+                'name': '转派工单',
+                'interface_id': IFACE_TRANSFER_TICKET,
+                'environment_id': ENV_TEST,
+                'variables': {
+                    'targetUserId': '{{assigneeUserId}}',
+                    'targetRole': '{{assigneeRole}}',
+                    'reason': '{{transferReason}}',
+                },
+            },
+            _write_env_vars_step(ticketStatus='assigned'),
+            _write_public_data_step(ticketStatus='assigned'),
         ],
         'cleanup_steps': [],
     },
     {
-        'template_key': 'create_ticket_with_delay',
+        'template_key': 'biz_create_and_claim',
+        'name': '创建并领取工单',
+        'description': '创建 TYPE_C 工单 → 分配给处理人 → 领取，适用于「我的工单」列表测试（需环境变量 assigneeToken）。',
+        'target_type': 'both',
+        'icon': 'user',
+        'params_schema': {
+            'summary': {'type': 'string', 'label': '工单摘要', 'default': '领取测试工单'},
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_C'},
+            'assigneeUserId': {'type': 'number', 'label': '分配用户 ID', 'default': 46},
+            'assigneeName': {'type': 'string', 'label': '分配用户名', 'default': '李亮'},
+            'assigneeDepartment': {'type': 'string', 'label': '分配部门', 'default': '客服部'},
+            'assigneeRole': {'type': 'string', 'label': '分配角色', 'default': 'customer_service'},
+        },
+        'steps': [
+            _create_ticket_step(),
+            {
+                'type': 'api_call',
+                'name': '分配工单',
+                'interface_id': IFACE_ASSIGN_TICKET,
+                'environment_id': ENV_TEST,
+                'variables': {
+                    'assigneeUserId': '{{assigneeUserId}}',
+                    'assigneeName': '{{assigneeName}}',
+                    'assigneeDepartment': '{{assigneeDepartment}}',
+                    'assigneeRole': '{{assigneeRole}}',
+                },
+            },
+            {
+                'type': 'api_call',
+                'name': '领取工单',
+                'interface_id': IFACE_CLAIM_TICKET,
+                'environment_id': ENV_TEST,
+                'variables': {},
+            },
+            _write_env_vars_step(ticketStatus='claimed'),
+            _write_public_data_step(ticketStatus='claimed'),
+        ],
+        'cleanup_steps': [],
+    },
+    {
+        'template_key': 'biz_create_assign_resolve',
+        'name': '创建→分配→领取→完成工单',
+        'description': '完整闭环：TYPE_C 创建 → 分配 → 领取(assigneeToken) → 完成，适用于已完成状态回归。',
+        'target_type': 'both',
+        'icon': 'check-circle',
+        'params_schema': {
+            'summary': {'type': 'string', 'label': '工单摘要', 'default': '完成闭环测试工单'},
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_C'},
+            'assigneeUserId': {'type': 'number', 'label': '分配用户 ID', 'default': 46},
+            'assigneeName': {'type': 'string', 'label': '分配用户名', 'default': '李亮'},
+            'assigneeDepartment': {'type': 'string', 'label': '分配部门', 'default': '客服部'},
+            'assigneeRole': {'type': 'string', 'label': '分配角色', 'default': 'customer_service'},
+        },
+        'steps': [
+            _create_ticket_step(),
+            {
+                'type': 'api_call',
+                'name': '分配工单',
+                'interface_id': IFACE_ASSIGN_TICKET,
+                'environment_id': ENV_TEST,
+                'variables': {
+                    'assigneeUserId': '{{assigneeUserId}}',
+                    'assigneeName': '{{assigneeName}}',
+                    'assigneeDepartment': '{{assigneeDepartment}}',
+                    'assigneeRole': '{{assigneeRole}}',
+                },
+            },
+            {
+                'type': 'api_call',
+                'name': '领取工单',
+                'interface_id': IFACE_CLAIM_TICKET,
+                'environment_id': ENV_TEST,
+                'variables': {},
+            },
+            {
+                'type': 'api_call',
+                'name': '完成工单',
+                'interface_id': IFACE_RESOLVE_TICKET,
+                'environment_id': ENV_TEST,
+                'variables': {},
+            },
+            _write_env_vars_step(ticketStatus='resolved'),
+            _write_public_data_step(ticketStatus='resolved'),
+        ],
+        'cleanup_steps': [],
+    },
+    {
+        'template_key': 'biz_create_update_subject',
+        'name': '创建并修改工单主题',
+        'description': '创建工单后 PATCH 修改主题，适用于工单详情/编辑类 UI 测试。',
+        'target_type': 'both',
+        'icon': 'edit',
+        'params_schema': {
+            'summary': {'type': 'string', 'label': '工单摘要', 'default': '改主题测试工单'},
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_A'},
+            'subject': {'type': 'string', 'label': '新主题', 'default': '造数更新的工单主题'},
+        },
+        'steps': [
+            _create_ticket_step(),
+            {
+                'type': 'api_call',
+                'name': '修改工单主题',
+                'interface_id': IFACE_UPDATE_SUBJECT,
+                'environment_id': ENV_TEST,
+                'variables': {'subject': '{{subject}}'},
+            },
+            _write_env_vars_step(updatedSubject='{{subject}}'),
+            _write_public_data_step(updatedSubject='{{subject}}'),
+        ],
+        'cleanup_steps': [],
+    },
+    {
+        'template_key': 'biz_create_with_delay',
         'name': '创建工单并等待同步',
-        'description': '创建工单后延迟 2 秒，适用于下游列表有延迟刷新的场景。',
+        'description': '创建工单后等待列表刷新，适用于下游列表延迟场景。',
         'target_type': 'both',
         'icon': 'clock-circle',
         'params_schema': {
-            'summary': {'type': 'string', 'label': '工单摘要', 'default': '造数延迟测试'},
+            'summary': {'type': 'string', 'label': '工单摘要', 'default': '延迟同步测试工单'},
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_A'},
             'delay_seconds': {'type': 'number', 'label': '等待秒数', 'default': 2},
         },
         'steps': [
-            {
-                'type': 'api_call',
-                'name': '创建工单',
-                'interface_id': 445,
-                'environment_id': 4,
-                'variables': {'summary': '{{summary}}'},
-                'extract': {'ticketId': 'ticketId', 'ticketNo': 'ticketNo'},
-            },
+            _create_ticket_step(),
             {
                 'type': 'delay',
-                'name': '等待同步',
+                'name': '等待列表同步',
                 'seconds': '{{delay_seconds}}',
             },
-            {
-                'type': 'set_public_data',
-                'name': '写入 UI 公共数据',
-                'items': [
-                    {'key': 'ticketId', 'value': '{{ticketId}}', 'type': 0},
-                    {'key': 'work_order_id', 'value': '{{ticketId}}', 'type': 0},
-                ],
-            },
+            _write_env_vars_step(),
+            _write_public_data_step(),
         ],
         'cleanup_steps': [],
     },
     {
-        'template_key': 'cleanup_ticket_by_sql',
-        'name': 'SQL 清理测试工单（模板）',
-        'description': '通过 SQL 删除指定工单，需配置 database_config_id 与 ticketId。',
-        'target_type': 'api',
-        'icon': 'delete',
+        'template_key': 'biz_query_ticket_detail',
+        'name': '创建并查询工单详情',
+        'description': '创建工单后 GET 详情验证状态，extract ticketStatus 到变量。',
+        'target_type': 'both',
+        'icon': 'search',
         'params_schema': {
-            'database_config_id': {'type': 'number', 'label': '数据库配置 ID', 'required': True},
-            'ticketId': {'type': 'string', 'label': '工单 ID', 'required': True},
+            'summary': {'type': 'string', 'label': '工单摘要', 'default': '详情查询测试工单'},
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_A'},
         },
-        'steps': [],
-        'cleanup_steps': [
+        'steps': [
+            _create_ticket_step(),
             {
-                'type': 'sql',
-                'name': '删除测试工单',
-                'database_config_id': '{{database_config_id}}',
-                'sql': "DELETE FROM ticket WHERE id = {{ticketId}}",
-                'method': 'delete',
+                'type': 'api_call',
+                'name': '查询工单详情',
+                'interface_id': IFACE_TICKET_DETAIL,
+                'environment_id': ENV_TEST,
+                'variables': {},
+                'extract': {'ticketStatus': 'status'},
             },
+            _write_env_vars_step(),
+            _write_public_data_step(ticketStatus='{{ticketStatus}}'),
         ],
+        'cleanup_steps': [],
     },
-    # --- 步骤能力测试模板（每种执行步骤类型各一条，便于逐项验证） ---
+]
+
+BUILTIN_STEP_TEST_TEMPLATES: List[Dict[str, Any]] = [
     {
         'template_key': 'test_step_api_call',
         'name': '【步骤测试】API 调用',
@@ -153,17 +364,9 @@ BUILTIN_TEMPLATES: List[Dict[str, Any]] = [
         'icon': 'thunderbolt',
         'params_schema': {
             'summary': {'type': 'string', 'label': '工单摘要', 'default': 'API步骤测试'},
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_A'},
         },
-        'steps': [
-            {
-                'type': 'api_call',
-                'name': '调用创建工单接口',
-                'interface_id': 445,
-                'environment_id': 4,
-                'variables': {'summary': '{{summary}}'},
-                'extract': {'ticketId': 'ticketId', 'ticketNo': 'ticketNo'},
-            },
-        ],
+        'steps': [_create_ticket_step()],
         'cleanup_steps': [],
     },
     {
@@ -179,7 +382,7 @@ BUILTIN_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'set_env_var',
                 'name': '写入测试环境变量',
-                'environment_id': 4,
+                'environment_id': ENV_TEST,
                 'variables': {
                     'dg_test_env_var': '{{marker}}',
                     'dg_test_uuid': '{{uuid}}',
@@ -270,13 +473,51 @@ BUILTIN_TEMPLATES: List[Dict[str, Any]] = [
     },
 ]
 
+BUILTIN_CLEANUP_TEMPLATES: List[Dict[str, Any]] = [
+    {
+        'template_key': 'cleanup_ticket_by_sql',
+        'name': 'SQL 清理测试工单',
+        'description': '通过 SQL 删除指定工单（清理步骤模板，不在快速造数展示）。',
+        'target_type': 'api',
+        'icon': 'delete',
+        'params_schema': {
+            'database_config_id': {'type': 'number', 'label': '数据库配置 ID', 'required': True},
+            'ticketId': {'type': 'string', 'label': '工单 ID', 'required': True},
+        },
+        'steps': [],
+        'cleanup_steps': [
+            {
+                'type': 'sql',
+                'name': '删除测试工单',
+                'database_config_id': '{{database_config_id}}',
+                'sql': 'DELETE FROM ticket WHERE id = {{ticketId}}',
+                'method': 'delete',
+            },
+        ],
+    },
+]
+
+# 兼容旧 template_key（run_template 仍能找到历史计划）
+LEGACY_TEMPLATE_KEYS = {
+    'create_score_test_ticket_type_a': 'biz_create_type_a',
+    'create_ticket_type_a': 'biz_create_type_a',
+    'create_ticket_with_delay': 'biz_create_with_delay',
+}
+
+BUILTIN_TEMPLATES: List[Dict[str, Any]] = (
+    BUILTIN_BUSINESS_TEMPLATES + BUILTIN_STEP_TEST_TEMPLATES + BUILTIN_CLEANUP_TEMPLATES
+)
+
 
 def get_builtin_templates() -> List[Dict[str, Any]]:
     return BUILTIN_TEMPLATES
 
 
 def get_template_by_key(template_key: str) -> Dict[str, Any] | None:
+    mapped_key = LEGACY_TEMPLATE_KEYS.get(template_key, template_key)
     for item in BUILTIN_TEMPLATES:
-        if item.get('template_key') == template_key:
-            return item
+        if item.get('template_key') == mapped_key:
+            result = dict(item)
+            result['template_key'] = template_key
+            return result
     return None

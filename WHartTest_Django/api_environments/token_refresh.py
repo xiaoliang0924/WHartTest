@@ -159,17 +159,21 @@ def refresh_environment_tokens(
     verify_ssl: bool = False,
     environment_id: Optional[int] = None,
     persist: bool = True,
+    force_token_vars: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Login once per credential group and refresh token environment variables."""
     merged = dict(variables or {})
     updates: Dict[str, str] = {}
     login_cache: Dict[Tuple[str, str], str] = {}
+    forced = set(force_token_vars or ())
 
     for group in TOKEN_CREDENTIAL_GROUPS:
-        if _group_token_is_valid(merged, group):
+        group_token_vars = group.get('token_vars', ())
+        should_force = any(token_var in forced for token_var in group_token_vars)
+        if not should_force and _group_token_is_valid(merged, group):
             logger.info(
                 'Skipping token refresh; existing token still valid (group=%s)',
-                ','.join(group.get('token_vars', ())),
+                ','.join(group_token_vars),
             )
             continue
 

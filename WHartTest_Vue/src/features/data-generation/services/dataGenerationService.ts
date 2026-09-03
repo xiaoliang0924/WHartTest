@@ -43,6 +43,7 @@ export interface DataGenerationPlan {
   template_key?: string;
   template_icon?: string;
   template_params_schema?: Record<string, unknown>;
+  suggested_input_params?: Record<string, unknown>;
   step_count?: number;
   cleanup_step_count?: number;
   created_by?: number;
@@ -262,16 +263,19 @@ export async function generateDataGenerationPlan(
   projectId: number,
   description: string,
   defaultEnvironment?: number | null,
+  options?: { useLlm?: boolean; suiteId?: number | null },
 ) {
   const response = await axios.post(
     `${API_BASE_URL}/projects/${projectId}/data-generation-plans/generate/`,
     {
       description,
       default_environment: defaultEnvironment ?? null,
+      use_llm: options?.useLlm ?? true,
+      suite_id: options?.suiteId ?? null,
     },
     { headers: authHeaders() },
   );
-  return response.data;
+  return response.data?.data?.data ?? response.data?.data ?? response.data;
 }
 
 export async function analyzeSuiteVariableGaps(

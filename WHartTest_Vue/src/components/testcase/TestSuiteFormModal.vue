@@ -429,7 +429,7 @@ async function loadDataGenerationOptions() {
   try {
     const [planResp, envResp] = await Promise.all([
       getDataGenerationPlans(props.currentProjectId, { is_active: true, page_size: 200 }),
-      getEnvironments({ project: props.currentProjectId }),
+      getEnvironments({ project_id: props.currentProjectId }),
     ]);
     dataPlans.value = planResp.results.map((item) => ({ id: item.id, name: item.name }));
     environments.value = (envResp.results || envResp.data || envResp || []).map((item: any) => ({

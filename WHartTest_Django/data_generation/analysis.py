@@ -10,7 +10,7 @@ from api_environments.models import ApiEnvironmentVariable
 from testcases.models import TestCase, TestSuite
 from ui_automation.models import UiPublicData
 
-from .templates import get_builtin_templates
+from .templates import ENV_TEST, get_builtin_templates
 
 _VAR_PATTERN = re.compile(
     r'\$\{\{([^}]+)\}\}|\{\{([^}]+)\}\}|\$(\w+)',
@@ -80,7 +80,7 @@ def analyze_suite_variable_gaps(
     suggestions: List[Dict[str, Any]] = []
     if any(key in required for key in ('ticketId', 'work_order_id', 'ticketNo')):
         suggestions.append({
-            'template_key': 'create_ticket_type_a',
+            'template_key': 'biz_create_type_a',
             'reason': '套件用例引用了工单相关变量，建议使用「创建待分配工单 TYPE_A」模板',
         })
     if missing:
@@ -110,7 +110,7 @@ def generate_plan_from_description(
 
     if any(k in text for k in ('工单', 'ticket', '待分配')):
         template = next(
-            (t for t in get_builtin_templates() if t['template_key'] == 'create_ticket_type_a'),
+            (t for t in get_builtin_templates() if t['template_key'] == 'biz_create_type_a'),
             None,
         )
         if template:
@@ -118,10 +118,10 @@ def generate_plan_from_description(
                 'name': template['name'],
                 'description': text or template['description'],
                 'target_type': template['target_type'],
-                'default_environment': default_environment_id or 4,
+                'default_environment': default_environment_id or ENV_TEST,
                 'steps': json.loads(json.dumps(template['steps'])),
                 'cleanup_steps': template.get('cleanup_steps') or [],
-                'source': 'template:create_ticket_type_a',
+                'source': 'template:biz_create_type_a',
             }
 
     if any(k in lower for k in ('sql', '数据库', '清理', 'delete')):

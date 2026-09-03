@@ -58,7 +58,9 @@
 
       <a-space style="margin-bottom: 12px">
         <a-button size="small" @click="applyExample">填入示例</a-button>
-        <a-button size="small" :loading="generating" @click="handleAiGenerate">AI 生成骨架</a-button>
+        <a-button size="small" :loading="generating" :disabled="generating" @click="handleAiGenerate">
+          {{ generating ? 'AI 正在生成...' : 'AI 生成计划' }}
+        </a-button>
       </a-space>
 
       <a-tabs v-model:active-key="editorMode">
@@ -128,6 +130,8 @@ const formData = reactive({
   default_environment: undefined as number | undefined,
   is_active: true,
   is_template: false,
+  template_key: '' as string,
+  template_params_schema: {} as Record<string, unknown>,
   steps: [] as DataGenerationStep[],
   cleanup_steps: [] as DataGenerationStep[],
   steps_json: '[]',
@@ -145,6 +149,8 @@ function resetForm(plan?: DataGenerationPlan | null) {
   formData.default_environment = plan?.default_environment ?? undefined;
   formData.is_active = plan?.is_active ?? true;
   formData.is_template = plan?.is_template ?? false;
+  formData.template_key = plan?.template_key || '';
+  formData.template_params_schema = JSON.parse(JSON.stringify(plan?.template_params_schema || {}));
   formData.steps = JSON.parse(JSON.stringify(plan?.steps || []));
   formData.cleanup_steps = JSON.parse(JSON.stringify(plan?.cleanup_steps || []));
   formData.steps_json = JSON.stringify(plan?.steps || [], null, 2);
@@ -154,13 +160,15 @@ function resetForm(plan?: DataGenerationPlan | null) {
 async function loadEnvironments() {
   envLoading.value = true;
   try {
-    const resp = await getEnvironments({ project: props.projectId });
-    environments.value = (resp.results || resp.data || resp || []).map((item: any) => ({
+    const resp = await getEnvironments({ project_id: props.projectId });
+    const items = resp?.data?.results || resp?.results || [];
+    environments.value = items.map((item: any) => ({
       id: item.id,
       name: item.name,
     }));
-  } catch {
+  } catch (error: any) {
     environments.value = [];
+    Message.error(error?.error || error?.message || '加载 API 环境失败');
   } finally {
     envLoading.value = false;
   }
@@ -199,20 +207,24 @@ async function handleAiGenerate() {
       formData.description,
       formData.default_environment ?? null,
     );
-    const generated = resp.data || resp;
-    formData.name = generated.name || formData.name;
+    const generated = resp;
+    formData.name = formData.name.trim() || generated.name || '';
     formData.target_type = generated.target_type || formData.target_type;
     formData.steps = generated.steps || [];
     formData.cleanup_steps = generated.cleanup_steps || [];
+    formData.template_key = generated.template_key || '';
+    formData.template_params_schema = generated.template_params_schema || {};
     formData.steps_json = JSON.stringify(formData.steps, null, 2);
     formData.cleanup_steps_json = JSON.stringify(formData.cleanup_steps, null, 2);
     if (generated.hint) {
       Message.info(generated.hint);
+    } else if (generated.llm_used) {
+      Message.success('LLM 已生成造数计划');
     } else {
-      Message.success('已生成计划骨架');
+      Message.success('已生成造数计划');
     }
   } catch (error: any) {
-    Message.error(error.response?.data?.message || error.message || '生成失败');
+    Message.error(resolveApiError(error, '生成失败'));
   } finally {
     generating.value = false;
   }
@@ -227,6 +239,16 @@ function resolveStepsForSubmit() {
     return { steps, cleanup_steps: cleanupSteps };
   }
   return { steps: formData.steps, cleanup_steps: formData.cleanup_steps };
+}
+
+function resolveApiError(error: any, fallback: string) {
+  const response = error?.response?.data;
+  const errors = response?.errors;
+  if (errors && typeof errors === 'object') {
+    const first = Object.values(errors).flat()[0];
+    if (first) return String(first);
+  }
+  return response?.message || error?.message || fallback;
 }
 
 async function handleSubmit() {
@@ -248,6 +270,8 @@ async function handleSubmit() {
     default_environment: formData.default_environment ?? null,
     is_active: formData.is_active,
     is_template: formData.is_template,
+    template_key: formData.template_key || undefined,
+    template_params_schema: formData.template_params_schema,
     steps: parsed.steps,
     cleanup_steps: parsed.cleanup_steps,
   };
@@ -263,7 +287,7 @@ async function handleSubmit() {
     emit('saved');
     return true;
   } catch (error: any) {
-    Message.error(error.response?.data?.message || error.message || '保存失败');
+    Message.error(resolveApiError(error, '保存失败'));
     return false;
   }
 }

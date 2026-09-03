@@ -55,6 +55,14 @@ def auto_assign_admin_permissions(sender, instance, created, **kwargs):
             # 条件：从管理员降级；动作：清空直接权限；结果：保留组权限但移除管理员直授能力。
             instance.user_permissions.clear()
             logger.info(f"用户 {instance.username} 取消管理员，已移除所有直接权限（用户组权限保留）")
+    elif current_is_staff:
+        # 已有 staff 用户在新模块 migrate 后补齐缺失权限。
+        all_permissions = Permission.objects.all()
+        if instance.user_permissions.count() < all_permissions.count():
+            instance.user_permissions.set(all_permissions)
+            logger.info(
+                f"用户 {instance.username} 已补齐管理员权限至 {all_permissions.count()} 个"
+            )
     
     # 清理临时缓存字段，避免污染后续业务逻辑。
     if hasattr(instance, '_old_is_staff'):

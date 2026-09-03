@@ -3,6 +3,7 @@ import logging
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions, status
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
 from projects.models import Project
@@ -11,7 +12,9 @@ from wharttest_django.api_permissions import IsProjectMemberForResource
 from wharttest_django.permissions import HasModelPermission
 from wharttest_django.viewsets import BaseModelViewSet
 
-from .analysis import analyze_suite_variable_gaps, generate_plan_from_description
+from .analysis import analyze_suite_variable_gaps
+from .assignee_resolver import AssigneeResolutionError
+from .llm_plan_generator import generate_plan_from_description_with_llm
 from .models import DataGenerationPlan, DataGenerationRun
 from .serializers import (
     DataGenerationAnalyzeSuiteSerializer,
@@ -161,12 +164,19 @@ class DataGenerationPlanViewSet(BaseModelViewSet):
 
     @action(detail=False, methods=['post'])
     def generate(self, request, **kwargs):
+        project_pk = self.kwargs.get('project_pk')
         payload = DataGenerationGeneratePlanSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
-        generated = generate_plan_from_description(
-            payload.validated_data['description'],
-            default_environment_id=payload.validated_data.get('default_environment'),
-        )
+        try:
+            generated = generate_plan_from_description_with_llm(
+                payload.validated_data['description'],
+                project_id=project_pk,
+                default_environment_id=payload.validated_data.get('default_environment'),
+                suite_id=payload.validated_data.get('suite_id'),
+                use_llm=payload.validated_data.get('use_llm', True),
+            )
+        except AssigneeResolutionError as exc:
+            raise ValidationError({'description': [str(exc)]}) from exc
         return Response({'status': 'success', 'data': generated})
 
     @action(detail=False, methods=['post'])

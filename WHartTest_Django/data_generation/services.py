@@ -24,6 +24,7 @@ from ui_automation.models import UiPublicData
 
 from .exceptions import DataGenerationError
 from .models import DataGenerationPlan, DataGenerationRun
+from .templates import get_template_by_key
 from .sql_utils import execute_sql_step, extract_sql_result
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,21 @@ _DYNAMIC_GENERATORS = {
     'timestamp': lambda _ctx: str(int(timezone.now().timestamp())),
     'random_int': lambda ctx: str(int(time.time() * 1000) % 100000),
 }
+
+
+def apply_params_schema_defaults(
+    input_params: Optional[Dict[str, Any]],
+    params_schema: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """将 template params_schema 中的 default 合并进 input_params（用户传参优先）。"""
+    merged: Dict[str, Any] = {}
+    if isinstance(params_schema, dict):
+        for key, spec in params_schema.items():
+            if isinstance(spec, dict) and 'default' in spec:
+                merged[key] = spec['default']
+    if isinstance(input_params, dict):
+        merged.update(input_params)
+    return merged
 
 
 def substitute_templates(value: Any, context: Dict[str, Any]) -> Any:
@@ -110,6 +126,24 @@ def _extract_values(source: Any, mapping: Dict[str, str]) -> Dict[str, Any]:
     return extracted
 
 
+def _collect_force_refresh_token_vars(interface_data: Dict[str, Any]) -> List[str]:
+    """接口若使用 assigneeToken 等变量，强制重新登录以避免 TOKEN_SCOPE_STALE。"""
+    forced: List[str] = []
+    headers = interface_data.get('headers') or []
+    if isinstance(headers, list):
+        for item in headers:
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get('value') or '')
+            if 'assigneeToken' in value:
+                forced.append('assigneeToken')
+            elif 'adminToken' in value:
+                forced.append('adminToken')
+            elif 'accessToken' in value:
+                forced.append('accessToken')
+    return list(dict.fromkeys(forced))
+
+
 class PlanExecutor:
     """执行造数计划。"""
 
@@ -136,7 +170,14 @@ class PlanExecutor:
     ):
         self.plan = plan
         self.trigger_type = trigger_type
-        self.input_params = dict(input_params or {})
+        schema = plan.template_params_schema if isinstance(plan.template_params_schema, dict) else {}
+        if not schema and plan.template_key:
+            template = get_template_by_key(plan.template_key)
+            if template:
+                schema = template.get('params_schema') or {}
+        if not schema and plan.is_template:
+            schema = plan.template_params_schema if isinstance(plan.template_params_schema, dict) else {}
+        self.input_params = apply_params_schema_defaults(input_params, schema)
         self.triggered_by = triggered_by
         self.test_execution = test_execution
         self.parent_run = parent_run
@@ -297,13 +338,8 @@ class PlanExecutor:
             interface_data['verify'] = environment.verify_ssl
 
         runner = InterfaceRunner(interface_data)
-        runner.variables = dict(runner.variables or {})
+        runner.variables = {}
 
-        step_variables = substitute_templates(step.get('variables') or {}, self.context)
-        if isinstance(step_variables, dict):
-            runner.variables.update(step_variables)
-
-        env_config: Dict[str, Any] = {}
         if environment:
             from api_environments.token_refresh import refresh_environment_tokens
 
@@ -316,12 +352,24 @@ class PlanExecutor:
                 verify_ssl=environment.verify_ssl,
                 environment_id=environment.id,
                 persist=True,
+                force_token_vars=_collect_force_refresh_token_vars(interface_data),
             )
-            env_config['variables'] = refreshed_variables
             if isinstance(refreshed_variables, dict):
                 runner.variables.update(refreshed_variables)
 
-        runner.run_interface(env_config)
+        runner.variables.update(
+            {
+                k: v
+                for k, v in self.context.items()
+                if not isinstance(v, (dict, list))
+            }
+        )
+
+        step_variables = substitute_templates(step.get('variables') or {}, self.context)
+        if isinstance(step_variables, dict):
+            runner.variables.update(step_variables)
+
+        runner.run_interface({})
         response_data = runner.get_response()
 
         status_code = response_data.get('status_code') or 0

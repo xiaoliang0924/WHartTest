@@ -68,8 +68,10 @@ export const VARIABLE_TYPES: { label: string; value: VariableType }[] = [
 
 // --- Environments ---
 export async function getEnvironments(params: Record<string, any> = {}) {
-  const pid = params.project_id ? Number(params.project_id) : _pid();
+  const projectParam = params.project_id ?? params.project;
+  const pid = projectParam ? Number(projectParam) : _pid();
   delete params.project_id;
+  delete params.project;
   return _wrapList(await environmentService.list(pid, params));
 }
 

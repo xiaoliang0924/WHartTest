@@ -81,7 +81,7 @@ const stepTestTemplates = computed(() =>
 );
 
 const businessTemplates = computed(() =>
-  templates.value.filter((item) => !item.template_key.startsWith('test_step_')),
+  templates.value.filter((item) => item.template_key.startsWith('biz_')),
 );
 
 const DEFAULT_PARAMS_SCHEMA = {
@@ -118,7 +118,11 @@ function mergeTemplates(builtin: DataGenerationTemplate[], saved: DataGeneration
     items.filter((item) => (item.steps || []).length > 0);
 
   const builtinList = withSteps(builtin || []);
-  const savedList = withSteps((saved || []).map(mapSavedPlan));
+  const savedList = withSteps(
+    (saved || [])
+      .map(mapSavedPlan)
+      .filter((item) => item.template_key.startsWith('biz_') || item.template_key.startsWith('test_step_')),
+  );
 
   const builtinKeys = new Set(builtinList.map((item) => item.template_key));
   return [...builtinList, ...savedList.filter((item) => !builtinKeys.has(item.template_key))];
@@ -135,7 +139,7 @@ async function fetchTemplates() {
     const data = await getDataGenerationTemplates(currentProjectId.value);
     const merged = mergeTemplates(data.builtin || [], data.saved || []);
     const stepTests = sortTemplates(merged.filter((item) => item.template_key.startsWith('test_step_')));
-    const business = sortTemplates(merged.filter((item) => !item.template_key.startsWith('test_step_')));
+    const business = sortTemplates(merged.filter((item) => item.template_key.startsWith('biz_')));
     templates.value = [...stepTests, ...business];
     templates.value.forEach(ensureFormValues);
   } catch (error: any) {

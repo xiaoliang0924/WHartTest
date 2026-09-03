@@ -60,6 +60,18 @@ class DataGenerationPlanSerializer(serializers.ModelSerializer):
         steps = obj.cleanup_steps if isinstance(obj.cleanup_steps, list) else []
         return len(steps)
 
+    def validate_name(self, value):
+        project_id = self.context.get('project_id')
+        queryset = DataGenerationPlan.objects.filter(
+            project_id=project_id,
+            name=value,
+        )
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if project_id and queryset.exists():
+            raise serializers.ValidationError('当前项目已存在同名造数计划')
+        return value
+
     def validate_steps(self, value):
         return self._validate_step_list(value, field_name='steps')
 
@@ -105,7 +117,7 @@ class DataGenerationPlanSerializer(serializers.ModelSerializer):
         if value is None:
             return value
         project_id = self.context.get('project_id')
-        if project_id and value.project_id != project_id:
+        if project_id and str(value.project_id) != str(project_id):
             raise serializers.ValidationError('默认环境必须属于当前项目')
         return value
 
@@ -160,6 +172,8 @@ class DataGenerationRunRequestSerializer(serializers.Serializer):
 class DataGenerationGeneratePlanSerializer(serializers.Serializer):
     description = serializers.CharField(required=True, allow_blank=False, max_length=2000)
     default_environment = serializers.IntegerField(required=False, allow_null=True)
+    suite_id = serializers.IntegerField(required=False, allow_null=True)
+    use_llm = serializers.BooleanField(required=False, default=True)
 
 
 class DataGenerationAnalyzeSuiteSerializer(serializers.Serializer):
