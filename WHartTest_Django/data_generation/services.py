@@ -24,6 +24,7 @@ from ui_automation.models import UiPublicData
 
 from .exceptions import DataGenerationError
 from .models import DataGenerationPlan, DataGenerationRun
+from .template_resolver import resolve_template_steps
 from .templates import get_template_by_key
 from .sql_utils import execute_sql_step, extract_sql_result
 
@@ -172,7 +173,7 @@ class PlanExecutor:
         self.trigger_type = trigger_type
         schema = plan.template_params_schema if isinstance(plan.template_params_schema, dict) else {}
         if not schema and plan.template_key:
-            template = get_template_by_key(plan.template_key)
+            template = get_template_by_key(plan.template_key, project_id=plan.project_id)
             if template:
                 schema = template.get('params_schema') or {}
         if not schema and plan.is_template:
@@ -190,6 +191,13 @@ class PlanExecutor:
         if 'summary' not in self.context:
             self.context['summary'] = f"造数{int(timezone.now().timestamp()) % 100000}"[:20]
         self.step_logs: list[Dict[str, Any]] = []
+
+    def _snapshot_context(self) -> Dict[str, Any]:
+        return {
+            k: v
+            for k, v in self.context.items()
+            if not isinstance(v, (dict, list))
+        }
 
     def execute(self) -> DataGenerationRun:
         run = DataGenerationRun.objects.create(
@@ -257,9 +265,19 @@ class PlanExecutor:
 
     def _resolve_steps(self) -> List[Dict[str, Any]]:
         if self.steps_override is not None:
-            return self.steps_override
+            return resolve_template_steps(
+                self.steps_override,
+                project_id=self.plan.project_id,
+                plan_bindings=self.plan.template_bindings if isinstance(self.plan.template_bindings, dict) else None,
+                default_environment_id=self.default_environment_id,
+            )
         steps = self.plan.steps if isinstance(self.plan.steps, list) else []
-        return steps
+        return resolve_template_steps(
+            steps,
+            project_id=self.plan.project_id,
+            plan_bindings=self.plan.template_bindings if isinstance(self.plan.template_bindings, dict) else None,
+            default_environment_id=self.default_environment_id,
+        )
 
     def _execute_step(self, index: int, step: Dict[str, Any]) -> None:
         step_type = (step.get('type') or '').strip()
@@ -269,6 +287,7 @@ class PlanExecutor:
             'type': step_type,
             'name': step_name,
             'status': 'success',
+            'context_before': self._snapshot_context(),
         }
 
         if step_type not in self.SUPPORTED_STEP_TYPES:
@@ -293,16 +312,20 @@ class PlanExecutor:
             elif step_type == 'delay':
                 result = self._run_delay(step)
                 log_entry.update(result)
-        except DataGenerationError:
+        except DataGenerationError as exc:
             log_entry['status'] = 'failed'
+            log_entry['error'] = str(exc)
+            log_entry['context_after'] = self._snapshot_context()
             self.step_logs.append(log_entry)
             raise
         except Exception as exc:
             log_entry['status'] = 'failed'
             log_entry['error'] = str(exc)
+            log_entry['context_after'] = self._snapshot_context()
             self.step_logs.append(log_entry)
             raise DataGenerationError(f'{step_name} 执行失败: {exc}') from exc
 
+        log_entry['context_after'] = self._snapshot_context()
         self.step_logs.append(log_entry)
 
     def _resolve_environment(self, step: Dict[str, Any]) -> Optional[ApiEnvironment]:

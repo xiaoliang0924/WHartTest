@@ -44,6 +44,12 @@ class DataGenerationPlan(models.Model):
     template_key = models.CharField(_('模板标识'), max_length=100, blank=True, default='')
     template_icon = models.CharField(_('模板图标'), max_length=50, blank=True, default='')
     template_params_schema = models.JSONField(_('模板参数定义'), default=dict, blank=True)
+    template_bindings = models.JSONField(
+        _('模板资源绑定'),
+        default=dict,
+        blank=True,
+        help_text=_('按项目解析 interface_ref / environment_ref，如 interfaces.create_ticket=445'),
+    )
     default_environment = models.ForeignKey(
         'api_environments.ApiEnvironment',
         on_delete=models.SET_NULL,

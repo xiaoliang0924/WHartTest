@@ -4,23 +4,24 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-# 智慧AI工单系统 — 测试环境接口 ID（project_id=1）
-ENV_TEST = 4
-IFACE_CREATE_TICKET = 445
-IFACE_ASSIGN_TICKET = 484
-IFACE_TRANSFER_TICKET = 491
-IFACE_CLAIM_TICKET = 490
-IFACE_RESOLVE_TICKET = 520
-IFACE_UPDATE_SUBJECT = 479
-IFACE_TICKET_DETAIL = 509
+# 逻辑引用名（interface_ref / environment_ref），运行时由 template_resolver 按项目解析为实际 ID。
+# 项目 1 工单系统的默认绑定见 scripts/setup_business_templates.py 中的 TEMPLATE_BINDINGS。
+ENV_REF_DEFAULT = 'default'
+REF_CREATE_TICKET = 'create_ticket'
+REF_ASSIGN_TICKET = 'assign_ticket'
+REF_TRANSFER_TICKET = 'transfer_ticket'
+REF_CLAIM_TICKET = 'claim_ticket'
+REF_RESOLVE_TICKET = 'resolve_ticket'
+REF_UPDATE_SUBJECT = 'update_subject'
+REF_TICKET_DETAIL = 'ticket_detail'
 
 
 def _create_ticket_step() -> Dict[str, Any]:
     return {
         'type': 'api_call',
         'name': '创建工单',
-        'interface_id': IFACE_CREATE_TICKET,
-        'environment_id': ENV_TEST,
+        'interface_ref': REF_CREATE_TICKET,
+        'environment_ref': ENV_REF_DEFAULT,
         'variables': {
             'summary': '{{summary}}',
             'ticketType': '{{ticketType}}',
@@ -40,7 +41,7 @@ def _write_env_vars_step(**extra: str) -> Dict[str, Any]:
     return {
         'type': 'set_env_var',
         'name': '写入环境变量',
-        'environment_id': ENV_TEST,
+        'environment_ref': ENV_REF_DEFAULT,
         'variables': variables,
     }
 
@@ -115,8 +116,8 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'api_call',
                 'name': '分配工单',
-                'interface_id': IFACE_ASSIGN_TICKET,
-                'environment_id': ENV_TEST,
+                'interface_ref': REF_ASSIGN_TICKET,
+                'environment_ref': ENV_REF_DEFAULT,
                 'variables': {
                     'assigneeUserId': '{{assigneeUserId}}',
                     'assigneeName': '{{assigneeName}}',
@@ -161,8 +162,8 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'api_call',
                 'name': '分配给当前处理人',
-                'interface_id': IFACE_ASSIGN_TICKET,
-                'environment_id': ENV_TEST,
+                'interface_ref': REF_ASSIGN_TICKET,
+                'environment_ref': ENV_REF_DEFAULT,
                 'variables': {
                     'assigneeUserId': '{{sourceAssigneeUserId}}',
                     'assigneeName': '{{sourceAssigneeName}}',
@@ -173,15 +174,15 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'api_call',
                 'name': '当前处理人领取工单',
-                'interface_id': IFACE_CLAIM_TICKET,
-                'environment_id': ENV_TEST,
+                'interface_ref': REF_CLAIM_TICKET,
+                'environment_ref': ENV_REF_DEFAULT,
                 'variables': {},
             },
             {
                 'type': 'api_call',
                 'name': '转派工单',
-                'interface_id': IFACE_TRANSFER_TICKET,
-                'environment_id': ENV_TEST,
+                'interface_ref': REF_TRANSFER_TICKET,
+                'environment_ref': ENV_REF_DEFAULT,
                 'variables': {
                     'targetUserId': '{{assigneeUserId}}',
                     'targetRole': '{{assigneeRole}}',
@@ -212,8 +213,8 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'api_call',
                 'name': '分配工单',
-                'interface_id': IFACE_ASSIGN_TICKET,
-                'environment_id': ENV_TEST,
+                'interface_ref': REF_ASSIGN_TICKET,
+                'environment_ref': ENV_REF_DEFAULT,
                 'variables': {
                     'assigneeUserId': '{{assigneeUserId}}',
                     'assigneeName': '{{assigneeName}}',
@@ -224,8 +225,8 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'api_call',
                 'name': '领取工单',
-                'interface_id': IFACE_CLAIM_TICKET,
-                'environment_id': ENV_TEST,
+                'interface_ref': REF_CLAIM_TICKET,
+                'environment_ref': ENV_REF_DEFAULT,
                 'variables': {},
             },
             _write_env_vars_step(ticketStatus='claimed'),
@@ -252,8 +253,8 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'api_call',
                 'name': '分配工单',
-                'interface_id': IFACE_ASSIGN_TICKET,
-                'environment_id': ENV_TEST,
+                'interface_ref': REF_ASSIGN_TICKET,
+                'environment_ref': ENV_REF_DEFAULT,
                 'variables': {
                     'assigneeUserId': '{{assigneeUserId}}',
                     'assigneeName': '{{assigneeName}}',
@@ -264,15 +265,15 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'api_call',
                 'name': '领取工单',
-                'interface_id': IFACE_CLAIM_TICKET,
-                'environment_id': ENV_TEST,
+                'interface_ref': REF_CLAIM_TICKET,
+                'environment_ref': ENV_REF_DEFAULT,
                 'variables': {},
             },
             {
                 'type': 'api_call',
                 'name': '完成工单',
-                'interface_id': IFACE_RESOLVE_TICKET,
-                'environment_id': ENV_TEST,
+                'interface_ref': REF_RESOLVE_TICKET,
+                'environment_ref': ENV_REF_DEFAULT,
                 'variables': {},
             },
             _write_env_vars_step(ticketStatus='resolved'),
@@ -296,8 +297,8 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'api_call',
                 'name': '修改工单主题',
-                'interface_id': IFACE_UPDATE_SUBJECT,
-                'environment_id': ENV_TEST,
+                'interface_ref': REF_UPDATE_SUBJECT,
+                'environment_ref': ENV_REF_DEFAULT,
                 'variables': {'subject': '{{subject}}'},
             },
             _write_env_vars_step(updatedSubject='{{subject}}'),
@@ -343,8 +344,8 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'api_call',
                 'name': '查询工单详情',
-                'interface_id': IFACE_TICKET_DETAIL,
-                'environment_id': ENV_TEST,
+                'interface_ref': REF_TICKET_DETAIL,
+                'environment_ref': ENV_REF_DEFAULT,
                 'variables': {},
                 'extract': {'ticketStatus': 'status'},
             },
@@ -382,7 +383,7 @@ BUILTIN_STEP_TEST_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'set_env_var',
                 'name': '写入测试环境变量',
-                'environment_id': ENV_TEST,
+                'environment_ref': ENV_REF_DEFAULT,
                 'variables': {
                     'dg_test_env_var': '{{marker}}',
                     'dg_test_uuid': '{{uuid}}',
@@ -424,7 +425,7 @@ BUILTIN_STEP_TEST_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'sql',
                 'name': 'SQL 连通性探测',
-                'database_config_id': 1,
+                'database_config_ref': 'default',
                 'sql': 'SELECT 1 AS dg_ok',
                 'method': 'fetchone',
                 'extract': {'dg_sql_ok': 'dg_ok'},
@@ -446,7 +447,7 @@ BUILTIN_STEP_TEST_TEMPLATES: List[Dict[str, Any]] = [
             {
                 'type': 'custom_function',
                 'name': '执行 echo 测试函数',
-                'function_id': 12,
+                'function_ref': 'default',
                 'args': {'message': '{{message}}'},
                 'output_var': 'dg_func_result',
             },
@@ -513,11 +514,26 @@ def get_builtin_templates() -> List[Dict[str, Any]]:
     return BUILTIN_TEMPLATES
 
 
-def get_template_by_key(template_key: str) -> Dict[str, Any] | None:
+def get_template_by_key(
+    template_key: str,
+    *,
+    project_id: int | None = None,
+    default_environment_id: int | None = None,
+    plan_bindings: Dict[str, Any] | None = None,
+) -> Dict[str, Any] | None:
     mapped_key = LEGACY_TEMPLATE_KEYS.get(template_key, template_key)
     for item in BUILTIN_TEMPLATES:
         if item.get('template_key') == mapped_key:
             result = dict(item)
             result['template_key'] = template_key
+            if project_id is not None:
+                from .template_resolver import resolve_template_definition
+
+                return resolve_template_definition(
+                    result,
+                    project_id=project_id,
+                    plan_bindings=plan_bindings,
+                    default_environment_id=default_environment_id,
+                )
             return result
     return None

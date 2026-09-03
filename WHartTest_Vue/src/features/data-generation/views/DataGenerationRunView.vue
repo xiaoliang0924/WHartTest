@@ -85,13 +85,39 @@
           type="error"
           :title="selectedRun.error_message"
           style="margin-top: 12px"
-        />
+        >
+          <template v-if="selectedRun.failed_step_index">
+            失败步骤：第 {{ selectedRun.failed_step_index }} 步
+          </template>
+        </a-alert>
 
-        <a-divider orientation="left">输出快照</a-divider>
+        <a-divider orientation="left">步骤执行</a-divider>
+        <a-table
+          :columns="stepLogColumns"
+          :data="selectedRun.step_logs || []"
+          :pagination="false"
+          row-key="index"
+          size="small"
+          :row-class="stepRowClass"
+        >
+          <template #status="{ record }">
+            <a-tag :color="record.status === 'failed' ? 'red' : 'green'">
+              {{ record.status === 'failed' ? '失败' : '成功' }}
+            </a-tag>
+          </template>
+          <template #detail="{ record }">
+            <div v-if="record.error" class="step-error">{{ record.error }}</div>
+            <div v-if="record.extracted && Object.keys(record.extracted).length" class="step-detail">
+              提取：{{ formatInlineJson(record.extracted) }}
+            </div>
+            <div v-if="record.context_after && Object.keys(record.context_after).length" class="step-detail">
+              变量：{{ formatInlineJson(record.context_after) }}
+            </div>
+          </template>
+        </a-table>
+
+        <a-divider orientation="left">最终输出快照</a-divider>
         <pre class="json-block">{{ formatJson(selectedRun.output_snapshot) }}</pre>
-
-        <a-divider orientation="left">步骤日志</a-divider>
-        <pre class="json-block">{{ formatJson(selectedRun.step_logs) }}</pre>
 
         <template v-if="selectedRun.cleanup_logs?.length || selectedRun.cleanup_status">
           <a-divider orientation="left">清理日志</a-divider>
@@ -122,6 +148,7 @@ import {
   getDataGenerationRuns,
   rerunDataGenerationRun,
   type DataGenerationRun,
+  type DataGenerationStepLog,
 } from '@/features/data-generation/services/dataGenerationService';
 
 const projectStore = useProjectStore();
@@ -144,6 +171,14 @@ const columns = [
   { title: '触发人', dataIndex: 'triggered_by_name', width: 120 },
   { title: '开始时间', slotName: 'started_at', width: 180 },
   { title: '操作', slotName: 'operations', width: 200 },
+];
+
+const stepLogColumns = [
+  { title: '#', dataIndex: 'index', width: 56 },
+  { title: '步骤', dataIndex: 'name' },
+  { title: '类型', dataIndex: 'type', width: 120 },
+  { title: '状态', slotName: 'status', width: 90 },
+  { title: '结果 / 变量', slotName: 'detail' },
 ];
 
 function statusColor(status: string) {
@@ -169,6 +204,20 @@ function formatJson(value: unknown) {
   } catch {
     return String(value ?? '');
   }
+}
+
+function formatInlineJson(value: unknown) {
+  try {
+    return JSON.stringify(value ?? {});
+  } catch {
+    return String(value ?? '');
+  }
+}
+
+function stepRowClass(record: DataGenerationStepLog) {
+  if (record.status === 'failed') return 'step-row-failed';
+  if (selectedRun.value?.failed_step_index === record.index) return 'step-row-failed';
+  return '';
 }
 
 async function fetchRuns() {
@@ -289,6 +338,18 @@ watch(currentProjectId, () => {
   max-height: 260px;
   overflow: auto;
   font-size: 12px;
+}
+.step-error {
+  color: rgb(var(--red-6));
+  margin-bottom: 4px;
+}
+.step-detail {
+  color: var(--color-text-2);
+  font-size: 12px;
+  word-break: break-all;
+}
+:deep(.step-row-failed td) {
+  background: rgba(var(--red-1), 0.45);
 }
 .no-project-selected {
   padding: 48px 0;

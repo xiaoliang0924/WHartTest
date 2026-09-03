@@ -31,6 +31,37 @@ class LlmJsonParseTests(TestCase):
 
 
 class TemplateExpandTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(username='template_expand_user', password='pass')
+        self.project = Project.objects.create(name='Template Expand Project', creator=self.user)
+        self.environment = ApiEnvironment.objects.create(
+            name='template-expand-env',
+            base_url='http://example.com',
+            project=self.project,
+            created_by=self.user,
+        )
+        from api_interfaces.models import ApiInterface
+
+        self.interface = ApiInterface.objects.create(
+            name='创建工单',
+            project=self.project,
+            created_by=self.user,
+            type=ApiInterface.TYPE_HTTP,
+        )
+        self.template_bindings = {
+            'default_environment_id': self.environment.id,
+            'interfaces': {
+                'create_ticket': self.interface.id,
+                'assign_ticket': self.interface.id,
+                'transfer_ticket': self.interface.id,
+                'claim_ticket': self.interface.id,
+                'resolve_ticket': self.interface.id,
+                'update_subject': self.interface.id,
+                'ticket_detail': self.interface.id,
+            },
+        }
+
     def test_expand_template_plan(self):
         plan = _expand_template_plan(
             {
@@ -38,9 +69,11 @@ class TemplateExpandTests(TestCase):
                 'input_params': {'summary': '测试工单'},
             },
             description='创建工单',
-            default_environment_id=4,
+            default_environment_id=self.environment.id,
+            project_id=self.project.id,
         )
         self.assertEqual(plan['source'], 'llm:template:biz_create_type_a')
+        self.assertEqual(plan.get('generation_method'), 'llm')
         self.assertTrue(plan['steps'])
         self.assertEqual(plan['suggested_input_params']['summary'], '测试工单')
         self.assertEqual(
@@ -124,6 +157,18 @@ class TemplateExpandTests(TestCase):
             'biz_create_type_a',
         )
 
+    def test_rule_match_generation_method(self):
+        from data_generation.llm_plan_generator import _build_plan_from_rule_match
+
+        plan = _build_plan_from_rule_match(
+            '仅创建 TYPE_A 工单，不要分配',
+            project_id=self.project.id,
+            default_environment_id=self.environment.id,
+        )
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan['generation_method'], 'rule_match')
+        self.assertEqual(plan['generation_summary']['generation_method'], 'rule_match')
+
     def test_normalize_custom_step_body_to_variables(self):
         steps = normalize_custom_steps([{
             'type': 'api_call',
@@ -196,9 +241,10 @@ class LlmGenerateIntegrationTests(TestCase):
             created_by=self.user,
         )
 
+    @patch('data_generation.llm_plan_generator._try_rule_match_plan', return_value=None)
     @patch('data_generation.llm_plan_generator.resolve_assignee_params')
     @patch('data_generation.llm_plan_generator._invoke_llm_for_plan')
-    def test_llm_template_mode(self, mock_invoke, mock_resolve):
+    def test_llm_template_mode(self, mock_invoke, mock_resolve, _mock_rule):
         mock_invoke.return_value = {
             'generation_mode': 'template',
             'template_key': 'biz_create_and_assign',
@@ -218,6 +264,7 @@ class LlmGenerateIntegrationTests(TestCase):
             use_llm=True,
         )
         self.assertTrue(plan.get('llm_used'))
+        self.assertEqual(plan.get('generation_method'), 'llm')
         self.assertEqual(plan['source'], 'llm:template:biz_create_and_assign')
         self.assertGreater(len(plan['steps']), 1)
         self.assertEqual(
@@ -225,8 +272,9 @@ class LlmGenerateIntegrationTests(TestCase):
             51,
         )
 
+    @patch('data_generation.llm_plan_generator._try_rule_match_plan', return_value=None)
     @patch('data_generation.llm_plan_generator._get_active_llm')
-    def test_fallback_when_no_llm_config(self, mock_get_llm):
+    def test_fallback_when_no_llm_config(self, mock_get_llm, _mock_rule):
         mock_get_llm.return_value = (None, None)
         plan = generate_plan_from_description_with_llm(
             '创建工单 ticket',
@@ -235,9 +283,11 @@ class LlmGenerateIntegrationTests(TestCase):
             use_llm=True,
         )
         self.assertFalse(plan.get('llm_used'))
+        self.assertEqual(plan.get('generation_method'), 'fallback')
         self.assertTrue(
             'rules:fallback' in plan.get('source', '')
             or plan.get('source', '').startswith('template:')
+            or plan.get('source', '').startswith('rule:')
         )
 
     def test_rules_when_use_llm_false(self):

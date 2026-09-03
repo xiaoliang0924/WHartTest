@@ -6,13 +6,15 @@ import json
 import logging
 import re
 from copy import deepcopy
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .analysis import generate_plan_from_description
 from .assignee_resolver import AssigneeResolutionError, resolve_assignee_params
-from .intent_router import route_llm_payload
+from .exceptions import DataGenerationError
+from .intent_router import infer_business_template_key, route_llm_payload
 from .llm_context import build_llm_generation_context
 from .serializers import DataGenerationPlanSerializer
+from .template_resolver import resolve_template_steps
 from .templates import get_template_by_key
 
 logger = logging.getLogger(__name__)
@@ -111,15 +113,27 @@ def _build_generation_summary(
     plan: Dict[str, Any],
     *,
     input_params: Optional[Dict[str, Any]] = None,
+    generation_method: Optional[str] = None,
 ) -> Dict[str, Any]:
     source = str(plan.get('source') or '')
     template_key = plan.get('template_key')
-    mode = 'template' if template_key or source.startswith('llm:template:') else 'custom'
-    if mode == 'template' and not template_key and source.startswith('llm:template:'):
-        template_key = source.split(':', 2)[-1]
+    mode = 'template' if template_key or source.startswith('llm:template:') or source.startswith('rule:template:') else 'custom'
+    if mode == 'template' and not template_key:
+        if source.startswith('llm:template:') or source.startswith('rule:template:'):
+            template_key = source.split(':', 2)[-1]
+
+    method = generation_method or plan.get('generation_method')
+    if not method:
+        if plan.get('llm_used'):
+            method = 'llm'
+        elif 'fallback' in source:
+            method = 'fallback'
+        else:
+            method = 'rule_match'
 
     summary: Dict[str, Any] = {
         'mode': mode,
+        'generation_method': method,
         'template_key': template_key,
         'template_name': plan.get('name') if mode == 'template' else None,
         'step_count': len(plan.get('steps') or []),
@@ -132,17 +146,79 @@ def _build_generation_summary(
     return summary
 
 
+def _resolve_plan_steps_for_project(
+    plan: Dict[str, Any],
+    *,
+    project_id: int,
+    default_environment_id: Optional[int],
+) -> Dict[str, Any]:
+    bindings = plan.get('template_bindings')
+    plan_bindings = bindings if isinstance(bindings, dict) else None
+
+    def _safe_resolve(steps: Optional[List[Any]]) -> List[Any]:
+        if not isinstance(steps, list) or not steps:
+            return steps or []
+        try:
+            return resolve_template_steps(
+                steps,
+                project_id=project_id,
+                plan_bindings=plan_bindings,
+                default_environment_id=default_environment_id,
+            )
+        except DataGenerationError as exc:
+            logger.info('Skip step resolution for project=%s: %s', project_id, exc)
+            return steps
+
+    if plan.get('steps'):
+        plan['steps'] = _safe_resolve(plan.get('steps'))
+    if plan.get('cleanup_steps'):
+        plan['cleanup_steps'] = _safe_resolve(plan.get('cleanup_steps'))
+    return plan
+
+
+def _finalize_generated_plan(
+    plan: Dict[str, Any],
+    *,
+    generation_method: str,
+    llm_used: bool,
+    input_params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    plan['generation_method'] = generation_method
+    plan['llm_used'] = llm_used
+    plan['generation_summary'] = _build_generation_summary(
+        plan,
+        input_params=input_params,
+        generation_method=generation_method,
+    )
+    return plan
+
+
 def _expand_template_plan(
     llm_payload: Dict[str, Any],
     *,
     description: str,
     default_environment_id: Optional[int],
+    project_id: Optional[int] = None,
+    source: Optional[str] = None,
+    generation_method: str = 'llm',
+    hint: Optional[str] = None,
 ) -> Dict[str, Any]:
     template_key = llm_payload.get('template_key')
     if not template_key:
         raise ValueError('template 模式缺少 template_key')
 
-    template = get_template_by_key(str(template_key))
+    template = None
+    if project_id is not None:
+        try:
+            template = get_template_by_key(
+                str(template_key),
+                project_id=project_id,
+                default_environment_id=default_environment_id,
+            )
+        except DataGenerationError as exc:
+            logger.info('Template resolve fallback without project binding: %s', exc)
+    if template is None:
+        template = get_template_by_key(str(template_key))
     if template is None:
         raise ValueError(f'未知模板: {template_key}')
 
@@ -155,7 +231,14 @@ def _expand_template_plan(
         if key in params_schema and isinstance(params_schema[key], dict):
             params_schema[key]['default'] = value
 
-    return {
+    resolved_source = source or f'llm:template:{template_key}'
+    method_hint = {
+        'rule_match': '规则匹配模板',
+        'llm': 'AI 匹配模板',
+        'fallback': '规则回退模板',
+    }.get(generation_method, '匹配模板')
+
+    plan = {
         'name': llm_payload.get('name') or template.get('name') or '造数计划',
         'description': llm_payload.get('description') or description or template.get('description', ''),
         'target_type': llm_payload.get('target_type') or template.get('target_type') or 'both',
@@ -165,18 +248,15 @@ def _expand_template_plan(
         'template_key': template.get('template_key') or template_key,
         'template_params_schema': params_schema,
         'suggested_input_params': input_params,
-        'source': f'llm:template:{template_key}',
-        'hint': f'已匹配模板「{template.get("name")}」，AI 参数已保存为试跑默认值',
-        'generation_summary': _build_generation_summary(
-            {
-                'source': f'llm:template:{template_key}',
-                'template_key': template.get('template_key') or template_key,
-                'name': template.get('name'),
-                'steps': template.get('steps') or [],
-            },
-            input_params=input_params,
-        ),
+        'source': resolved_source,
+        'hint': hint or f'{method_hint}「{template.get("name")}」，参数已保存为试跑默认值',
     }
+    return _finalize_generated_plan(
+        plan,
+        generation_method=generation_method,
+        llm_used=generation_method == 'llm',
+        input_params=input_params,
+    )
 
 
 def _expand_custom_plan(
@@ -184,6 +264,8 @@ def _expand_custom_plan(
     *,
     description: str,
     default_environment_id: Optional[int],
+    project_id: Optional[int] = None,
+    generation_method: str = 'llm',
 ) -> Dict[str, Any]:
     plan = {
         'name': llm_payload.get('name') or 'LLM 造数计划',
@@ -192,11 +274,95 @@ def _expand_custom_plan(
         'default_environment': default_environment_id,
         'steps': deepcopy(llm_payload.get('steps') or []),
         'cleanup_steps': deepcopy(llm_payload.get('cleanup_steps') or []),
-        'source': 'llm:custom',
+        'source': 'llm:custom' if generation_method == 'llm' else f'{generation_method}:custom',
         'hint': llm_payload.get('hint') or '已生成自定义步骤，请确认 interface_id 与环境 ID 后试跑',
     }
-    plan['generation_summary'] = _build_generation_summary(plan)
-    return plan
+    if project_id is not None:
+        plan = _resolve_plan_steps_for_project(
+            plan,
+            project_id=project_id,
+            default_environment_id=default_environment_id,
+        )
+    return _finalize_generated_plan(
+        plan,
+        generation_method=generation_method,
+        llm_used=generation_method == 'llm',
+    )
+
+
+def _apply_assignee_resolution(
+    llm_payload: Dict[str, Any],
+    *,
+    project_id: int,
+    default_environment_id: Optional[int],
+) -> Dict[str, Any]:
+    template_key = str(llm_payload.get('template_key') or '')
+    input_params = llm_payload.get('input_params') or {}
+    if (
+        template_key in _ASSIGNMENT_TEMPLATE_KEYS
+        and str(input_params.get('assigneeName') or '').strip()
+    ):
+        resolved_params = resolve_assignee_params(
+            input_params,
+            project_id=project_id,
+            environment_id=default_environment_id,
+        )
+        updated = dict(llm_payload)
+        updated['input_params'] = resolved_params
+        return updated
+    return llm_payload
+
+
+def _try_rule_match_plan(
+    description: str,
+    *,
+    project_id: int,
+    default_environment_id: Optional[int],
+    generation_method: str = 'rule_match',
+) -> Optional[Dict[str, Any]]:
+    try:
+        return _build_plan_from_rule_match(
+            description,
+            project_id=project_id,
+            default_environment_id=default_environment_id,
+            generation_method=generation_method,
+        )
+    except DataGenerationError as exc:
+        logger.info('Rule match skipped (project=%s): %s', project_id, exc)
+        return None
+
+
+def _build_plan_from_rule_match(
+    description: str,
+    *,
+    project_id: int,
+    default_environment_id: Optional[int],
+    generation_method: str = 'rule_match',
+) -> Optional[Dict[str, Any]]:
+    template_key = infer_business_template_key(description)
+    if not template_key:
+        return None
+
+    payload = route_llm_payload(
+        description,
+        {
+            'generation_mode': 'template',
+            'template_key': template_key,
+        },
+    )
+    payload = _apply_assignee_resolution(
+        payload,
+        project_id=project_id,
+        default_environment_id=default_environment_id,
+    )
+    return _expand_template_plan(
+        payload,
+        description=description,
+        default_environment_id=default_environment_id,
+        project_id=project_id,
+        source=f'rule:template:{template_key}',
+        generation_method=generation_method,
+    )
 
 
 def _invoke_llm_for_plan(
@@ -258,13 +424,36 @@ def generate_plan_from_description_with_llm(
             )
 
     if not use_llm:
-        plan = generate_plan_from_description(
+        plan = _try_rule_match_plan(
             text,
+            project_id=project_id,
             default_environment_id=default_environment_id,
         )
+        if plan is None:
+            plan = generate_plan_from_description(
+                text,
+                default_environment_id=default_environment_id,
+            )
+            plan = _resolve_plan_steps_for_project(
+                plan,
+                project_id=project_id,
+                default_environment_id=default_environment_id,
+            )
+            plan = _finalize_generated_plan(
+                plan,
+                generation_method='rule_match',
+                llm_used=False,
+            )
         plan['source'] = plan.get('source') or 'rules'
-        plan['llm_used'] = False
         return plan
+
+    rule_plan = _try_rule_match_plan(
+        text,
+        project_id=project_id,
+        default_environment_id=default_environment_id,
+    )
+    if rule_plan is not None:
+        return rule_plan
 
     context = build_llm_generation_context(
         project_id,
@@ -281,35 +470,30 @@ def generate_plan_from_description_with_llm(
                 retry_hint=last_error if attempt else None,
             )
             llm_payload = route_llm_payload(text, llm_payload)
+            llm_payload = _apply_assignee_resolution(
+                llm_payload,
+                project_id=project_id,
+                default_environment_id=default_environment_id,
+            )
             mode = (llm_payload.get('generation_mode') or 'template').strip().lower()
             if mode == 'template':
-                template_key = str(llm_payload.get('template_key') or '')
-                input_params = llm_payload.get('input_params') or {}
-                if (
-                    template_key in _ASSIGNMENT_TEMPLATE_KEYS
-                    and str(input_params.get('assigneeName') or '').strip()
-                ):
-                    resolved_params = resolve_assignee_params(
-                        input_params,
-                        project_id=project_id,
-                        environment_id=default_environment_id,
-                    )
-                    llm_payload = dict(llm_payload)
-                    llm_payload['input_params'] = resolved_params
                 plan = _expand_template_plan(
                     llm_payload,
                     description=text,
                     default_environment_id=default_environment_id,
+                    project_id=project_id,
+                    generation_method='llm',
                 )
             else:
                 plan = _expand_custom_plan(
                     llm_payload,
                     description=text,
                     default_environment_id=default_environment_id,
+                    project_id=project_id,
+                    generation_method='llm',
                 )
                 _validate_plan_dict(plan, project_id)
 
-            plan['llm_used'] = True
             return plan
         except AssigneeResolutionError:
             raise
@@ -323,14 +507,32 @@ def generate_plan_from_description_with_llm(
             )
 
     logger.info('LLM plan generation failed, fallback to rules: %s', last_error)
-    plan = generate_plan_from_description(
+    plan = _try_rule_match_plan(
         text,
+        project_id=project_id,
         default_environment_id=default_environment_id,
+        generation_method='fallback',
     )
+    if plan is None:
+        plan = generate_plan_from_description(
+            text,
+            default_environment_id=default_environment_id,
+        )
+        plan = _resolve_plan_steps_for_project(
+            plan,
+            project_id=project_id,
+            default_environment_id=default_environment_id,
+        )
+        plan = _finalize_generated_plan(
+            plan,
+            generation_method='fallback',
+            llm_used=False,
+        )
     plan['source'] = plan.get('source') or 'rules:fallback'
-    plan['llm_used'] = False
     plan['hint'] = (
         f'LLM 生成失败（{last_error[:120]}），已回退为规则模板。'
         + (f' {plan["hint"]}' if plan.get('hint') else '')
     )
+    if plan.get('generation_summary'):
+        plan['generation_summary']['generation_method'] = 'fallback'
     return plan

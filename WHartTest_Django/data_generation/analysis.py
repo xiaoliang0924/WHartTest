@@ -10,7 +10,7 @@ from api_environments.models import ApiEnvironmentVariable
 from testcases.models import TestCase, TestSuite
 from ui_automation.models import UiPublicData
 
-from .templates import ENV_TEST, get_builtin_templates
+from .templates import get_builtin_templates
 
 _VAR_PATTERN = re.compile(
     r'\$\{\{([^}]+)\}\}|\{\{([^}]+)\}\}|\$(\w+)',
@@ -118,7 +118,7 @@ def generate_plan_from_description(
                 'name': template['name'],
                 'description': text or template['description'],
                 'target_type': template['target_type'],
-                'default_environment': default_environment_id or ENV_TEST,
+                'default_environment': default_environment_id,
                 'steps': json.loads(json.dumps(template['steps'])),
                 'cleanup_steps': template.get('cleanup_steps') or [],
                 'source': 'template:biz_create_type_a',

@@ -16,9 +16,29 @@ from data_generation.templates import (
     BUILTIN_STEP_TEST_TEMPLATES,
     LEGACY_TEMPLATE_KEYS,
 )
+from data_generation.template_resolver import resolve_template_steps
 
 PROJECT_ID = 1
 ENV_TEST = 4
+
+TEMPLATE_BINDINGS = {
+    'default_environment_id': ENV_TEST,
+    'interfaces': {
+        'create_ticket': 445,
+        'assign_ticket': 484,
+        'transfer_ticket': 491,
+        'claim_ticket': 490,
+        'resolve_ticket': 520,
+        'update_subject': 479,
+        'ticket_detail': 509,
+    },
+    'database_configs': {
+        'default': 1,
+    },
+    'functions': {
+        'default': 12,
+    },
+}
 
 # 旧版自动创建的模板计划，与内置 biz_* 重复，停用以免快速造数列表混乱
 LEGACY_TEMPLATE_PLAN_KEYS = set(LEGACY_TEMPLATE_KEYS.keys()) | {
@@ -193,8 +213,19 @@ def _sync_template_plans(templates, label: str) -> None:
         plan.name = template["name"]
         plan.description = template.get("description", "")
         plan.target_type = template.get("target_type", "both")
-        plan.steps = template.get("steps") or []
-        plan.cleanup_steps = template.get("cleanup_steps") or []
+        plan.template_bindings = TEMPLATE_BINDINGS
+        plan.steps = resolve_template_steps(
+            template.get("steps") or [],
+            project_id=PROJECT_ID,
+            plan_bindings=TEMPLATE_BINDINGS,
+            default_environment_id=ENV_TEST,
+        )
+        plan.cleanup_steps = resolve_template_steps(
+            template.get("cleanup_steps") or [],
+            project_id=PROJECT_ID,
+            plan_bindings=TEMPLATE_BINDINGS,
+            default_environment_id=ENV_TEST,
+        )
         plan.default_environment_id = ENV_TEST
         plan.template_icon = template.get("icon", "")
         plan.template_params_schema = template.get("params_schema") or {}

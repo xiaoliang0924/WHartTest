@@ -130,7 +130,11 @@ class DataGenerationPlanViewSet(BaseModelViewSet):
 
         template = None
         if plan is None:
-            template = get_template_by_key(template_key)
+            template = get_template_by_key(
+                template_key,
+                project_id=project_pk,
+                default_environment_id=default_environment_id,
+            )
             if template is None:
                 return Response(
                     {'status': 'error', 'message': f'模板不存在: {template_key}'},
@@ -143,11 +147,13 @@ class DataGenerationPlanViewSet(BaseModelViewSet):
             default_environment_id=(
                 default_environment_id
                 or (plan.default_environment_id if plan is not None else None)
+                or (template or {}).get('default_environment_id')
             ),
         )
 
         if plan is None:
             project = get_object_or_404(Project, pk=project_pk)
+            bindings = template.get('template_bindings') if isinstance(template.get('template_bindings'), dict) else {}
             plan = DataGenerationPlan.objects.create(
                 project=project,
                 name=template['name'],
@@ -160,6 +166,7 @@ class DataGenerationPlanViewSet(BaseModelViewSet):
                 template_key=template_key,
                 template_icon=template.get('icon', ''),
                 template_params_schema=template.get('params_schema') or {},
+                template_bindings=bindings,
                 created_by=request.user,
             )
 

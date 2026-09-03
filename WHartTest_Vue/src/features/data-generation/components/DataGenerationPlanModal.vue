@@ -58,13 +58,24 @@
 
       <a-alert
         v-if="aiGenerationSummary"
-        type="success"
+        :type="aiAlertType"
         closable
         style="margin-bottom: 12px"
         @close="aiGenerationSummary = ''"
       >
         {{ aiGenerationSummary }}
       </a-alert>
+
+      <a-form-item v-if="formData.is_template" label="模板资源绑定 (JSON，可选)">
+        <a-textarea
+          v-model="formData.template_bindings_json"
+          :auto-size="{ minRows: 3, maxRows: 8 }"
+          placeholder='{"default_environment_id":4,"interfaces":{"create_ticket":445}}'
+        />
+        <template #extra>
+          使用 interface_ref 的内置模板需在此配置项目接口 ID；直接在步骤里选接口则无需填写。
+        </template>
+      </a-form-item>
 
       <a-alert
         v-if="needsDefaultEnvironment && !formData.default_environment"
@@ -120,6 +131,7 @@ import {
   type DataGenerationPlan,
   type DataGenerationStep,
   type GeneratedDataGenerationPlan,
+  type GenerationMethod,
 } from '@/features/data-generation/services/dataGenerationService';
 
 const props = defineProps<{
@@ -143,6 +155,7 @@ const formRef = ref();
 const envLoading = ref(false);
 const generating = ref(false);
 const aiGenerationSummary = ref('');
+const aiGenerationMethod = ref<GenerationMethod | undefined>();
 const editorMode = ref('visual');
 const environments = ref<Array<{ id: number; name: string }>>([]);
 
@@ -155,6 +168,7 @@ const formData = reactive({
   is_template: false,
   template_key: '' as string,
   template_params_schema: {} as Record<string, unknown>,
+  template_bindings_json: '',
   steps: [] as DataGenerationStep[],
   cleanup_steps: [] as DataGenerationStep[],
   steps_json: '[]',
@@ -191,8 +205,15 @@ const needsDefaultEnvironment = computed(() => {
   return planRequiresDefaultEnvironment(formData.steps, formData.cleanup_steps);
 });
 
+const aiAlertType = computed(() => {
+  if (aiGenerationMethod.value === 'fallback') return 'warning';
+  if (aiGenerationMethod.value === 'rule_match') return 'info';
+  return 'success';
+});
+
 function resetForm(plan?: DataGenerationPlan | null) {
   aiGenerationSummary.value = '';
+  aiGenerationMethod.value = undefined;
   formData.name = plan?.name || '';
   formData.description = plan?.description || '';
   formData.target_type = plan?.target_type || 'both';
@@ -201,6 +222,7 @@ function resetForm(plan?: DataGenerationPlan | null) {
   formData.is_template = plan?.is_template ?? false;
   formData.template_key = plan?.template_key || '';
   formData.template_params_schema = JSON.parse(JSON.stringify(plan?.template_params_schema || {}));
+  formData.template_bindings_json = JSON.stringify(plan?.template_bindings || {}, null, 2);
   formData.steps = JSON.parse(JSON.stringify(plan?.steps || []));
   formData.cleanup_steps = JSON.parse(JSON.stringify(plan?.cleanup_steps || []));
   formData.steps_json = JSON.stringify(plan?.steps || [], null, 2);
@@ -269,9 +291,18 @@ async function handleAiGenerate() {
 
     const summaryText = formatGenerationSummary(generated.generation_summary);
     aiGenerationSummary.value = summaryText || generated.hint || '';
+    aiGenerationMethod.value =
+      generated.generation_summary?.generation_method || generated.generation_method;
 
-    if (generated.generation_summary?.mode === 'template') {
-      Message.success(`AI 已匹配模板「${generated.generation_summary.template_name || generated.template_key}」`);
+    const method = aiGenerationMethod.value;
+    if (method === 'rule_match') {
+      Message.info(
+        `规则匹配：${generated.generation_summary?.template_name || generated.template_key || '造数计划'}`,
+      );
+    } else if (method === 'fallback') {
+      Message.warning(generated.hint || 'LLM 失败，已回退规则模板');
+    } else if (generated.generation_summary?.mode === 'template') {
+      Message.success(`LLM 已匹配模板「${generated.generation_summary.template_name || generated.template_key}」`);
     } else if (generated.hint) {
       Message.info(generated.hint);
     } else if (generated.llm_used) {
@@ -329,7 +360,7 @@ async function handleSubmit() {
     return false;
   }
 
-  const payload = {
+  const payload: Record<string, unknown> = {
     name: formData.name,
     description: formData.description,
     target_type: formData.target_type,
@@ -341,6 +372,17 @@ async function handleSubmit() {
     steps: parsed.steps,
     cleanup_steps: parsed.cleanup_steps,
   };
+
+  if (formData.is_template && formData.template_bindings_json.trim()) {
+    try {
+      payload.template_bindings = JSON.parse(formData.template_bindings_json);
+    } catch {
+      Message.error('模板资源绑定 JSON 格式无效');
+      return false;
+    }
+  } else if (formData.is_template) {
+    payload.template_bindings = {};
+  }
 
   try {
     if (isEdit.value && props.plan) {

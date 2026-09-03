@@ -35,6 +35,7 @@ class DataGenerationPlanSerializer(serializers.ModelSerializer):
             'template_key',
             'template_icon',
             'template_params_schema',
+            'template_bindings',
             'created_by',
             'created_by_name',
             'step_count',
@@ -100,17 +101,17 @@ class DataGenerationPlanSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     f'{field_name} 步骤 #{index} 类型不支持: {step_type}'
                 )
-            if step_type == 'api_call' and not step.get('interface_id'):
+            if step_type == 'api_call' and not step.get('interface_id') and not step.get('interface_ref'):
                 raise serializers.ValidationError(
-                    f'{field_name} 步骤 #{index} api_call 缺少 interface_id'
+                    f'{field_name} 步骤 #{index} api_call 缺少 interface_id 或 interface_ref'
                 )
-            if step_type == 'sql' and not step.get('database_config_id'):
+            if step_type == 'sql' and not step.get('database_config_id') and not step.get('database_config_ref'):
                 raise serializers.ValidationError(
-                    f'{field_name} 步骤 #{index} sql 缺少 database_config_id'
+                    f'{field_name} 步骤 #{index} sql 缺少 database_config_id 或 database_config_ref'
                 )
-            if step_type == 'custom_function' and not step.get('function_id'):
+            if step_type == 'custom_function' and not step.get('function_id') and not step.get('function_ref'):
                 raise serializers.ValidationError(
-                    f'{field_name} 步骤 #{index} custom_function 缺少 function_id'
+                    f'{field_name} 步骤 #{index} custom_function 缺少 function_id 或 function_ref'
                 )
         return value
 
@@ -153,6 +154,7 @@ class DataGenerationRunSerializer(serializers.ModelSerializer):
         default=None,
     )
     duration = serializers.SerializerMethodField()
+    failed_step_index = serializers.SerializerMethodField()
 
     class Meta:
         model = DataGenerationRun
@@ -167,6 +169,7 @@ class DataGenerationRunSerializer(serializers.ModelSerializer):
             'input_params',
             'output_snapshot',
             'step_logs',
+            'failed_step_index',
             'error_message',
             'is_cleaned',
             'cleanup_status',
@@ -185,6 +188,12 @@ class DataGenerationRunSerializer(serializers.ModelSerializer):
     def get_duration(self, obj):
         if obj.started_at and obj.finished_at:
             return (obj.finished_at - obj.started_at).total_seconds()
+        return None
+
+    def get_failed_step_index(self, obj):
+        for entry in obj.step_logs or []:
+            if isinstance(entry, dict) and entry.get('status') == 'failed':
+                return entry.get('index')
         return None
 
 

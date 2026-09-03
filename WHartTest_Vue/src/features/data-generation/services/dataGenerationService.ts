@@ -43,6 +43,7 @@ export interface DataGenerationPlan {
   template_key?: string;
   template_icon?: string;
   template_params_schema?: Record<string, unknown>;
+  template_bindings?: Record<string, unknown>;
   suggested_input_params?: Record<string, unknown>;
   step_count?: number;
   cleanup_step_count?: number;
@@ -62,7 +63,8 @@ export interface DataGenerationRun {
   test_execution?: number | null;
   input_params?: Record<string, unknown>;
   output_snapshot?: Record<string, unknown>;
-  step_logs?: Array<Record<string, unknown>>;
+  step_logs?: DataGenerationStepLog[];
+  failed_step_index?: number | null;
   error_message?: string;
   is_cleaned?: boolean;
   cleanup_status?: string;
@@ -97,18 +99,36 @@ export interface ParamSchemaField {
   required?: boolean;
 }
 
+export type GenerationMethod = 'rule_match' | 'llm' | 'fallback';
+
 export interface GenerationSummary {
   mode: 'template' | 'custom';
+  generation_method?: GenerationMethod;
   template_key?: string | null;
   template_name?: string | null;
   step_count?: number;
   input_params?: Record<string, unknown>;
 }
 
+export interface DataGenerationStepLog {
+  index?: number;
+  type?: string;
+  name?: string;
+  status?: 'success' | 'failed';
+  error?: string;
+  context_before?: Record<string, unknown>;
+  context_after?: Record<string, unknown>;
+  extracted?: Record<string, unknown>;
+  variables?: Array<{ name: string; value: string }> | Record<string, unknown>;
+  interface_name?: string;
+  status_code?: number;
+}
+
 export interface GeneratedDataGenerationPlan extends Partial<DataGenerationPlan> {
   source?: string;
   hint?: string;
   llm_used?: boolean;
+  generation_method?: GenerationMethod;
   generation_summary?: GenerationSummary;
   suggested_input_params?: Record<string, unknown>;
 }
@@ -417,20 +437,31 @@ export function buildDefaultInputParams(
   return result;
 }
 
+export function getGenerationMethodLabel(method?: GenerationMethod): string {
+  const map: Record<GenerationMethod, string> = {
+    rule_match: '规则匹配',
+    llm: 'LLM 生成',
+    fallback: 'LLM 失败已回退',
+  };
+  return method ? map[method] : '';
+}
+
 export function formatGenerationSummary(summary?: GenerationSummary): string {
   if (!summary) return '';
+  const methodLabel = getGenerationMethodLabel(summary.generation_method);
+  const prefix = methodLabel ? `【${methodLabel}】` : '';
   if (summary.mode === 'template') {
     const params = summary.input_params || {};
     const paramText = Object.entries(params)
       .map(([key, value]) => `${key}=${value}`)
       .join('，');
     return [
-      `匹配模板：${summary.template_name || summary.template_key || '未知'}`,
+      `${prefix}匹配模板：${summary.template_name || summary.template_key || '未知'}`,
       `步骤数：${summary.step_count ?? '-'}`,
       paramText ? `参数：${paramText}` : '',
     ]
       .filter(Boolean)
       .join('；');
   }
-  return `自定义计划，共 ${summary.step_count ?? 0} 步（请检查步骤与环境配置）`;
+  return `${prefix}自定义计划，共 ${summary.step_count ?? 0} 步（请检查步骤与环境配置）`;
 }
