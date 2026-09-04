@@ -295,6 +295,55 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
         'cleanup_steps': [],
     },
     {
+        'template_key': 'biz_create_approval_processing',
+        'name': '创建审批工单（处理中）',
+        'description': (
+            'POST /api/tickets 创建 ticketType=approval 审批工单；'
+            '创建后即为处理中且审批状态为空，适用于工单列表审批类用例。'
+        ),
+        'target_type': 'both',
+        'icon': 'audit',
+        'params_schema': {
+            'summary': {
+                'type': 'string',
+                'label': '工单摘要',
+                'default': '自动化审批工单-处理中',
+            },
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'approval'},
+            'assigneeUserId': {'type': 'number', 'label': '处理人 ID', 'default': 46},
+            'assigneeName': {'type': 'string', 'label': '处理人', 'default': '李亮'},
+            'assigneeRole': {'type': 'string', 'label': '处理人角色', 'default': 'customer_service'},
+            'transferReason': {'type': 'string', 'label': '转派原因', 'default': '自动化测试准备审批工单'},
+        },
+        'steps': [
+            _create_ticket_step(),
+            {
+                'type': 'api_call',
+                'name': '转派给目标处理人',
+                'interface_ref': REF_TRANSFER_TICKET,
+                'environment_ref': ENV_REF_DEFAULT,
+                'variables': {
+                    'targetUserId': '{{assigneeUserId}}',
+                    'targetRole': '{{assigneeRole}}',
+                    'reason': '{{transferReason}}',
+                },
+            },
+            _write_env_vars_step(
+                ticketStatus='processing',
+                ticketType='approval',
+                assigneeName='{{assigneeName}}',
+                assigneeUserId='{{assigneeUserId}}',
+            ),
+            _write_public_data_step(
+                ticketStatus='processing',
+                ticketType='approval',
+                assigneeName='{{assigneeName}}',
+                assigneeUserId='{{assigneeUserId}}',
+            ),
+        ],
+        'cleanup_steps': [],
+    },
+    {
         'template_key': 'biz_create_update_subject',
         'name': '创建并修改工单主题',
         'description': '创建工单后 PATCH 修改主题，适用于工单详情/编辑类 UI 测试。',

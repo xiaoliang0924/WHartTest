@@ -98,6 +98,39 @@ class TestCase(models.Model):
         default='functional',
         blank=True,
     )
+    pre_data_plan = models.ForeignKey(
+        'data_generation.DataGenerationPlan',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bound_testcases',
+        verbose_name=_('造数计划'),
+        help_text=_('单条执行前自动运行的造数计划（优先级高于模块默认）'),
+    )
+    pre_data_params = models.JSONField(
+        _('造数参数'),
+        default=dict,
+        blank=True,
+        help_text=_('传递给造数计划的运行时参数'),
+    )
+    pre_data_environment = models.ForeignKey(
+        'api_environments.ApiEnvironment',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bound_testcases',
+        verbose_name=_('造数 API 环境'),
+    )
+    pre_data_fail_fast = models.BooleanField(
+        _('造数失败阻断'),
+        default=True,
+        help_text=_('造数失败时是否阻断用例执行'),
+    )
+    skip_pre_data = models.BooleanField(
+        _('跳过自动造数'),
+        default=False,
+        help_text=_('开启后单条执行不再自动准备测试数据'),
+    )
 
     sort_order = models.PositiveIntegerField(_('鎺掑簭'), default=0, db_index=True)
 
@@ -187,6 +220,32 @@ class TestCaseModule(models.Model):
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
     updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
     order = models.IntegerField(_('排序'), default=0)
+    pre_data_plan = models.ForeignKey(
+        'data_generation.DataGenerationPlan',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bound_testcase_modules',
+        verbose_name=_('默认造数计划'),
+        help_text=_('该模块及子模块下单条执行时，若无用例级计划则使用此计划'),
+    )
+    pre_data_params = models.JSONField(
+        _('造数参数'),
+        default=dict,
+        blank=True,
+    )
+    pre_data_environment = models.ForeignKey(
+        'api_environments.ApiEnvironment',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bound_testcase_modules',
+        verbose_name=_('造数 API 环境'),
+    )
+    pre_data_fail_fast = models.BooleanField(
+        _('造数失败阻断'),
+        default=True,
+    )
 
     class Meta:
         verbose_name = _('用例模块')
@@ -689,6 +748,14 @@ class TestCaseRunRecord(models.Model):
     step_results = models.JSONField(_("步骤结果"), default=list, blank=True)
     execution_log = models.TextField(_("执行日志"), blank=True, default="")
     generate_playwright_script = models.BooleanField(_("生成脚本"), default=False)
+    data_generation_run = models.ForeignKey(
+        'data_generation.DataGenerationRun',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='testcase_run_records',
+        verbose_name=_('造数执行记录'),
+    )
     started_at = models.DateTimeField(_("开始时间"), auto_now_add=True)
     completed_at = models.DateTimeField(_("完成时间"), null=True, blank=True)
 

@@ -96,10 +96,12 @@ class DataGenerationRun(models.Model):
 
     TRIGGER_MANUAL = 'manual'
     TRIGGER_SUITE_PRE = 'suite_pre'
+    TRIGGER_CASE_PRE = 'case_pre'
     TRIGGER_CLEANUP = 'cleanup'
     TRIGGER_CHOICES = [
         (TRIGGER_MANUAL, _('手动执行')),
         (TRIGGER_SUITE_PRE, _('套件前置')),
+        (TRIGGER_CASE_PRE, _('用例前置')),
         (TRIGGER_CLEANUP, _('清理执行')),
     ]
 

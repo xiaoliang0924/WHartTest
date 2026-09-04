@@ -191,6 +191,7 @@ const stepLogColumns = [
 function triggerTypeLabel(triggerType?: string) {
   const map: Record<string, string> = {
     suite_pre: '套件前置',
+    case_pre: '用例前置',
     manual: '手动执行',
     cleanup: '清理执行',
   };

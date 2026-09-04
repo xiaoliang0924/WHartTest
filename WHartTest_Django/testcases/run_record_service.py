@@ -405,6 +405,7 @@ def start_testcase_run_record(
     user_id: int,
     session_id: str,
     generate_playwright_script: bool = False,
+    data_generation_run_id: Optional[int] = None,
 ) -> Optional[TestCaseRunRecord]:
     try:
         testcase = TestCase.objects.get(id=testcase_id)
@@ -419,6 +420,7 @@ def start_testcase_run_record(
             "executor_id": user_id,
             "status": "running",
             "generate_playwright_script": generate_playwright_script,
+            "data_generation_run_id": data_generation_run_id,
         },
     )
     if not created and record.status == "running":
@@ -433,6 +435,7 @@ def start_testcase_run_record(
             execution_log="",
             completed_at=None,
             generate_playwright_script=generate_playwright_script,
+            data_generation_run_id=data_generation_run_id,
             started_at=timezone.now(),
         )
         record.refresh_from_db()

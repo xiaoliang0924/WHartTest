@@ -1160,6 +1160,50 @@ class AgentLoopStreamAPIView(View):
                 ) + PLAYWRIGHT_SCRIPT_INSTRUCTION
                 logger.info(f"AgentLoopStreamAPI: 已追加脚本生成指令")
 
+            # 8.15 用例管理单条执行：自动造数准备前置数据
+            pre_data_run_id = None
+            effective_user_message = user_message
+            if test_case_id:
+                from data_generation.testcase_pre_data import run_testcase_pre_data_by_id
+
+                yield create_sse_data(
+                    {
+                        "type": "pre_data_start",
+                        "test_case_id": int(test_case_id),
+                    }
+                )
+                pre_data_result = await sync_to_async(run_testcase_pre_data_by_id)(
+                    int(test_case_id),
+                    user_id=request.user.id,
+                )
+                if pre_data_result.blocked:
+                    yield create_sse_data(
+                        {
+                            "type": "error",
+                            "message": pre_data_result.block_message,
+                            "pre_data_status": "failed",
+                        }
+                    )
+                    return
+
+                if pre_data_result.run is not None:
+                    pre_data_run_id = pre_data_result.run.id
+                    yield create_sse_data(
+                        {
+                            "type": "pre_data_complete",
+                            "status": pre_data_result.run.status,
+                            "plan_name": (
+                                pre_data_result.run.plan.name
+                                if pre_data_result.run.plan_id
+                                else ""
+                            ),
+                            "source": pre_data_result.resolution.source,
+                        }
+                    )
+
+                if pre_data_result.message_suffix:
+                    effective_user_message = user_message + pre_data_result.message_suffix
+
             # 8.2 用例管理「执行」传入的 test_case_id 需明确 ID 命名空间
             if test_case_id:
                 effective_prompt = (effective_prompt or "") + MANUAL_TESTCASE_EXECUTION_HINT
@@ -1173,10 +1217,11 @@ class AgentLoopStreamAPIView(View):
                     user_id=request.user.id,
                     session_id=session_id,
                     generate_playwright_script=bool(generate_playwright_script),
+                    data_generation_run_id=pre_data_run_id,
                 )
 
             streamed_assistant_content = ""
-            user_message_for_llm = user_message
+            user_message_for_llm = effective_user_message
             if llm_attachment_context:
                 user_message_for_llm = user_message + "\n\n以下是用户附加文件内容，请作为本轮对话上下文使用:" + llm_attachment_context
             (

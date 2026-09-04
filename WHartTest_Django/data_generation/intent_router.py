@@ -11,6 +11,7 @@ _EXPLICIT_TEMPLATE_KEY = re.compile(r'\b((?:biz|test_step)_[a-z0-9_]+)\b', re.IG
 _ASSIGNEE_PATTERNS = (
     re.compile(r'(?:分配|指派|转派)给\s*([^\s，,。.；;]+)'),
     re.compile(r'处理人[是为：:]\s*([^\s，,。.；;]+)'),
+    re.compile(r'使用\s*([^\s(（]+)账号'),
 )
 
 _CREATE_ONLY_KEYWORDS = ('仅创建', '只创建', '仅生成', '不要分配', '无需分配', '不分配', '不要指派', '无需指派')
@@ -32,16 +33,21 @@ def _mentions_assign_action(text: str) -> bool:
 
 # Ordered rules: first match wins (more specific keywords before generic ones).
 _INTENT_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (('审批工单', 'approval'), 'biz_create_approval_processing'),
     (('转派',), 'biz_create_and_transfer'),
-    (('完成', '闭环', 'resolve'), 'biz_create_assign_resolve'),
+    (('完成', '闭环', 'resolve', '已完成', '已关闭'), 'biz_create_assign_resolve'),
     (('领取', 'claimed'), 'biz_create_and_claim'),
-    (('待处理', 'pending_process', '处理中', '我的工单'), 'biz_create_and_assign'),
+    (('处理中',), 'biz_create_and_claim'),
+    (('待处理', 'pending_process', '我的工单'), 'biz_create_and_assign'),
     (('待分配', 'pending_assign'), 'biz_create_type_a'),
 )
 
 
 def infer_ticket_type(description: str, fallback: str = 'TYPE_C') -> str:
-    match = _TICKET_TYPE_PATTERN.search(description or '')
+    text = description or ''
+    if '审批工单' in text or re.search(r'\bapproval\b', text, re.IGNORECASE):
+        return 'approval'
+    match = _TICKET_TYPE_PATTERN.search(text)
     if match:
         return match.group(0).upper()
     return fallback

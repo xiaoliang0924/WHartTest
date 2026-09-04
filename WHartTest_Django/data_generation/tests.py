@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase as DjangoTestCase
 from rest_framework.exceptions import ValidationError
 
 from api_environments.models import ApiEnvironment
@@ -16,9 +16,10 @@ from data_generation.plan_validation import (
 from data_generation.serializers import DataGenerationPlanSerializer
 from data_generation.services import PlanExecutor, substitute_templates
 from projects.models import Project
+from testcases.models import TestCase as ManualTestCase, TestCaseModule, TestCaseStep
 
 
-class SubstituteTemplatesTests(TestCase):
+class SubstituteTemplatesTests(DjangoTestCase):
     def test_replace_simple_variable(self):
         result = substitute_templates('工单{{work_order_id}}', {'work_order_id': 123})
         self.assertEqual(result, '工单123')
@@ -36,7 +37,7 @@ class SubstituteTemplatesTests(TestCase):
         self.assertEqual(result['title'], '测试A')
 
 
-class PlanExecutorValidationTests(TestCase):
+class PlanExecutorValidationTests(DjangoTestCase):
     def setUp(self):
         user_model = get_user_model()
         self.user = user_model.objects.create_user(username='dg_user', password='pass')
@@ -192,7 +193,7 @@ class PlanExecutorValidationTests(TestCase):
         )
 
 
-class PlanEnvironmentValidationTests(TestCase):
+class PlanEnvironmentValidationTests(DjangoTestCase):
     def test_detects_missing_step_environment(self):
         steps = [{'type': 'api_call', 'interface_id': 445}]
         self.assertTrue(plan_requires_default_environment(steps))
@@ -226,7 +227,7 @@ class PlanEnvironmentValidationTests(TestCase):
         self.assertIn('default_environment', serializer.errors)
 
 
-class AnalysisGapTests(TestCase):
+class AnalysisGapTests(DjangoTestCase):
     def test_build_generation_description_from_gap(self):
         from data_generation.analysis import build_generation_description_from_gap
 
@@ -240,7 +241,7 @@ class AnalysisGapTests(TestCase):
         self.assertIn('biz_create_type_a', text)
 
 
-class DefaultCleanupTemplateTests(TestCase):
+class DefaultCleanupTemplateTests(DjangoTestCase):
     def test_business_template_has_default_cleanup(self):
         from data_generation.templates import get_template_by_key
 
@@ -250,7 +251,7 @@ class DefaultCleanupTemplateTests(TestCase):
         self.assertEqual(template['cleanup_steps'][0]['type'], 'sql')
 
 
-class BindSuitePreDataPlanTests(TestCase):
+class BindSuitePreDataPlanTests(DjangoTestCase):
     def setUp(self):
         user_model = get_user_model()
         self.user = user_model.objects.create_user(username='bind_user', password='pass')
@@ -344,3 +345,116 @@ class BindSuitePreDataPlanTests(TestCase):
         self.assertTrue(first['created'])
         self.assertFalse(second['created'])
         self.assertEqual(first['plan'].id, second['plan'].id)
+
+
+class IntentRouterStateTests(DjangoTestCase):
+    def test_processing_status_uses_claim_template(self):
+        from data_generation.intent_router import infer_business_template_key
+
+        self.assertEqual(
+            infer_business_template_key('筛选工单状态为处理中'),
+            'biz_create_and_claim',
+        )
+        self.assertEqual(
+            infer_business_template_key('筛选工单状态为待处理'),
+            'biz_create_and_assign',
+        )
+
+    def test_approval_ticket_uses_approval_processing_template(self):
+        from data_generation.intent_router import (
+            build_input_params,
+            infer_business_template_key,
+        )
+
+        text = '工单列表中存在处理中且审批状态为空的审批工单数据'
+        self.assertEqual(
+            infer_business_template_key(text),
+            'biz_create_approval_processing',
+        )
+        params = build_input_params(text, {'input_params': {}, 'steps': []})
+        self.assertEqual(params['ticketType'], 'approval')
+
+
+class TestcasePreDataResolverTests(DjangoTestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(username='tc_pre_user', password='pass')
+        self.project = Project.objects.create(name='TC Pre Project', creator=self.user)
+        self.module = TestCaseModule.objects.create(
+            project=self.project,
+            name='工单列表',
+            creator=self.user,
+        )
+        self.environment = ApiEnvironment.objects.create(
+            name='tc-pre-env',
+            base_url='http://example.com',
+            project=self.project,
+            created_by=self.user,
+        )
+
+    def test_infer_pending_assign_from_case_text(self):
+        from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='待分配-弹出选择处理人弹窗',
+            precondition='系统内存在至少1个状态为待分配的工单',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=1,
+            description='在筛选条件中将工单状态选为待分配并搜索',
+            expected_result='列表展示待分配工单',
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.source, 'inferred')
+        self.assertEqual(resolution.template_key, 'biz_create_type_a')
+
+    def test_approval_processing_case_inference(self):
+        from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='处理中-筛选找到审批工单记录',
+            precondition='工单列表中存在处理中且审批状态为空的审批工单数据',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=1,
+            description='添加工单类型筛选条件为"审批工单"，当前状态筛选为"处理中"，点击搜索',
+            expected_result='列表筛选成功，可找到审批状态为空的目标记录',
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.source, 'inferred')
+        self.assertEqual(resolution.template_key, 'biz_create_approval_processing')
+        self.assertEqual(resolution.input_params.get('ticketType'), 'approval')
+
+    def test_module_plan_overrides_inference(self):
+        from data_generation.models import DataGenerationPlan
+        from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
+
+        plan = DataGenerationPlan.objects.create(
+            project=self.project,
+            name='模块默认造数',
+            steps=[{'type': 'delay', 'name': 'wait', 'seconds': 0.01}],
+            created_by=self.user,
+        )
+        self.module.pre_data_plan = plan
+        self.module.save(update_fields=['pre_data_plan'])
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='待分配-弹出选择处理人弹窗',
+            precondition='系统内存在至少1个状态为待分配的工单',
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.source, 'module')
+        self.assertEqual(resolution.plan.id, plan.id)
