@@ -7,12 +7,13 @@ import json
 import logging
 import re
 import tempfile
+import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional
 
 import jmespath
-from django.db import transaction
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 
 from api_environments.models import ApiEnvironment, ApiEnvironmentVariable
@@ -203,6 +204,7 @@ class PlanExecutor:
         if 'summary' not in self.context:
             self.context['summary'] = f"造数{int(timezone.now().timestamp()) % 100000}"[:20]
         self.step_logs: list[Dict[str, Any]] = []
+        self._active_run: Optional[DataGenerationRun] = None
 
     def _snapshot_context(self) -> Dict[str, Any]:
         return {
@@ -211,18 +213,20 @@ class PlanExecutor:
             if not isinstance(v, (dict, list))
         }
 
-    def execute(self) -> DataGenerationRun:
-        run = DataGenerationRun.objects.create(
-            plan=self.plan,
-            project=self.plan.project,
-            status=DataGenerationRun.STATUS_RUNNING,
-            trigger_type=self.trigger_type,
-            test_execution=self.test_execution,
-            input_params=self.input_params,
-            triggered_by=self.triggered_by,
-            parent_run=self.parent_run,
-            started_at=timezone.now(),
-        )
+    def execute(self, run: Optional[DataGenerationRun] = None) -> DataGenerationRun:
+        if run is None:
+            run = DataGenerationRun.objects.create(
+                plan=self.plan,
+                project=self.plan.project,
+                status=DataGenerationRun.STATUS_RUNNING,
+                trigger_type=self.trigger_type,
+                test_execution=self.test_execution,
+                input_params=self.input_params,
+                triggered_by=self.triggered_by,
+                parent_run=self.parent_run,
+                started_at=timezone.now(),
+            )
+        self._active_run = run
 
         try:
             if not self.plan.is_active and self.trigger_type != DataGenerationRun.TRIGGER_CLEANUP:
@@ -286,6 +290,15 @@ class PlanExecutor:
                 ]
             )
             return run
+        finally:
+            self._active_run = None
+
+    def _persist_run_progress(self) -> None:
+        if self._active_run is None:
+            return
+        self._active_run.step_logs = list(self.step_logs)
+        self._active_run.output_snapshot = self._snapshot_context()
+        self._active_run.save(update_fields=['step_logs', 'output_snapshot'])
 
     def _resolve_steps(self) -> List[Dict[str, Any]]:
         plan_bindings = (
@@ -349,11 +362,13 @@ class PlanExecutor:
                 log_entry['continued'] = True
                 log_entry['context_after'] = self._snapshot_context()
                 self.step_logs.append(log_entry)
+                self._persist_run_progress()
                 return
             log_entry['status'] = 'failed'
             log_entry['error'] = str(exc)
             log_entry['context_after'] = self._snapshot_context()
             self.step_logs.append(log_entry)
+            self._persist_run_progress()
             raise
         except Exception as exc:
             wrapped = DataGenerationError(f'{step_name} 执行失败: {exc}')
@@ -363,15 +378,18 @@ class PlanExecutor:
                 log_entry['continued'] = True
                 log_entry['context_after'] = self._snapshot_context()
                 self.step_logs.append(log_entry)
+                self._persist_run_progress()
                 return
             log_entry['status'] = 'failed'
             log_entry['error'] = str(wrapped)
             log_entry['context_after'] = self._snapshot_context()
             self.step_logs.append(log_entry)
+            self._persist_run_progress()
             raise wrapped from exc
 
         log_entry['context_after'] = self._snapshot_context()
         self.step_logs.append(log_entry)
+        self._persist_run_progress()
 
     def _resolve_environment(self, step: Dict[str, Any]) -> Optional[ApiEnvironment]:
         env_id = step.get('environment_id') or self.default_environment_id
@@ -648,6 +666,29 @@ class PlanExecutor:
         return {'seconds': seconds}
 
 
+def _build_plan_executor(
+    plan: DataGenerationPlan,
+    *,
+    trigger_type: str = DataGenerationRun.TRIGGER_MANUAL,
+    input_params: Optional[Dict[str, Any]] = None,
+    triggered_by=None,
+    test_execution=None,
+    default_environment_id: Optional[int] = None,
+    steps_override: Optional[List[Dict[str, Any]]] = None,
+    parent_run: Optional[DataGenerationRun] = None,
+) -> PlanExecutor:
+    return PlanExecutor(
+        plan,
+        trigger_type=trigger_type,
+        input_params=input_params,
+        triggered_by=triggered_by,
+        test_execution=test_execution,
+        default_environment_id=default_environment_id,
+        steps_override=steps_override,
+        parent_run=parent_run,
+    )
+
+
 def execute_plan(
     plan: DataGenerationPlan,
     *,
@@ -659,7 +700,7 @@ def execute_plan(
     steps_override: Optional[List[Dict[str, Any]]] = None,
     parent_run: Optional[DataGenerationRun] = None,
 ) -> DataGenerationRun:
-    executor = PlanExecutor(
+    executor = _build_plan_executor(
         plan,
         trigger_type=trigger_type,
         input_params=input_params,
@@ -670,6 +711,76 @@ def execute_plan(
         parent_run=parent_run,
     )
     return executor.execute()
+
+
+def _fail_stale_running_run(run_id: int, message: str) -> None:
+    """后台线程异常退出时，将仍为 running 的记录标记为 failed。"""
+    close_old_connections()
+    DataGenerationRun.objects.filter(
+        id=run_id,
+        status=DataGenerationRun.STATUS_RUNNING,
+    ).update(
+        status=DataGenerationRun.STATUS_FAILED,
+        error_message=message,
+        finished_at=timezone.now(),
+    )
+
+
+def execute_plan_async(
+    plan: DataGenerationPlan,
+    *,
+    trigger_type: str = DataGenerationRun.TRIGGER_MANUAL,
+    input_params: Optional[Dict[str, Any]] = None,
+    triggered_by=None,
+    test_execution=None,
+    default_environment_id: Optional[int] = None,
+    steps_override: Optional[List[Dict[str, Any]]] = None,
+    parent_run: Optional[DataGenerationRun] = None,
+) -> DataGenerationRun:
+    """创建执行记录并在后台线程中运行，便于前端轮询进度。"""
+    run = DataGenerationRun.objects.create(
+        plan=plan,
+        project=plan.project,
+        status=DataGenerationRun.STATUS_RUNNING,
+        trigger_type=trigger_type,
+        test_execution=test_execution,
+        input_params=input_params or {},
+        triggered_by=triggered_by,
+        parent_run=parent_run,
+        started_at=timezone.now(),
+    )
+    executor = _build_plan_executor(
+        plan,
+        trigger_type=trigger_type,
+        input_params=input_params,
+        triggered_by=triggered_by,
+        test_execution=test_execution,
+        default_environment_id=default_environment_id,
+        steps_override=steps_override,
+        parent_run=parent_run,
+    )
+
+    def _run_in_background() -> None:
+        close_old_connections()
+        try:
+            executor.execute(run=run)
+        except Exception as exc:
+            logger.exception(
+                'Background data generation failed: plan_id=%s run_id=%s',
+                plan.id,
+                run.id,
+            )
+            _fail_stale_running_run(run.id, f'后台执行异常: {exc}')
+        finally:
+            close_old_connections()
+
+    thread = threading.Thread(
+        target=_run_in_background,
+        name=f'data-gen-run-{run.id}',
+        daemon=True,
+    )
+    thread.start()
+    return run
 
 
 def execute_cleanup_steps(

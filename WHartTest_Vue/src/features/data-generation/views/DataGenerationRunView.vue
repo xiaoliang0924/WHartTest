@@ -34,7 +34,7 @@
         @page-size-change="onPageSizeChange"
       >
         <template #status="{ record }">
-          <a-tag :color="statusColor(record.status)">{{ statusLabel(record.status) }}</a-tag>
+          <a-tag :color="runDisplayColor(record)">{{ runDisplayLabel(record) }}</a-tag>
         </template>
         <template #trigger_type="{ record }">
           {{ triggerTypeLabel(record.trigger_type) }}
@@ -78,7 +78,7 @@
         <a-descriptions :column="2" bordered size="small">
           <a-descriptions-item label="计划">{{ selectedRun.plan_name }}</a-descriptions-item>
           <a-descriptions-item label="状态">
-            <a-tag :color="statusColor(selectedRun.status)">{{ statusLabel(selectedRun.status) }}</a-tag>
+            <a-tag :color="runDisplayColor(selectedRun)">{{ runDisplayLabel(selectedRun) }}</a-tag>
           </a-descriptions-item>
           <a-descriptions-item label="触发方式">
             {{ triggerTypeLabel(selectedRun.trigger_type) }}
@@ -88,11 +88,11 @@
 
         <a-alert
           v-if="selectedRun.error_message"
-          type="error"
+          :type="isPartialSuccessRun(selectedRun) ? 'warning' : 'error'"
           :title="selectedRun.error_message"
           style="margin-top: 12px"
         >
-          <template v-if="selectedRun.failed_step_index">
+          <template v-if="selectedRun.failed_step_index && !isPartialSuccessRun(selectedRun)">
             失败步骤：第 {{ selectedRun.failed_step_index }} 步
           </template>
         </a-alert>
@@ -107,8 +107,8 @@
           :row-class="stepRowClass"
         >
           <template #status="{ record }">
-            <a-tag :color="record.status === 'failed' ? 'red' : 'green'">
-              {{ record.status === 'failed' ? '失败' : '成功' }}
+            <a-tag :color="stepStatusColor(record.status)">
+              {{ stepStatusLabel(record.status) }}
             </a-tag>
           </template>
           <template #detail="{ record }">
@@ -152,7 +152,7 @@ import { formatDate } from '@/utils/formatters';
 import {
   cleanupDataGenerationRun,
   getDataGenerationRuns,
-  rerunDataGenerationRun,
+  rerunDataGenerationRunWithProgress,
   type DataGenerationRun,
   type DataGenerationStepLog,
 } from '@/features/data-generation/services/dataGenerationService';
@@ -204,6 +204,25 @@ function cleanupStatusColor(status?: string) {
   return 'orange';
 }
 
+function hasContinuedFailures(run?: DataGenerationRun | null) {
+  return (run?.step_logs || []).some((step) => step.status === 'failed_continued');
+}
+
+function isPartialSuccessRun(run?: DataGenerationRun | null) {
+  if (!run) return false;
+  return run.status === 'success' && (hasContinuedFailures(run) || (run.error_message || '').includes('部分步骤失败'));
+}
+
+function runDisplayColor(run: DataGenerationRun) {
+  if (isPartialSuccessRun(run)) return 'orange';
+  return statusColor(run.status);
+}
+
+function runDisplayLabel(run: DataGenerationRun) {
+  if (isPartialSuccessRun(run)) return '部分成功';
+  return statusLabel(run.status);
+}
+
 function statusColor(status: string) {
   if (status === 'success') return 'green';
   if (status === 'failed') return 'red';
@@ -219,6 +238,18 @@ function statusLabel(status: string) {
     pending: '等待中',
   };
   return map[status] || status;
+}
+
+function stepStatusLabel(status?: string) {
+  if (status === 'failed') return '失败';
+  if (status === 'failed_continued') return '失败(已忽略)';
+  return '成功';
+}
+
+function stepStatusColor(status?: string) {
+  if (status === 'failed') return 'red';
+  if (status === 'failed_continued') return 'orange';
+  return 'green';
 }
 
 function formatJson(value: unknown) {
@@ -239,6 +270,7 @@ function formatInlineJson(value: unknown) {
 
 function stepRowClass(record: DataGenerationStepLog) {
   if (record.status === 'failed') return 'step-row-failed';
+  if (record.status === 'failed_continued') return 'step-row-continued';
   if (selectedRun.value?.failed_step_index === record.index) return 'step-row-failed';
   return '';
 }
@@ -302,12 +334,20 @@ async function handleRerun(run: DataGenerationRun) {
   if (!currentProjectId.value) return;
   rerunningId.value = run.id;
   try {
-    const resp = await rerunDataGenerationRun(currentProjectId.value, run.id);
-    if (resp.status === 'success') {
-      Message.success('重跑成功');
+    const { response, run: newRun } = await rerunDataGenerationRunWithProgress(
+      currentProjectId.value,
+      run.id,
+    );
+    if (response.status === 'success') {
+      const hasContinued = (newRun.step_logs || []).some((step) => step.status === 'failed_continued');
+      if (hasContinued || (newRun.error_message || '').includes('部分步骤失败')) {
+        Message.warning(newRun.error_message || '重跑部分成功');
+      } else {
+        Message.success('重跑成功');
+      }
       fetchRuns();
     } else {
-      Message.error(resp.message || '重跑失败');
+      Message.error(response.message || newRun.error_message || '重跑失败');
     }
   } catch (error: any) {
     Message.error(error.response?.data?.message || error.message || '重跑失败');
@@ -373,6 +413,9 @@ watch(currentProjectId, () => {
 }
 :deep(.step-row-failed td) {
   background: rgba(var(--red-1), 0.45);
+}
+:deep(.step-row-continued td) {
+  background: rgba(var(--orange-1), 0.45);
 }
 .no-project-selected {
   padding: 48px 0;

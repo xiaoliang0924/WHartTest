@@ -105,6 +105,7 @@ services:
       - WECHAT_WORK_BOT_WEBHOOK=${WECHAT_WORK_BOT_WEBHOOK:-}
       - WECHAT_WORK_BOT_WEBHOOKS=${WECHAT_WORK_BOT_WEBHOOKS:-}
       - HF_ENDPOINT=${DOCKER_HF_ENDPOINT:-https://huggingface.co}
+      - DISABLE_GA=true
     depends_on:
       postgres:
         condition: service_healthy

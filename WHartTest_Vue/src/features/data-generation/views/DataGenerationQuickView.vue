@@ -63,8 +63,8 @@ import { useProjectStore } from '@/store/projectStore';
 import TemplateCard from '@/features/data-generation/components/DataGenerationTemplateCard.vue';
 import {
   getDataGenerationTemplates,
-  runDataGenerationPlan,
-  runDataGenerationTemplate,
+  runDataGenerationPlanWithProgress,
+  runDataGenerationTemplateWithProgress,
   type DataGenerationPlan,
   type DataGenerationTemplate,
 } from '@/features/data-generation/services/dataGenerationService';
@@ -160,22 +160,32 @@ async function handleRunTemplate(template: DataGenerationTemplate) {
   const inputParams = formValues[template.template_key] || {};
 
   try {
-    let resp;
+    let result;
     if (template.plan_id && !template.template_key.startsWith('create_')) {
-      resp = await runDataGenerationPlan(currentProjectId.value, template.plan_id, inputParams);
+      result = await runDataGenerationPlanWithProgress(
+        currentProjectId.value,
+        template.plan_id,
+        inputParams,
+      );
     } else {
-      resp = await runDataGenerationTemplate(
+      result = await runDataGenerationTemplateWithProgress(
         currentProjectId.value,
         template.template_key,
         inputParams,
       );
     }
 
+    const { response, run } = result;
     emit('run-completed');
-    if (resp.status === 'success') {
-      Message.success('造数执行成功');
+    if (response.status === 'success') {
+      const hasContinued = (run.step_logs || []).some((step) => step.status === 'failed_continued');
+      if (hasContinued || (run.error_message || '').includes('部分步骤失败')) {
+        Message.warning(run.error_message || '造数执行部分成功');
+      } else {
+        Message.success('造数执行成功');
+      }
     } else {
-      Message.error(resp.message || '造数执行失败');
+      Message.error(response.message || run.error_message || '造数执行失败');
     }
   } catch (error: any) {
     emit('run-completed');

@@ -114,7 +114,8 @@ export interface DataGenerationStepLog {
   index?: number;
   type?: string;
   name?: string;
-  status?: 'success' | 'failed';
+  status?: 'success' | 'failed' | 'failed_continued';
+  continued?: boolean;
   error?: string;
   context_before?: Record<string, unknown>;
   context_after?: Record<string, unknown>;
@@ -221,13 +222,121 @@ export async function runDataGenerationPlan(
   projectId: number,
   planId: number,
   inputParams?: Record<string, unknown>,
+  options?: { runAsync?: boolean },
 ) {
   const response = await axios.post(
     `${API_BASE_URL}/projects/${projectId}/data-generation-plans/${planId}/run/`,
-    { input_params: inputParams || {} },
+    {
+      input_params: inputParams || {},
+      run_async: options?.runAsync ?? false,
+    },
     { headers: authHeaders() },
   );
   return response.data;
+}
+
+const TERMINAL_RUN_STATUSES = new Set<DataGenerationRun['status']>(['success', 'failed']);
+
+export function isDataGenerationRunTerminal(status?: string) {
+  return TERMINAL_RUN_STATUSES.has(status as DataGenerationRun['status']);
+}
+
+function extractRunFromPayload(payload: unknown): DataGenerationRun {
+  let current: unknown = payload;
+  for (let i = 0; i < 4; i += 1) {
+    if (!current || typeof current !== 'object') break;
+    const record = current as Record<string, unknown>;
+    if ('id' in record && 'status' in record) {
+      return record as unknown as DataGenerationRun;
+    }
+    if (record.data !== undefined && record.data !== null && typeof record.data === 'object') {
+      current = record.data;
+      continue;
+    }
+    break;
+  }
+  throw new Error('无法解析造数执行记录');
+}
+
+function createAbortError() {
+  return new DOMException('已取消等待', 'AbortError');
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(createAbortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+export async function waitForDataGenerationRun(
+  projectId: number,
+  runId: number,
+  options?: {
+    onProgress?: (run: DataGenerationRun) => void;
+    pollIntervalMs?: number;
+    pollTimeoutMs?: number;
+    signal?: AbortSignal;
+  },
+): Promise<DataGenerationRun> {
+  const pollIntervalMs = options?.pollIntervalMs ?? 1000;
+  const pollTimeoutMs = options?.pollTimeoutMs ?? 10 * 60 * 1000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < pollTimeoutMs) {
+    throwIfAborted(options?.signal);
+    const run = await getDataGenerationRun(projectId, runId);
+    options?.onProgress?.(run);
+    if (isDataGenerationRunTerminal(run.status)) {
+      return run;
+    }
+    await sleep(pollIntervalMs, options?.signal);
+  }
+
+  throw new Error('造数执行超时，请稍后在执行记录中查看结果');
+}
+
+export async function runDataGenerationPlanWithProgress(
+  projectId: number,
+  planId: number,
+  inputParams?: Record<string, unknown>,
+  options?: {
+    onProgress?: (run: DataGenerationRun) => void;
+    pollIntervalMs?: number;
+    pollTimeoutMs?: number;
+    signal?: AbortSignal;
+  },
+) {
+  const response = await runDataGenerationPlan(projectId, planId, inputParams, { runAsync: true });
+  const run = extractRunFromPayload(response);
+  options?.onProgress?.(run);
+  if (isDataGenerationRunTerminal(run.status)) {
+    return { response, run };
+  }
+  const finalRun = await waitForDataGenerationRun(projectId, run.id, options);
+  return {
+    response: {
+      ...response,
+      status: finalRun.status === 'success' ? 'success' : 'error',
+      message: finalRun.error_message,
+      data: finalRun,
+    },
+    run: finalRun,
+  };
 }
 
 export async function getDataGenerationRuns(projectId: number, params?: Record<string, unknown>) {
@@ -247,13 +356,45 @@ export async function getDataGenerationRun(projectId: number, runId: number) {
   return (response.data?.data ?? response.data) as DataGenerationRun;
 }
 
-export async function rerunDataGenerationRun(projectId: number, runId: number) {
+export async function rerunDataGenerationRun(
+  projectId: number,
+  runId: number,
+  options?: { runAsync?: boolean },
+) {
   const response = await axios.post(
     `${API_BASE_URL}/projects/${projectId}/data-generation-runs/${runId}/rerun/`,
-    {},
+    { run_async: options?.runAsync ?? false },
     { headers: authHeaders() },
   );
   return response.data;
+}
+
+export async function rerunDataGenerationRunWithProgress(
+  projectId: number,
+  runId: number,
+  options?: {
+    onProgress?: (run: DataGenerationRun) => void;
+    pollIntervalMs?: number;
+    pollTimeoutMs?: number;
+    signal?: AbortSignal;
+  },
+) {
+  const response = await rerunDataGenerationRun(projectId, runId, { runAsync: true });
+  const run = extractRunFromPayload(response);
+  options?.onProgress?.(run);
+  if (isDataGenerationRunTerminal(run.status)) {
+    return { response, run };
+  }
+  const finalRun = await waitForDataGenerationRun(projectId, run.id, options);
+  return {
+    response: {
+      ...response,
+      status: finalRun.status === 'success' ? 'success' : 'error',
+      message: finalRun.error_message,
+      data: finalRun,
+    },
+    run: finalRun,
+  };
 }
 
 export async function cleanupDataGenerationRun(projectId: number, runId: number) {
@@ -315,6 +456,7 @@ export async function runDataGenerationTemplate(
   templateKey: string,
   inputParams?: Record<string, unknown>,
   defaultEnvironment?: number | null,
+  options?: { runAsync?: boolean },
 ) {
   const response = await axios.post(
     `${API_BASE_URL}/projects/${projectId}/data-generation-plans/run_template/`,
@@ -322,10 +464,47 @@ export async function runDataGenerationTemplate(
       template_key: templateKey,
       input_params: inputParams || {},
       default_environment: defaultEnvironment ?? null,
+      run_async: options?.runAsync ?? false,
     },
     { headers: authHeaders() },
   );
   return response.data;
+}
+
+export async function runDataGenerationTemplateWithProgress(
+  projectId: number,
+  templateKey: string,
+  inputParams?: Record<string, unknown>,
+  defaultEnvironment?: number | null,
+  options?: {
+    onProgress?: (run: DataGenerationRun) => void;
+    pollIntervalMs?: number;
+    pollTimeoutMs?: number;
+    signal?: AbortSignal;
+  },
+) {
+  const response = await runDataGenerationTemplate(
+    projectId,
+    templateKey,
+    inputParams,
+    defaultEnvironment,
+    { runAsync: true },
+  );
+  const run = extractRunFromPayload(response);
+  options?.onProgress?.(run);
+  if (isDataGenerationRunTerminal(run.status)) {
+    return { response, run };
+  }
+  const finalRun = await waitForDataGenerationRun(projectId, run.id, options);
+  return {
+    response: {
+      ...response,
+      status: finalRun.status === 'success' ? 'success' : 'error',
+      message: finalRun.error_message,
+      data: finalRun,
+    },
+    run: finalRun,
+  };
 }
 
 export async function generateDataGenerationPlan(

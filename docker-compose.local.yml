@@ -114,6 +114,7 @@ services:
       # Qdrant向量数据库
       - QDRANT_URL=http://qdrant:6333
       - HF_ENDPOINT=${DOCKER_HF_ENDPOINT:-https://huggingface.co}
+      - DISABLE_GA=true
     depends_on:
       postgres:
         condition: service_healthy

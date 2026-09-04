@@ -31,6 +31,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # 从项目根目录的 .env 文件加载环境变量到进程环境。
 load_dotenv(BASE_DIR / ".env")
 
+# 内网/容器环境禁用 HttpRunner GA4 上报，避免每步连接 google-analytics.com 超时
+os.environ.setdefault("DISABLE_GA", "true")
 
 # 处理HuggingFace环境变量的相对路径
 # 将.env文件中的相对路径转换为绝对路径

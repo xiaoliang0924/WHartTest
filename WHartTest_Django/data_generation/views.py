@@ -26,10 +26,54 @@ from .serializers import (
     DataGenerationTemplateRunSerializer,
 )
 from .plan_validation import ensure_plan_has_environment
-from .services import bind_suite_pre_data_plan, execute_cleanup_steps, execute_plan
+from .services import bind_suite_pre_data_plan, execute_cleanup_steps, execute_plan, execute_plan_async
 from .templates import get_builtin_templates, get_template_by_key
 
 logger = logging.getLogger(__name__)
+
+
+def _start_plan_run(
+    plan,
+    *,
+    input_params,
+    triggered_by,
+    default_environment_id,
+    run_async=False,
+    parent_run=None,
+):
+    common_kwargs = {
+        'trigger_type': DataGenerationRun.TRIGGER_MANUAL,
+        'input_params': input_params,
+        'triggered_by': triggered_by,
+        'default_environment_id': default_environment_id,
+        'parent_run': parent_run,
+    }
+    if run_async:
+        return execute_plan_async(plan, **common_kwargs)
+    return execute_plan(plan, **common_kwargs)
+
+
+def _build_run_response(run, *, run_async=False):
+    serializer = DataGenerationRunSerializer(run)
+    if run_async:
+        return Response(
+            {
+                'status': 'accepted',
+                'message': '造数任务已提交，请轮询执行记录查看进度',
+                'data': serializer.data,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+    if run.status == DataGenerationRun.STATUS_SUCCESS:
+        return Response({'status': 'success', 'data': serializer.data})
+    return Response(
+        {
+            'status': 'error',
+            'message': run.error_message or '造数失败',
+            'data': serializer.data,
+        },
+        status=status.HTTP_400_BAD_REQUEST,
+    )
 
 
 class DataGenerationPlanViewSet(BaseModelViewSet):
@@ -79,24 +123,15 @@ class DataGenerationPlanViewSet(BaseModelViewSet):
         )
         payload = DataGenerationRunRequestSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
-        run = execute_plan(
+        validated = payload.validated_data
+        run = _start_plan_run(
             plan,
-            trigger_type=DataGenerationRun.TRIGGER_MANUAL,
-            input_params=payload.validated_data.get('input_params') or {},
+            input_params=validated.get('input_params') or {},
             triggered_by=request.user,
             default_environment_id=plan.default_environment_id,
+            run_async=validated.get('run_async', False),
         )
-        serializer = DataGenerationRunSerializer(run)
-        if run.status == DataGenerationRun.STATUS_SUCCESS:
-            return Response({'status': 'success', 'data': serializer.data})
-        return Response(
-            {
-                'status': 'error',
-                'message': run.error_message or '造数失败',
-                'data': serializer.data,
-            },
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return _build_run_response(run, run_async=validated.get('run_async', False))
 
     @action(detail=False, methods=['get'])
     def templates(self, request, **kwargs):
@@ -118,9 +153,11 @@ class DataGenerationPlanViewSet(BaseModelViewSet):
         project_pk = self.kwargs.get('project_pk')
         payload = DataGenerationTemplateRunSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
-        template_key = payload.validated_data['template_key']
-        input_params = payload.validated_data.get('input_params') or {}
-        default_environment_id = payload.validated_data.get('default_environment')
+        validated = payload.validated_data
+        template_key = validated['template_key']
+        input_params = validated.get('input_params') or {}
+        default_environment_id = validated.get('default_environment')
+        run_async = validated.get('run_async', False)
 
         plan = DataGenerationPlan.objects.filter(
             project_id=project_pk,
@@ -171,24 +208,14 @@ class DataGenerationPlanViewSet(BaseModelViewSet):
                 created_by=request.user,
             )
 
-        run = execute_plan(
+        run = _start_plan_run(
             plan,
-            trigger_type=DataGenerationRun.TRIGGER_MANUAL,
             input_params=input_params,
             triggered_by=request.user,
             default_environment_id=default_environment_id or plan.default_environment_id,
+            run_async=run_async,
         )
-        serializer = DataGenerationRunSerializer(run)
-        if run.status == DataGenerationRun.STATUS_SUCCESS:
-            return Response({'status': 'success', 'data': serializer.data})
-        return Response(
-            {
-                'status': 'error',
-                'message': run.error_message or '造数失败',
-                'data': serializer.data,
-            },
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return _build_run_response(run, run_async=run_async)
 
     @action(detail=False, methods=['post'])
     def generate(self, request, **kwargs):
@@ -290,25 +317,16 @@ class DataGenerationRunViewSet(BaseModelViewSet):
     def rerun(self, request, **kwargs):
         run = self.get_object()
         plan = run.plan
-        new_run = execute_plan(
+        run_async = bool((request.data or {}).get('run_async', False))
+        new_run = _start_plan_run(
             plan,
-            trigger_type=DataGenerationRun.TRIGGER_MANUAL,
             input_params=run.input_params if isinstance(run.input_params, dict) else {},
             triggered_by=request.user,
             default_environment_id=plan.default_environment_id,
+            run_async=run_async,
             parent_run=run,
         )
-        serializer = DataGenerationRunSerializer(new_run)
-        if new_run.status == DataGenerationRun.STATUS_SUCCESS:
-            return Response({'status': 'success', 'data': serializer.data})
-        return Response(
-            {
-                'status': 'error',
-                'message': new_run.error_message or '重跑失败',
-                'data': serializer.data,
-            },
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return _build_run_response(new_run, run_async=run_async)
 
     @action(detail=True, methods=['post'])
     def cleanup(self, request, **kwargs):

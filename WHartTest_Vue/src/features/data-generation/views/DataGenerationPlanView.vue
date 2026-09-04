@@ -82,7 +82,9 @@
       v-model:visible="runModalVisible"
       :plan="runningPlan"
       :loading="runningId !== null"
+      :progress-run="progressRun"
       @confirm="handleRunConfirm"
+      @cancel-waiting="handleCancelWaiting"
     />
   </div>
 </template>
@@ -98,9 +100,10 @@ import DataGenerationRunParamsModal from '@/features/data-generation/components/
 import {
   deleteDataGenerationPlan,
   getDataGenerationPlans,
-  runDataGenerationPlan,
+  runDataGenerationPlanWithProgress,
   validatePlanEnvironment,
   type DataGenerationPlan,
+  type DataGenerationRun,
 } from '@/features/data-generation/services/dataGenerationService';
 
 const emit = defineEmits<{
@@ -119,6 +122,8 @@ const editingPlan = ref<DataGenerationPlan | null>(null);
 const runModalVisible = ref(false);
 const runningPlan = ref<DataGenerationPlan | null>(null);
 const runningId = ref<number | null>(null);
+const progressRun = ref<DataGenerationRun | null>(null);
+const runAbortController = ref<AbortController | null>(null);
 
 const pagination = ref({ current: 1, pageSize: 10, total: 0 });
 
@@ -205,28 +210,60 @@ function openRunModal(plan: DataGenerationPlan) {
   runModalVisible.value = true;
 }
 
+function handleCancelWaiting() {
+  runAbortController.value?.abort();
+}
+
 async function handleRunConfirm(inputParams: Record<string, unknown>) {
   if (!currentProjectId.value || !runningPlan.value) return;
 
+  runAbortController.value?.abort();
+  const controller = new AbortController();
+  runAbortController.value = controller;
   runningId.value = runningPlan.value.id;
+  progressRun.value = null;
   try {
-    const resp = await runDataGenerationPlan(
+    const { response, run } = await runDataGenerationPlanWithProgress(
       currentProjectId.value,
       runningPlan.value.id,
       inputParams,
+      {
+        signal: controller.signal,
+        onProgress: (updatedRun) => {
+          progressRun.value = updatedRun;
+        },
+      },
     );
+    progressRun.value = run;
     emit('run-completed');
     runModalVisible.value = false;
-    if (resp.status === 'success') {
-      Message.success('造数试跑成功');
+    progressRun.value = null;
+    if (response.status === 'success') {
+      const hasContinued = (run.step_logs || []).some((step) => step.status === 'failed_continued');
+      if (hasContinued || (run.error_message || '').includes('部分步骤失败')) {
+        Message.warning(run.error_message || '造数试跑部分成功');
+      } else {
+        Message.success('造数试跑成功');
+      }
     } else {
-      Message.error(resp.message || '造数试跑失败');
+      Message.error(response.message || run.error_message || '造数试跑失败');
     }
   } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      runModalVisible.value = false;
+      progressRun.value = null;
+      emit('run-completed');
+      Message.info('已关闭进度窗口，任务仍在后台执行，请查看执行记录');
+      return;
+    }
     emit('run-completed');
     Message.error(error.response?.data?.message || error.message || '造数试跑失败');
   } finally {
     runningId.value = null;
+    progressRun.value = null;
+    if (runAbortController.value === controller) {
+      runAbortController.value = null;
+    }
   }
 }
 

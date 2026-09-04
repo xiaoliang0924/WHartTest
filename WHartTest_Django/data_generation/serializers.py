@@ -199,6 +199,7 @@ class DataGenerationRunSerializer(serializers.ModelSerializer):
 
 class DataGenerationRunRequestSerializer(serializers.Serializer):
     input_params = serializers.JSONField(required=False, default=dict)
+    run_async = serializers.BooleanField(required=False, default=False)
 
 
 class DataGenerationGeneratePlanSerializer(serializers.Serializer):
@@ -225,3 +226,4 @@ class DataGenerationTemplateRunSerializer(serializers.Serializer):
     template_key = serializers.CharField(required=True)
     input_params = serializers.JSONField(required=False, default=dict)
     default_environment = serializers.IntegerField(required=False, allow_null=True)
+    run_async = serializers.BooleanField(required=False, default=False)
