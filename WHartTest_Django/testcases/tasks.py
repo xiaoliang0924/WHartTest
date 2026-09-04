@@ -123,7 +123,16 @@ def execute_test_suite(self, execution_id):
         if getattr(suite, 'post_data_cleanup', False):
             from data_generation.services import run_suite_post_data_cleanup
             try:
-                run_suite_post_data_cleanup(suite, execution, triggered_by=execution.executor)
+                parent_run = run_suite_post_data_cleanup(suite, execution, triggered_by=execution.executor)
+                if parent_run is not None:
+                    parent_run.refresh_from_db()
+                    if parent_run.cleanup_status == 'failed':
+                        logger.warning(
+                            'Suite post-data cleanup failed: execution_id=%s run_id=%s error=%s',
+                            execution.id,
+                            parent_run.id,
+                            parent_run.cleanup_error_message,
+                        )
             except Exception as cleanup_exc:
                 logger.warning(
                     'Suite post-data cleanup failed: execution_id=%s error=%s',

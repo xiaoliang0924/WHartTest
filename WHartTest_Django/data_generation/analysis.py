@@ -83,11 +83,25 @@ def analyze_suite_variable_gaps(
             'template_key': 'biz_create_type_a',
             'reason': '套件用例引用了工单相关变量，建议使用「创建待分配工单 TYPE_A」模板',
         })
+    if 'approvalToken' in missing:
+        suggestions.append({
+            'action': 'upstream_approval_link',
+            'reason': (
+                'approvalToken 需被测系统 POST /api/tickets/external/{ticketId}/approval-link 返回；'
+                '若该接口 500，造数计划可产出其它变量但无法自动生成 approvalToken'
+            ),
+        })
     if missing:
         suggestions.append({
             'action': 'bind_pre_data_plan',
             'reason': f'仍有 {len(missing)} 个变量未在公共数据/环境变量中找到',
         })
+
+    recommended_template_key = None
+    for item in suggestions:
+        if item.get('template_key'):
+            recommended_template_key = item['template_key']
+            break
 
     return {
         'suite_id': suite.id,
@@ -97,7 +111,26 @@ def analyze_suite_variable_gaps(
         'missing_variables': missing,
         'testcases': testcase_details,
         'suggestions': suggestions,
+        'recommended_template_key': recommended_template_key,
+        'recommended_description': build_generation_description_from_gap(
+            suite.name,
+            missing,
+            recommended_template_key,
+        ),
     }
+
+
+def build_generation_description_from_gap(
+    suite_name: str,
+    missing_variables: List[str],
+    recommended_template_key: str | None = None,
+) -> str:
+    parts = [f'为套件「{suite_name}」准备前置造数数据']
+    if missing_variables:
+        parts.append(f'需覆盖变量: {", ".join(missing_variables)}')
+    if recommended_template_key:
+        parts.append(f'优先使用模板 {recommended_template_key}')
+    return '；'.join(parts)
 
 
 def generate_plan_from_description(

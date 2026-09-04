@@ -18,6 +18,7 @@ from .llm_plan_generator import generate_plan_from_description_with_llm
 from .models import DataGenerationPlan, DataGenerationRun
 from .serializers import (
     DataGenerationAnalyzeSuiteSerializer,
+    DataGenerationBindSuiteSerializer,
     DataGenerationGeneratePlanSerializer,
     DataGenerationPlanSerializer,
     DataGenerationRunRequestSerializer,
@@ -25,7 +26,7 @@ from .serializers import (
     DataGenerationTemplateRunSerializer,
 )
 from .plan_validation import ensure_plan_has_environment
-from .services import execute_cleanup_steps, execute_plan
+from .services import bind_suite_pre_data_plan, execute_cleanup_steps, execute_plan
 from .templates import get_builtin_templates, get_template_by_key
 
 logger = logging.getLogger(__name__)
@@ -221,6 +222,43 @@ class DataGenerationPlanViewSet(BaseModelViewSet):
             environment_id=payload.validated_data.get('environment_id'),
         )
         return Response({'status': 'success', 'data': result})
+
+    @action(detail=False, methods=['post'], url_path='generate_and_bind_suite')
+    def generate_and_bind_suite(self, request, **kwargs):
+        project_pk = self.kwargs.get('project_pk')
+        payload = DataGenerationBindSuiteSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        suite = get_object_or_404(
+            TestSuite,
+            pk=payload.validated_data['suite_id'],
+            project_id=project_pk,
+        )
+        try:
+            result = bind_suite_pre_data_plan(
+                suite,
+                created_by=request.user,
+                default_environment_id=payload.validated_data.get('environment_id'),
+                use_llm=payload.validated_data.get('use_llm', True),
+                enable_post_cleanup=payload.validated_data.get('enable_post_cleanup', True),
+                description=payload.validated_data.get('description') or None,
+            )
+        except AssigneeResolutionError as exc:
+            raise ValidationError({'description': [str(exc)]}) from exc
+
+        plan = result['plan']
+        plan_data = DataGenerationPlanSerializer(plan).data
+        gap = result['gap_analysis']
+        return Response({
+            'status': 'success',
+            'data': {
+                'plan': plan_data,
+                'gap_analysis': gap,
+                'bound': result['bound'],
+                'post_data_cleanup_enabled': result['post_data_cleanup_enabled'],
+                'generation_method': (result.get('generation') or {}).get('generation_method'),
+            },
+            'message': f'已生成并绑定造数计划「{plan.name}」',
+        })
 
 
 class DataGenerationRunViewSet(BaseModelViewSet):

@@ -141,6 +141,17 @@ export interface SuiteVariableGapAnalysis {
   missing_variables: string[];
   testcases: Array<{ id: number; name: string; variables: string[] }>;
   suggestions: Array<Record<string, unknown>>;
+  recommended_template_key?: string | null;
+  recommended_description?: string;
+}
+
+export interface GenerateAndBindSuiteResult {
+  plan: DataGenerationPlan;
+  gap_analysis: SuiteVariableGapAnalysis;
+  bound: boolean;
+  created?: boolean;
+  post_data_cleanup_enabled: boolean;
+  generation_method?: GenerationMethod;
 }
 
 function authHeaders() {
@@ -254,6 +265,21 @@ export async function cleanupDataGenerationRun(projectId: number, runId: number)
   return response.data;
 }
 
+/** 解包 Django 统一响应 + DRF action 可能的双层 { status, data } 结构。 */
+function unwrapApiData<T>(payload: unknown): T {
+  let current: unknown = payload;
+  for (let i = 0; i < 4; i += 1) {
+    if (!current || typeof current !== 'object') break;
+    const record = current as Record<string, unknown>;
+    if (record.data !== undefined && record.data !== null && typeof record.data === 'object') {
+      current = record.data;
+      continue;
+    }
+    break;
+  }
+  return current as T;
+}
+
 function unwrapTemplatePayload(payload: unknown): {
   builtin: DataGenerationTemplate[];
   saved: DataGenerationPlan[];
@@ -334,7 +360,31 @@ export async function analyzeSuiteVariableGaps(
     },
     { headers: authHeaders() },
   );
-  return (response.data?.data ?? response.data) as SuiteVariableGapAnalysis;
+  return unwrapApiData<SuiteVariableGapAnalysis>(response.data);
+}
+
+export async function generateAndBindSuitePreData(
+  projectId: number,
+  suiteId: number,
+  options?: {
+    environmentId?: number | null;
+    useLlm?: boolean;
+    enablePostCleanup?: boolean;
+    description?: string;
+  },
+) {
+  const response = await axios.post(
+    `${API_BASE_URL}/projects/${projectId}/data-generation-plans/generate_and_bind_suite/`,
+    {
+      suite_id: suiteId,
+      environment_id: options?.environmentId ?? null,
+      use_llm: options?.useLlm ?? true,
+      enable_post_cleanup: options?.enablePostCleanup ?? true,
+      description: options?.description || '',
+    },
+    { headers: authHeaders(), timeout: 90000 },
+  );
+  return unwrapApiData<GenerateAndBindSuiteResult>(response.data);
 }
 
 export const STEP_TYPE_OPTIONS = [

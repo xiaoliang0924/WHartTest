@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 _TICKET_TYPE_PATTERN = re.compile(r'TYPE_[ABC]', re.IGNORECASE)
+_EXPLICIT_TEMPLATE_KEY = re.compile(r'\b((?:biz|test_step)_[a-z0-9_]+)\b', re.IGNORECASE)
 _ASSIGNEE_PATTERNS = (
     re.compile(r'(?:分配|指派|转派)给\s*([^\s，,。.；;]+)'),
     re.compile(r'处理人[是为：:]\s*([^\s，,。.；;]+)'),
@@ -61,6 +62,10 @@ def infer_business_template_key(description: str) -> Optional[str]:
     text = (description or '').strip()
     if not text:
         return None
+
+    explicit = _EXPLICIT_TEMPLATE_KEY.search(text)
+    if explicit:
+        return explicit.group(1).lower()
 
     if _wants_create_only(text):
         ticket_type = infer_ticket_type(text, fallback='TYPE_A')

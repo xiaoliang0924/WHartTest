@@ -213,6 +213,14 @@ class DataGenerationAnalyzeSuiteSerializer(serializers.Serializer):
     environment_id = serializers.IntegerField(required=False, allow_null=True)
 
 
+class DataGenerationBindSuiteSerializer(serializers.Serializer):
+    suite_id = serializers.IntegerField(required=True)
+    environment_id = serializers.IntegerField(required=False, allow_null=True)
+    use_llm = serializers.BooleanField(required=False, default=True)
+    enable_post_cleanup = serializers.BooleanField(required=False, default=True)
+    description = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+
+
 class DataGenerationTemplateRunSerializer(serializers.Serializer):
     template_key = serializers.CharField(required=True)
     input_params = serializers.JSONField(required=False, default=dict)

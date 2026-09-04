@@ -62,6 +62,19 @@ def _write_public_data_step(**extra: str) -> Dict[str, Any]:
     }
 
 
+def default_ticket_cleanup_steps() -> List[Dict[str, Any]]:
+    """业务工单模板默认 SQL 清理步骤（运行时解析 database_config_ref）。"""
+    return [
+        {
+            'type': 'sql',
+            'name': '删除测试工单',
+            'database_config_ref': 'default',
+            'sql': 'DELETE FROM ticket WHERE id = {{ticketId}}',
+            'method': 'delete',
+        },
+    ]
+
+
 BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
     {
         'template_key': 'biz_create_type_a',
@@ -508,6 +521,10 @@ LEGACY_TEMPLATE_KEYS = {
 BUILTIN_TEMPLATES: List[Dict[str, Any]] = (
     BUILTIN_BUSINESS_TEMPLATES + BUILTIN_STEP_TEST_TEMPLATES + BUILTIN_CLEANUP_TEMPLATES
 )
+
+for _biz_template in BUILTIN_BUSINESS_TEMPLATES:
+    if not _biz_template.get('cleanup_steps'):
+        _biz_template['cleanup_steps'] = default_ticket_cleanup_steps()
 
 
 def get_builtin_templates() -> List[Dict[str, Any]]:

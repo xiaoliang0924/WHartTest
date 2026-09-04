@@ -37,7 +37,13 @@
           <a-tag :color="statusColor(record.status)">{{ statusLabel(record.status) }}</a-tag>
         </template>
         <template #trigger_type="{ record }">
-          {{ record.trigger_type === 'suite_pre' ? '套件前置' : '手动执行' }}
+          {{ triggerTypeLabel(record.trigger_type) }}
+        </template>
+        <template #cleanup_status="{ record }">
+          <a-tag v-if="record.cleanup_status" :color="cleanupStatusColor(record.cleanup_status)">
+            {{ cleanupStatusLabel(record.cleanup_status) }}
+          </a-tag>
+          <span v-else>-</span>
         </template>
         <template #started_at="{ record }">
           {{ formatDate(record.started_at) }}
@@ -56,11 +62,11 @@
             <a-button
               type="text"
               size="small"
-              :disabled="record.is_cleaned"
+              :disabled="record.is_cleaned && record.cleanup_status === 'success'"
               :loading="cleaningId === record.id"
               @click="handleCleanup(record)"
             >
-              清理
+              {{ record.cleanup_status === 'failed' ? '重试清理' : '清理' }}
             </a-button>
           </a-space>
         </template>
@@ -75,7 +81,7 @@
             <a-tag :color="statusColor(selectedRun.status)">{{ statusLabel(selectedRun.status) }}</a-tag>
           </a-descriptions-item>
           <a-descriptions-item label="触发方式">
-            {{ selectedRun.trigger_type === 'suite_pre' ? '套件前置' : '手动执行' }}
+            {{ triggerTypeLabel(selectedRun.trigger_type) }}
           </a-descriptions-item>
           <a-descriptions-item label="耗时">{{ selectedRun.duration ?? '-' }} 秒</a-descriptions-item>
         </a-descriptions>
@@ -168,9 +174,10 @@ const columns = [
   { title: '计划', dataIndex: 'plan_name' },
   { title: '状态', slotName: 'status', width: 100 },
   { title: '触发方式', slotName: 'trigger_type', width: 120 },
+  { title: '清理', slotName: 'cleanup_status', width: 110 },
   { title: '触发人', dataIndex: 'triggered_by_name', width: 120 },
   { title: '开始时间', slotName: 'started_at', width: 180 },
-  { title: '操作', slotName: 'operations', width: 200 },
+  { title: '操作', slotName: 'operations', width: 220 },
 ];
 
 const stepLogColumns = [
@@ -180,6 +187,22 @@ const stepLogColumns = [
   { title: '状态', slotName: 'status', width: 90 },
   { title: '结果 / 变量', slotName: 'detail' },
 ];
+
+function triggerTypeLabel(triggerType?: string) {
+  const map: Record<string, string> = {
+    suite_pre: '套件前置',
+    manual: '手动执行',
+    cleanup: '清理执行',
+  };
+  return map[triggerType || ''] || triggerType || '-';
+}
+
+function cleanupStatusColor(status?: string) {
+  if (status === 'success') return 'green';
+  if (status === 'failed') return 'red';
+  if (status === 'skipped') return 'gray';
+  return 'orange';
+}
 
 function statusColor(status: string) {
   if (status === 'success') return 'green';

@@ -99,6 +99,98 @@ class PlanExecutorValidationTests(TestCase):
         self.assertEqual(run.output_snapshot.get('token'), 'abc')
         self.assertEqual(run.output_snapshot.get('work_order_id'), 99)
 
+    @patch('data_generation.services.InterfaceRunner')
+    def test_continue_on_error_allows_partial_success(self, mock_runner_cls):
+        mock_runner = MagicMock()
+        mock_runner_cls.return_value = mock_runner
+        mock_runner.run_interface.return_value = mock_runner
+
+        responses = [
+            {
+                'success': True,
+                'status_code': 200,
+                'extracted_variables': {'ticketId': 1},
+                'response': {'content': {'ticketId': 1}},
+            },
+            {
+                'success': False,
+                'status_code': 500,
+                'response': {'content': {'message': 'boom'}},
+            },
+        ]
+        mock_runner.get_response.side_effect = responses
+
+        mock_interface = MagicMock()
+        mock_interface.id = 1
+        mock_interface.name = 'iface'
+        mock_interface.project_id = self.project.id
+        mock_interface.get_interface_data.return_value = {'type': 'http', 'method': 'POST', 'url': '/x'}
+
+        plan = DataGenerationPlan.objects.create(
+            project=self.project,
+            name='partial-plan',
+            default_environment=self.environment,
+            steps=[
+                {
+                    'type': 'api_call',
+                    'name': 'ok-step',
+                    'interface_id': 1,
+                },
+                {
+                    'type': 'api_call',
+                    'name': 'optional-step',
+                    'interface_id': 1,
+                    'continue_on_error': True,
+                },
+            ],
+            created_by=self.user,
+        )
+
+        with patch('data_generation.services.ApiInterface.objects.get', return_value=mock_interface):
+            run = PlanExecutor(plan, triggered_by=self.user).execute()
+
+        self.assertEqual(run.status, DataGenerationRun.STATUS_SUCCESS)
+        self.assertIn('optional-step', run.error_message or '')
+        self.assertEqual(run.step_logs[-1]['status'], 'failed_continued')
+
+    def test_set_env_var_skips_unresolved_template_values(self):
+        plan = DataGenerationPlan.objects.create(
+            project=self.project,
+            name='skip-unresolved-plan',
+            default_environment=self.environment,
+            steps=[
+                {
+                    'type': 'set_env_var',
+                    'name': '写入变量',
+                    'environment_id': self.environment.id,
+                    'variables': {
+                        'ticketId': '{{ticketId}}',
+                        'approvalToken': '{{approvalToken}}',
+                    },
+                }
+            ],
+            created_by=self.user,
+        )
+        executor = PlanExecutor(plan, triggered_by=self.user)
+        executor.context = {'ticketId': 999}
+        run = executor.execute()
+        self.assertEqual(run.status, DataGenerationRun.STATUS_SUCCESS)
+        from api_environments.models import ApiEnvironmentVariable
+
+        self.assertTrue(
+            ApiEnvironmentVariable.objects.filter(
+                environment=self.environment,
+                name='ticketId',
+                value='999',
+            ).exists()
+        )
+        self.assertFalse(
+            ApiEnvironmentVariable.objects.filter(
+                environment=self.environment,
+                name='approvalToken',
+            ).exists()
+        )
+
 
 class PlanEnvironmentValidationTests(TestCase):
     def test_detects_missing_step_environment(self):
@@ -132,3 +224,123 @@ class PlanEnvironmentValidationTests(TestCase):
         )
         self.assertFalse(serializer.is_valid())
         self.assertIn('default_environment', serializer.errors)
+
+
+class AnalysisGapTests(TestCase):
+    def test_build_generation_description_from_gap(self):
+        from data_generation.analysis import build_generation_description_from_gap
+
+        text = build_generation_description_from_gap(
+            '回归套件',
+            ['ticketId', 'work_order_id'],
+            'biz_create_type_a',
+        )
+        self.assertIn('回归套件', text)
+        self.assertIn('ticketId', text)
+        self.assertIn('biz_create_type_a', text)
+
+
+class DefaultCleanupTemplateTests(TestCase):
+    def test_business_template_has_default_cleanup(self):
+        from data_generation.templates import get_template_by_key
+
+        template = get_template_by_key('biz_create_type_a')
+        self.assertIsNotNone(template)
+        self.assertGreater(len(template.get('cleanup_steps') or []), 0)
+        self.assertEqual(template['cleanup_steps'][0]['type'], 'sql')
+
+
+class BindSuitePreDataPlanTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(username='bind_user', password='pass')
+        self.project = Project.objects.create(name='Bind Project', creator=self.user)
+        self.environment = ApiEnvironment.objects.create(
+            name='bind-env',
+            base_url='http://example.com',
+            project=self.project,
+            created_by=self.user,
+        )
+        from testcases.models import TestCase, TestCaseModule, TestSuite
+
+        self.module = TestCaseModule.objects.create(
+            project=self.project,
+            name='默认模块',
+            creator=self.user,
+        )
+        self.testcase = TestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='工单用例',
+            precondition='使用 ${{ticketId}} 登录',
+            creator=self.user,
+        )
+        self.suite = TestSuite.objects.create(
+            project=self.project,
+            name='绑定测试套件',
+            creator=self.user,
+            max_concurrent_tasks=1,
+        )
+        self.suite.testcases.add(self.testcase)
+
+    @patch('data_generation.llm_plan_generator._resolve_plan_steps_for_project')
+    @patch('data_generation.llm_plan_generator.generate_plan_from_description_with_llm')
+    def test_bind_suite_creates_plan_and_enables_cleanup(self, mock_generate, mock_resolve):
+        from data_generation.services import bind_suite_pre_data_plan
+
+        mock_generate.return_value = {
+            'name': '套件前置造数',
+            'description': 'auto',
+            'target_type': 'both',
+            'steps': [{'type': 'set_env_var', 'name': '写入', 'environment_id': self.environment.id, 'variables': {'ticketId': '1'}}],
+            'cleanup_steps': [{'type': 'sql', 'name': '删除', 'database_config_id': 1, 'sql': 'DELETE FROM ticket WHERE id = 1', 'method': 'delete'}],
+            'default_environment': self.environment.id,
+            'generation_method': 'rule_match',
+        }
+        mock_resolve.side_effect = lambda plan, **kwargs: plan
+
+        result = bind_suite_pre_data_plan(
+            self.suite,
+            created_by=self.user,
+            default_environment_id=self.environment.id,
+            use_llm=False,
+        )
+        self.suite.refresh_from_db()
+        self.assertTrue(result['bound'])
+        self.assertIsNotNone(self.suite.pre_data_plan_id)
+        self.assertTrue(self.suite.post_data_cleanup)
+        self.assertGreater(len(result['plan'].cleanup_steps or []), 0)
+
+    @patch('data_generation.llm_plan_generator._resolve_plan_steps_for_project')
+    @patch('data_generation.llm_plan_generator.build_plan_from_template_key')
+    def test_bind_suite_reuses_existing_plan_name(self, mock_template, mock_resolve):
+        from data_generation.services import bind_suite_pre_data_plan
+
+        generated = {
+            'name': '创建待分配工单 TYPE_A',
+            'description': 'auto',
+            'target_type': 'both',
+            'steps': [{'type': 'set_env_var', 'name': '写入', 'environment_id': self.environment.id, 'variables': {'ticketId': '1'}}],
+            'cleanup_steps': [{'type': 'sql', 'name': '删除', 'database_config_id': 1, 'sql': 'DELETE FROM ticket WHERE id = 1', 'method': 'delete'}],
+            'default_environment': self.environment.id,
+            'template_key': 'biz_create_type_a',
+            'generation_method': 'rule_match',
+        }
+        mock_template.return_value = generated
+        mock_resolve.side_effect = lambda plan, **kwargs: plan
+
+        first = bind_suite_pre_data_plan(
+            self.suite,
+            created_by=self.user,
+            default_environment_id=self.environment.id,
+            use_llm=False,
+        )
+        second = bind_suite_pre_data_plan(
+            self.suite,
+            created_by=self.user,
+            default_environment_id=self.environment.id,
+            use_llm=False,
+        )
+        self.assertTrue(first['created'])
+        self.assertFalse(second['created'])
+        self.assertEqual(first['plan'].id, second['plan'].id)

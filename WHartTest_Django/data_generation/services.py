@@ -109,6 +109,18 @@ def _parse_response_body(content: Any) -> Any:
     return content
 
 
+def _should_persist_variable_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return False
+        if _TEMPLATE_PATTERN.search(stripped):
+            return False
+    return True
+
+
 def _extract_values(source: Any, mapping: Dict[str, str]) -> Dict[str, Any]:
     extracted: Dict[str, Any] = {}
     for var_name, expr in mapping.items():
@@ -225,16 +237,28 @@ class PlanExecutor:
                     raise DataGenerationError(f'步骤 #{index} 格式无效')
                 self._execute_step(index, raw_step)
 
+            continued_failures = [
+                entry
+                for entry in self.step_logs
+                if isinstance(entry, dict) and entry.get('status') == 'failed_continued'
+            ]
             run.status = DataGenerationRun.STATUS_SUCCESS
             run.output_snapshot = dict(self.context)
             run.step_logs = self.step_logs
             run.finished_at = timezone.now()
+            if continued_failures:
+                names = [
+                    str(entry.get('name') or f"步骤{entry.get('index')}")
+                    for entry in continued_failures
+                ]
+                run.error_message = f"部分步骤失败（已忽略）: {'、'.join(names)}"
             run.save(
                 update_fields=[
                     'status',
                     'output_snapshot',
                     'step_logs',
                     'finished_at',
+                    'error_message',
                 ]
             )
             return run
@@ -319,17 +343,32 @@ class PlanExecutor:
                 result = self._run_delay(step)
                 log_entry.update(result)
         except DataGenerationError as exc:
+            if step.get('continue_on_error'):
+                log_entry['status'] = 'failed_continued'
+                log_entry['error'] = str(exc)
+                log_entry['continued'] = True
+                log_entry['context_after'] = self._snapshot_context()
+                self.step_logs.append(log_entry)
+                return
             log_entry['status'] = 'failed'
             log_entry['error'] = str(exc)
             log_entry['context_after'] = self._snapshot_context()
             self.step_logs.append(log_entry)
             raise
         except Exception as exc:
+            wrapped = DataGenerationError(f'{step_name} 执行失败: {exc}')
+            if step.get('continue_on_error'):
+                log_entry['status'] = 'failed_continued'
+                log_entry['error'] = str(wrapped)
+                log_entry['continued'] = True
+                log_entry['context_after'] = self._snapshot_context()
+                self.step_logs.append(log_entry)
+                return
             log_entry['status'] = 'failed'
-            log_entry['error'] = str(exc)
+            log_entry['error'] = str(wrapped)
             log_entry['context_after'] = self._snapshot_context()
             self.step_logs.append(log_entry)
-            raise DataGenerationError(f'{step_name} 执行失败: {exc}') from exc
+            raise wrapped from exc
 
         log_entry['context_after'] = self._snapshot_context()
         self.step_logs.append(log_entry)
@@ -446,8 +485,16 @@ class PlanExecutor:
             raise DataGenerationError(f'API 环境不存在: {environment_id}') from exc
 
         variables = substitute_templates(step.get('variables') or {}, self.context)
-        if not isinstance(variables, dict) or not variables:
+        if not isinstance(variables, dict):
             raise DataGenerationError('set_env_var 步骤 variables 不能为空')
+
+        variables = {
+            name: value
+            for name, value in variables.items()
+            if _should_persist_variable_value(value)
+        }
+        if not variables:
+            return {'environment_id': environment.id, 'variables': [], 'skipped': True}
 
         saved = []
         with transaction.atomic():
@@ -481,6 +528,8 @@ class PlanExecutor:
                 value = item.get('value')
                 if not key:
                     raise DataGenerationError('set_public_data 条目缺少 key')
+                if not _should_persist_variable_value(value):
+                    continue
                 data_type = int(item.get('type', 0))
                 obj, _created = UiPublicData.objects.update_or_create(
                     project=self.plan.project,
@@ -494,6 +543,9 @@ class PlanExecutor:
                 )
                 saved.append({'key': obj.key, 'value': obj.value})
                 self.context[str(key)] = value
+
+        if not saved:
+            return {'items': [], 'skipped': True}
 
         return {'items': saved}
 
@@ -710,3 +762,116 @@ def run_suite_post_data_cleanup(suite, test_execution, triggered_by=None) -> Opt
         return None
 
     return execute_cleanup_steps(run, triggered_by=triggered_by)
+
+
+def bind_suite_pre_data_plan(
+    suite,
+    *,
+    created_by,
+    default_environment_id: Optional[int] = None,
+    use_llm: bool = True,
+    enable_post_cleanup: bool = True,
+    description: Optional[str] = None,
+) -> Dict[str, Any]:
+    """分析套件变量缺口 → AI/规则生成计划 → 创建并绑定为 pre_data_plan。"""
+    from .analysis import analyze_suite_variable_gaps, build_generation_description_from_gap
+    from .llm_plan_generator import (
+        _resolve_plan_steps_for_project,
+        build_plan_from_template_key,
+        generate_plan_from_description_with_llm,
+    )
+    from .serializers import DataGenerationPlanSerializer
+
+    env_id = default_environment_id or getattr(suite, 'pre_data_environment_id', None)
+    gap = analyze_suite_variable_gaps(suite, environment_id=env_id)
+    generation_description = (description or '').strip() or gap.get('recommended_description') or build_generation_description_from_gap(
+        suite.name,
+        gap.get('missing_variables') or [],
+        gap.get('recommended_template_key'),
+    )
+
+    generated = None
+    recommended_key = gap.get('recommended_template_key')
+    if recommended_key:
+        try:
+            generated = build_plan_from_template_key(
+                str(recommended_key),
+                generation_description,
+                project_id=suite.project_id,
+                default_environment_id=env_id,
+                generation_method='rule_match',
+            )
+        except Exception as exc:
+            logger.warning(
+                'Recommended template %s expand failed for suite %s: %s',
+                recommended_key,
+                suite.id,
+                exc,
+            )
+
+    if generated is None:
+        generated = generate_plan_from_description_with_llm(
+            generation_description,
+            project_id=suite.project_id,
+            default_environment_id=env_id,
+            suite_id=suite.id,
+            use_llm=use_llm,
+        )
+    generated = _resolve_plan_steps_for_project(
+        generated,
+        project_id=suite.project_id,
+        default_environment_id=env_id,
+    )
+
+    plan_payload = {
+        'name': f'套件「{suite.name}」前置造数',
+        'description': generated.get('description') or generation_description,
+        'target_type': generated.get('target_type') or 'both',
+        'steps': generated.get('steps') or [],
+        'cleanup_steps': generated.get('cleanup_steps') or [],
+        'default_environment': env_id or generated.get('default_environment'),
+        'is_active': True,
+        'is_template': False,
+        'template_key': generated.get('template_key') or '',
+        'template_params_schema': generated.get('template_params_schema') or {},
+    }
+    plan_name = plan_payload['name']
+    existing_plan = DataGenerationPlan.objects.filter(
+        project_id=suite.project_id,
+        name=plan_name,
+        is_template=False,
+    ).first()
+    serializer = DataGenerationPlanSerializer(
+        existing_plan,
+        data=plan_payload,
+        context={'project_id': suite.project_id},
+    )
+    serializer.is_valid(raise_exception=True)
+    plan = serializer.save(
+        project=suite.project,
+        created_by=existing_plan.created_by if existing_plan else created_by,
+    )
+
+    suite.pre_data_plan = plan
+    if env_id:
+        suite.pre_data_environment_id = env_id
+    cleanup_steps = plan.cleanup_steps if isinstance(plan.cleanup_steps, list) else []
+    if enable_post_cleanup and cleanup_steps:
+        suite.post_data_cleanup = True
+    suite.save(
+        update_fields=[
+            'pre_data_plan',
+            'pre_data_environment',
+            'post_data_cleanup',
+            'updated_at',
+        ]
+    )
+
+    return {
+        'gap_analysis': gap,
+        'plan': plan,
+        'generation': generated,
+        'bound': True,
+        'created': existing_plan is None,
+        'post_data_cleanup_enabled': bool(suite.post_data_cleanup),
+    }

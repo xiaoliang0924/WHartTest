@@ -336,17 +336,14 @@ def _try_rule_match_plan(
         return None
 
 
-def _build_plan_from_rule_match(
+def build_plan_from_template_key(
+    template_key: str,
     description: str,
     *,
     project_id: int,
-    default_environment_id: Optional[int],
+    default_environment_id: Optional[int] = None,
     generation_method: str = 'rule_match',
-) -> Optional[Dict[str, Any]]:
-    template_key = infer_business_template_key(description)
-    if not template_key:
-        return None
-
+) -> Dict[str, Any]:
     payload = route_llm_payload(
         description,
         {
@@ -365,6 +362,26 @@ def _build_plan_from_rule_match(
         default_environment_id=default_environment_id,
         project_id=project_id,
         source=f'rule:template:{template_key}',
+        generation_method=generation_method,
+    )
+
+
+def _build_plan_from_rule_match(
+    description: str,
+    *,
+    project_id: int,
+    default_environment_id: Optional[int],
+    generation_method: str = 'rule_match',
+) -> Optional[Dict[str, Any]]:
+    template_key = infer_business_template_key(description)
+    if not template_key:
+        return None
+
+    return build_plan_from_template_key(
+        template_key,
+        description,
+        project_id=project_id,
+        default_environment_id=default_environment_id,
         generation_method=generation_method,
     )
 
