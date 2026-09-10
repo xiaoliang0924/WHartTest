@@ -9,6 +9,7 @@ Skill 工具
 import logging
 import subprocess
 import os
+import sys
 import shutil
 import threading
 import json
@@ -106,10 +107,95 @@ _RUNJS_PREFIX_RE = re.compile(
 )
 
 
+_JS_START_RE = re.compile(
+    r"^(?:const|let|var|await|async|function|import|export|class|if|for|while|try|#!|helpers\.|page\.|chromium\.|browser\.)\b",
+    re.IGNORECASE,
+)
+_RUNJS_PREFIX_RE = re.compile(
+    r"^(?:npx\s+)?(?:node\s+)?(?:\./)?run\.js(?:\s+|$)",
+    re.IGNORECASE,
+)
+_PYTHON_PLAYWRIGHT_LINE_RE = re.compile(
+    r"^(?:page\.)?(goto|fill|click|press|type|screenshot|wait_for_load_state|waitForLoadState)\(",
+    re.IGNORECASE,
+)
+
+
+def _join_playwright_lines(command: str) -> str:
+    lines = [line.strip() for line in (command or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    if len(lines) == 1:
+        return lines[0]
+    return ";\n".join(lines)
+
+
+def _looks_like_playwright_snippet(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    for line in stripped.splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        if _PYTHON_PLAYWRIGHT_LINE_RE.match(candidate):
+            return True
+    return False
+
+
+def normalize_playwright_snippet(text: str) -> str:
+    """把 Python 风格或缺 await 的 Playwright 片段规范为可执行 JS。"""
+    if not text or not text.strip():
+        return text
+
+    method_map = {
+        "goto": "goto",
+        "fill": "fill",
+        "click": "click",
+        "press": "press",
+        "type": "type",
+        "screenshot": "screenshot",
+        "wait_for_load_state": "waitForLoadState",
+        "waitforloadstate": "waitForLoadState",
+    }
+    lines_out: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.endswith(";"):
+            line = line[:-1].strip()
+
+        matched = False
+        for py_name, js_name in method_map.items():
+            bare = re.match(rf"^{re.escape(py_name)}\((.*)$", line, re.IGNORECASE)
+            if bare:
+                line = f"await page.{js_name}({bare.group(1)}"
+                matched = True
+                break
+            dotted = re.match(
+                rf"^page\.{re.escape(py_name)}\((.*)$", line, re.IGNORECASE
+            )
+            if dotted:
+                line = f"await page.{js_name}({dotted.group(1)}"
+                matched = True
+                break
+
+        if not matched:
+            if line.startswith("page.") and not line.startswith("await "):
+                line = "await " + line
+            elif line.startswith("helpers.") and not line.startswith("await "):
+                line = "await " + line
+
+        lines_out.append(line)
+
+    if not lines_out:
+        return text.strip()
+    return ";\n".join(lines_out)
+
+
 def _collapse_command_whitespace(command: str) -> str:
-    return " ".join(
-        line.strip() for line in (command or "").splitlines() if line.strip()
-    )
+    return _join_playwright_lines(command)
 
 
 def _looks_like_javascript(text: str) -> bool:
@@ -123,12 +209,87 @@ def _looks_like_javascript(text: str) -> bool:
         "process.env.SCREENSHOT_DIR",
         "chromium.launch",
         "helpers.describePageForAI",
+        "helpers.loginWorkOrderPortal",
+        "helpers.loginStep1",
+        "helpers.loginWorkOrderStep1",
+        "helpers.screenshotCaseStep",
+        "helpers.selectDialogMultiSelect",
+        "helpers.navigateByMenu",
+        "helpers.filterByFields",
         "page.goto(",
         "page.screenshot",
         "page.fill(",
         "page.click(",
     )
-    return any(marker in stripped for marker in markers)
+    return any(marker in stripped for marker in markers) or _looks_like_playwright_snippet(stripped)
+
+
+def _extract_quoted_runjs_payload(rest: str) -> tuple[str | None, str | None]:
+    rest = (rest or "").strip()
+    if not rest:
+        return None, rest
+    if (rest[0] == rest[-1]) and rest[0] in {'"', "'"}:
+        quote = rest[0]
+        return rest[1:-1], ""
+    return None, rest
+
+
+def sanitize_inline_playwright_code(code: str) -> str:
+    """修复 LLM 脚本中单引号路径在 shell 传递时被截断导致的 SyntaxError。"""
+    if not code:
+        return code
+    result = code.strip()
+    result = re.sub(r"(\+\s*)'([^'\\]*(?:\\.[^'\\]*)*)'", r'\1"\2"', result)
+    result = re.sub(r"\bpath:\s*'([^']*)'", r'path: "\1"', result)
+    result = re.sub(r"name:\s*'([^']*)'", r'name: "\1"', result)
+    result = re.sub(
+        r"getByPlaceholder\(\s*'([^']*)'\s*\)",
+        r'getByPlaceholder("\1")',
+        result,
+    )
+    result = re.sub(
+        r"getByRole\(\s*'([^']*)'\s*,",
+        r'getByRole("\1",',
+        result,
+    )
+    result = re.sub(
+        r"filterWorkOrdersByStatus\(\s*page\s*,\s*'([^']*)'\s*\)",
+        r'filterWorkOrdersByStatus(page, "\1")',
+        result,
+    )
+    result = re.sub(
+        r"selectFormDropdownOption\(\s*page\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)",
+        r'selectFormDropdownOption(page, "\1", "\2")',
+        result,
+    )
+    result = re.sub(
+        r"selectDialogMultiSelect\(\s*page\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)",
+        r'selectDialogMultiSelect(page, "\1", "\2")',
+        result,
+    )
+    result = re.sub(
+        r"navigateByMenu\(\s*page\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)",
+        r'navigateByMenu(page, "\1", "\2")',
+        result,
+    )
+    return result
+
+
+def extract_playwright_inline_code(
+    raw_command: str,
+    normalized_command: Optional[str] = None,
+) -> Optional[str]:
+    """从原始/规范化命令中提取 inline JS（优先 raw，避免 quote 被破坏）。"""
+    for candidate in (raw_command, normalized_command):
+        if not candidate:
+            continue
+        text = candidate.strip()
+        args = extract_runjs_args(text)
+        if args and args[0].strip():
+            return sanitize_inline_playwright_code(args[0])
+        if _looks_like_javascript(text):
+            return sanitize_inline_playwright_code(normalize_playwright_snippet(text))
+    return None
 
 
 def normalize_playwright_skill_command(command: str) -> str:
@@ -148,20 +309,25 @@ def normalize_playwright_skill_command(command: str) -> str:
         rest = collapsed[prefix_match.end() :].strip()
         if not rest:
             return "node run.js"
-        if (rest[0] == rest[-1]) and rest[0] in {'"', "'"}:
-            return f"node run.js {rest}"
+        inner, trailing = _extract_quoted_runjs_payload(rest)
+        if inner is not None:
+            normalized = normalize_playwright_snippet(inner)
+            rebuilt = "node run.js " + shlex.quote(normalized)
+            return f"{rebuilt} {trailing}".strip() if trailing else rebuilt
         if rest.startswith("--"):
             return collapsed
         logger.warning(
             "[execute_skill_script] playwright run.js 参数未加引号，已自动转义"
         )
-        return "node run.js " + shlex.quote(rest)
+        normalized = normalize_playwright_snippet(rest)
+        return "node run.js " + shlex.quote(normalized)
 
-    if _looks_like_javascript(collapsed):
+    if _looks_like_javascript(collapsed) or _looks_like_playwright_snippet(collapsed):
         logger.warning(
             "[execute_skill_script] playwright command 是裸 JS，已自动包裹 node run.js"
         )
-        return "node run.js " + shlex.quote(collapsed)
+        normalized = normalize_playwright_snippet(collapsed)
+        return "node run.js " + shlex.quote(normalized)
 
     return collapsed
 
@@ -543,7 +709,8 @@ _FAILURE_REMINDER = (
     "### 执行过程与结果\n| 步骤 | 操作 | 结果 |\n|------|------|------|\n"
     "| N | … | 通过/失败：原因/未执行 |\n"
     "### 问题分析\n- 失败步骤:\n- 失败原因:\n- 建议:\n"
-    "### 结论\n未执行步骤标「未执行」。然后保存执行记录为 fail。"
+    "### 结论\n未执行步骤标「未执行」。执行记录由系统自动保存，"
+    "禁止调用 whart_tools 或其他工具更新用例执行结果。"
 )
 
 _RETRY_REMINDER = (
@@ -551,9 +718,16 @@ _RETRY_REMINDER = (
     "这是执行脚本问题，不是被测功能失败。请继续当前步骤："
     "持久化会话已有 page / chromium / helpers，禁止再次 "
     "`const { chromium } = require('playwright')`，禁止 chromium.launch()。"
-    "登录用右侧「请输入用户名/请输入密码」。截图文件名用英文如 case_1520_step1.png。"
-    "筛选工单状态必须用 helpers.filterWorkOrdersByStatus(page,'处理中') 或 "
-    "helpers.selectFormDropdownOption(page,'工单状态','处理中')，禁止 getByText('处理中').click()。"
+    "登录步骤只调用 helpers.loginStep1(page)，它已包含步骤1截图；"
+    "RESULT=FAIL 时禁止继续。其他步骤截图用 helpers.screenshotCaseStep(page, N)。"
+    "点菜单用 helpers.navigateByMenu(page, 菜单名) 或 "
+    "helpers.navigateByMenuPath(page, ['父菜单', '子菜单'])；"
+    "只有明确知道唯一目标路由时才传 URL 片段，禁止传父级公共前缀。"
+    "下拉用 helpers.selectFormDropdownOption(page, 字段标签, 选项)；"
+    "弹窗多选用 helpers.selectDialogMultiSelect(page, 字段标签, 选项名)。"
+    "禁止 getByText 点表格里的状态文字。"
+    "断言区块/字段用 helpers.assertPageShows(page, ['基本信息', '工单类型'])，"
+    "禁止 getByText('字段*')（必填星号是独立节点）。"
     "若已重试仍无法继续，必须立刻输出完整「## 测试执行结果: 不通过」报告"
     "（基本信息、步骤表、问题分析、结论），禁止沉默结束。"
 )
@@ -570,6 +744,11 @@ _SCRIPT_ERROR_MARKERS = (
     "Automation error",
     "process.exit(",
     "文件不存在",
+    "locator.waitFor: Timeout",
+    "Timeout 15000ms exceeded",
+    "Timeout 30000ms exceeded",
+    "Playwright exec timed out",
+    "浏览器已重置",
 )
 
 
@@ -584,6 +763,13 @@ def _with_failure_reminder(output: str, *, skill_name: str) -> str:
         return output
     if "【必须输出完整测试报告】" in output or "【脚本错误，请修正后重试】" in output:
         return output
+    if re.search(r"RESULT=PASS:\s*步骤\d+", output or ""):
+        if _contains_any(output, _ASSERTION_FAIL_MARKERS) or "locator.waitFor: Timeout" in output:
+            return (
+                f"{output.rstrip()}\n\n"
+                "【步骤已通过】stdout 含 RESULT=PASS 与 CASE_SCREENSHOT，"
+                "该步应判通过，忽略早前手写 waitFor/locator 超时。"
+            )
     if _contains_any(output, _ASSERTION_FAIL_MARKERS):
         return f"{output.rstrip()}{_FAILURE_REMINDER}"
     if skill_name in ("playwright-skill", "whart-test") and _contains_any(
@@ -591,6 +777,154 @@ def _with_failure_reminder(output: str, *, skill_name: str) -> str:
     ):
         return f"{output.rstrip()}{_RETRY_REMINDER}"
     return output
+
+
+_CASE_SCREENSHOT_RE = re.compile(
+    r"\[(?:CASE_SCREENSHOT|SCREENSHOT_SAVED)\]\s+(\S+)",
+    re.IGNORECASE,
+)
+
+
+def _auto_upload_case_screenshots(
+    output: str,
+    *,
+    project_id: Optional[int],
+    case_id: Optional[int],
+    env: dict,
+) -> str:
+    """Detect case step screenshots and upload to testcase management."""
+    if not project_id or not case_id:
+        return ""
+
+    screenshot_dir = (env.get("SCREENSHOT_DIR") or "").strip()
+    step_to_path: dict[str, str] = {}
+    for match in _CASE_SCREENSHOT_RE.findall(output or ""):
+        if not re.search(rf"case_{case_id}_step\d+\.png$", match, re.IGNORECASE):
+            continue
+        resolved = match
+        if not os.path.isabs(resolved) and screenshot_dir:
+            candidate = os.path.join(screenshot_dir, os.path.basename(match))
+            if os.path.exists(candidate):
+                resolved = candidate
+        step_match = re.search(r"step(\d+)", os.path.basename(resolved), re.IGNORECASE)
+        if step_match:
+            step_to_path[step_match.group(1)] = resolved
+
+    # 本轮目录在开跑时已清空，这里补传 hook 写盘但 stdout 为空的步骤图
+    if screenshot_dir and os.path.isdir(screenshot_dir):
+        for name in sorted(os.listdir(screenshot_dir)):
+            if not re.match(rf"case_{case_id}_step\d+\.png$", name, re.IGNORECASE):
+                continue
+            full_path = os.path.join(screenshot_dir, name)
+            step_match = re.search(r"step(\d+)", name, re.IGNORECASE)
+            if step_match:
+                step_to_path[step_match.group(1)] = full_path
+
+    max_step = 0
+    try:
+        max_step = int(env.get("WHARTTEST_CASE_STEP_COUNT") or 0)
+    except (TypeError, ValueError):
+        max_step = 0
+    if max_step > 0:
+        step_to_path = {
+            step: path
+            for step, path in step_to_path.items()
+            if step.isdigit() and int(step) <= max_step
+        }
+
+    paths = list(step_to_path.values())
+
+    if not paths:
+        return ""
+
+    try:
+        from skills.models import Skill
+
+        whart_skill = Skill.objects.filter(name="whart-test", is_active=True).first()
+        whart_dir = whart_skill.get_full_path() if whart_skill else ""
+        if not whart_dir or not os.path.isdir(whart_dir):
+            return ""
+    except Exception as exc:
+        logger.warning("[auto_upload_screenshots] whart-test unavailable: %s", exc)
+        return ""
+
+    upload_env = os.environ.copy()
+    upload_env.update({k: str(v) for k, v in env.items() if v is not None})
+
+    notes: list[str] = []
+    uploaded_steps: set[str] = set()
+    for filepath in paths:
+        basename = os.path.basename(filepath)
+        step_match = re.search(r"step(\d+)", basename, re.IGNORECASE)
+        if not step_match:
+            continue
+        step_num = step_match.group(1)
+        if step_num in uploaded_steps:
+            continue
+
+        resolved = filepath
+        if not os.path.exists(resolved) and screenshot_dir:
+            alt = os.path.join(screenshot_dir, basename)
+            if os.path.exists(alt):
+                resolved = alt
+        if not os.path.exists(resolved):
+            notes.append(f"[AUTO_UPLOAD] 跳过：文件不存在 {basename}")
+            continue
+
+        # 同一 case/step 只保留最新一张，避免重复累积
+        try:
+            from testcases.models import TestCaseScreenshot
+
+            existing = TestCaseScreenshot.objects.filter(
+                test_case_id=case_id, step_number=int(step_num)
+            )
+            for old in existing:
+                if old.screenshot and os.path.isfile(old.screenshot.path):
+                    try:
+                        os.remove(old.screenshot.path)
+                    except OSError:
+                        pass
+                old.delete()
+        except Exception as exc:
+            logger.warning("[AUTO_UPLOAD] 清理旧截图失败: %s", exc)
+
+        cmd = [
+            sys.executable,
+            "whart_tools.py",
+            "--action",
+            "upload_screenshot",
+            "--project_id",
+            str(project_id),
+            "--case_id",
+            str(case_id),
+            "--file_path",
+            resolved,
+            "--title",
+            f"步骤{step_num}",
+            "--step_number",
+            step_num,
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=whart_dir,
+                env=upload_env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            result_text = (proc.stdout or proc.stderr or "").strip()
+            if proc.returncode == 0:
+                uploaded_steps.add(step_num)
+                notes.append(f"[AUTO_UPLOAD] 步骤{step_num} 上传成功 ({basename})")
+            else:
+                notes.append(
+                    f"[AUTO_UPLOAD] 步骤{step_num} 失败 (code={proc.returncode}): {result_text[:240]}"
+                )
+        except Exception as exc:
+            notes.append(f"[AUTO_UPLOAD] 步骤{step_num} 异常: {exc}")
+
+    return "\n".join(notes)
 
 
 def _finalize_skill_result(
@@ -756,6 +1090,15 @@ def get_skill_tools(
             f"[execute_skill_script] skill_name={skill_name}, command={command}"
         )
 
+        _case_exec_blocked_skills = frozenset({"playwright-cli", "browser-use"})
+        if current_test_case_id and skill_name in _case_exec_blocked_skills:
+            case_session = f"case_{current_test_case_id}"
+            return (
+                f"错误: 用例管理执行（test_case_id={current_test_case_id}）禁止使用 {skill_name}。"
+                f"请改用 playwright-skill，且全程 session_id=\"{case_session}\"。"
+                "playwright-cli 的 snapshot + click eXX 引用易失效，会报 Element not found。"
+            )
+
         try:
             skill = Skill.objects.filter(name=skill_name, is_active=True).first()
 
@@ -810,6 +1153,43 @@ def get_skill_tools(
             )
             env["SKILL_OUTPUT_DIR"] = artifacts_dir
             env["ARTIFACT_DIR"] = artifacts_dir
+            if current_project_id:
+                env["WHARTTEST_PROJECT_ID"] = str(current_project_id)
+            if current_test_case_id:
+                env["WHARTTEST_CASE_ID"] = str(current_test_case_id)
+                try:
+                    from testcases.models import TestCase
+
+                    tc = (
+                        TestCase.objects.prefetch_related("steps")
+                        .filter(id=int(current_test_case_id))
+                        .first()
+                    )
+                    if tc:
+                        from data_generation.testcase_pre_data import (
+                            collect_testcase_text,
+                            extract_login_credentials,
+                        )
+
+                        blob = collect_testcase_text(tc)
+                        creds = extract_login_credentials(blob)
+                        step_count = tc.steps.count()
+                        if step_count:
+                            env["WHARTTEST_CASE_STEP_COUNT"] = str(step_count)
+                        if creds.get("username"):
+                            env["WHARTTEST_USERNAME"] = creds["username"]
+                        if creds.get("password"):
+                            env["WHARTTEST_PASSWORD"] = creds["password"]
+                        if creds.get("login_url"):
+                            env["WHARTTEST_LOGIN_URL"] = creds["login_url"]
+                        if "工单总览" in blob or "数据总览" in blob:
+                            env["WHARTTEST_OVERVIEW_CASE"] = "1"
+                        if "通知记录" in blob or "通知中心" in blob:
+                            env["WHARTTEST_NOTIFICATION_CASE"] = "1"
+                except Exception as exc:
+                    logger.debug(
+                        "[execute_skill_script] overview case hint skipped: %s", exc
+                    )
             artifacts_before = _snapshot_artifact_files(artifacts_dir)
 
             # Windows 兼容：将单引号包裹的参数转换为双引号（用于 cmd.exe）
@@ -858,7 +1238,12 @@ def get_skill_tools(
             # 持久化 Playwright 会话路径
             # 仅当 session_id 存在 + skill_name == 'playwright-skill' + 命令是 run.js 调用时启用
             if session_id and skill_name == "playwright-skill":
-                run_js_args = extract_runjs_args(exec_command)
+                inline_code = extract_playwright_inline_code(command, exec_command)
+                run_js_args = (
+                    [inline_code]
+                    if inline_code
+                    else extract_runjs_args(exec_command)
+                )
                 if run_js_args is not None:
                     # 调试日志
                     logger.debug(f"[execute_skill_script] run_js_args: {run_js_args}")
@@ -872,7 +1257,7 @@ def get_skill_tools(
                             skill_dir=skill_dir,
                             run_js_args=run_js_args,
                             env=env,
-                            timeout_seconds=120,
+                            timeout_seconds=60,
                         )
                         logger.info(
                             f"[execute_skill_script] 持久化会话执行完成, session_key={session_key}"
@@ -881,6 +1266,12 @@ def get_skill_tools(
                         cleaned_output = _truncate_skill_output(cleaned_output)
                         cleaned_output = _with_failure_reminder(
                             cleaned_output, skill_name=skill_name
+                        )
+                        auto_upload_notes = _auto_upload_case_screenshots(
+                            cleaned_output,
+                            project_id=current_project_id,
+                            case_id=current_test_case_id,
+                            env=env,
                         )
                         result_output = (
                             cleaned_output.strip()
@@ -893,6 +1284,8 @@ def get_skill_tools(
                             f'{result_output}\n'
                             f'[提示] 后续步骤请继续使用 session_id="{session_id}"；截图已保存在 {screenshots_dir}'
                         )
+                        if auto_upload_notes:
+                            result_output = f"{result_output}\n{auto_upload_notes}"
                         return _finalize_skill_result(
                             result_output,
                             skill_dir=skill_dir,
@@ -904,7 +1297,7 @@ def get_skill_tools(
                             "[execute_skill_script] 持久化 Playwright 执行超时"
                         )
                         return _with_failure_reminder(
-                            "错误: 命令执行超时（120秒）",
+                            "错误: 命令执行超时（60秒）",
                             skill_name=skill_name,
                         )
                     except Exception as e:

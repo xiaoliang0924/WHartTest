@@ -16,10 +16,27 @@ _ASSIGNEE_PATTERNS = (
 
 _CREATE_ONLY_KEYWORDS = ('仅创建', '只创建', '仅生成', '不要分配', '无需分配', '不分配', '不要指派', '无需指派')
 _NEGATED_ASSIGN_PATTERN = re.compile(r'(?:不要|无需|不(?:要)?)(?:分配|指派)')
+_ASSIGN_PERMISSION_PHRASES = (
+    '已分配访问权限',
+    '分配访问权限',
+    '已分配访问',
+    '访问权限',
+    '权限分配',
+    '分配权限',
+    '权限验证',
+    '权限校验',
+)
 
 
 def _wants_create_only(text: str) -> bool:
     return any(keyword in text for keyword in _CREATE_ONLY_KEYWORDS)
+
+
+def _strip_permission_assign_phrases(text: str) -> str:
+    cleaned = text or ''
+    for phrase in _ASSIGN_PERMISSION_PHRASES:
+        cleaned = cleaned.replace(phrase, '')
+    return cleaned
 
 
 def _mentions_assign_action(text: str) -> bool:
@@ -28,14 +45,18 @@ def _mentions_assign_action(text: str) -> bool:
         return False
     if _NEGATED_ASSIGN_PATTERN.search(text):
         return False
-    return any(keyword in text or keyword in text.lower() for keyword in ('分配', '指派', 'assign'))
+    cleaned = _strip_permission_assign_phrases(text)
+    return any(
+        keyword in cleaned or keyword in cleaned.lower()
+        for keyword in ('分配', '指派', 'assign')
+    )
 
 
 # Ordered rules: first match wins (more specific keywords before generic ones).
 _INTENT_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (('审批工单', 'approval'), 'biz_create_approval_processing'),
     (('转派',), 'biz_create_and_transfer'),
-    (('完成', '闭环', 'resolve', '已完成', '已关闭'), 'biz_create_assign_resolve'),
+    (('完成工单', '工单完成', '闭环', 'resolve', '已完成', '已关闭'), 'biz_create_assign_resolve'),
     (('领取', 'claimed'), 'biz_create_and_claim'),
     (('处理中',), 'biz_create_and_claim'),
     (('待处理', 'pending_process', '我的工单'), 'biz_create_and_assign'),

@@ -416,10 +416,35 @@ def _screenshot_dir_images():
     return images
 
 
+MIN_VALID_SCREENSHOT_BYTES = 15000
+
+
 def _extract_step_hint(name: str):
     import re
     match = re.search(r'(?:step|步骤)[_\-\s]*(\d+)', name or '', re.I)
     return match.group(1) if match else None
+
+
+def _is_blank_screenshot(path: str) -> bool:
+    try:
+        return os.path.getsize(path) < MIN_VALID_SCREENSHOT_BYTES
+    except OSError:
+        return True
+
+
+def _step_file_matches_hint(basename: str, hint: str) -> bool:
+    lowered = (basename or '').lower()
+    if not hint or hint not in lowered:
+        return False
+    padded = hint.zfill(2)
+    patterns = (
+        f'step{hint}',
+        f'step_{hint}',
+        f'step{padded}',
+        f'step_{padded}',
+        f'步骤{hint}',
+    )
+    return any(pattern in lowered for pattern in patterns)
 
 
 def _is_last_png_basename(name: str) -> bool:
@@ -453,14 +478,49 @@ def _fallback_recent_screenshot(requested_path: str):
     candidates = recent or images
     ranked = sorted(candidates, key=os.path.getmtime, reverse=True)
     for path in ranked:
-        basename = os.path.basename(path)
-        if hint in basename and (
-            f'step{hint}' in basename.lower()
-            or f'step_{hint}' in basename.lower()
-            or f'步骤{hint}' in basename
-        ):
+        if _step_file_matches_hint(os.path.basename(path), hint):
             return path
     return None
+
+
+def _fallback_non_blank_screenshot(requested_path: str):
+    """Prefer step-specific captures when the requested file is missing or blank."""
+    fallback = _fallback_recent_screenshot(requested_path)
+    if fallback and os.path.exists(fallback) and not _is_blank_screenshot(fallback):
+        return fallback
+
+    images = [
+        path for path in _screenshot_dir_images()
+        if os.path.exists(path) and not _is_blank_screenshot(path)
+    ]
+    if not images:
+        return None
+
+    requested_name = os.path.basename((requested_path or '').strip())
+    hint = _extract_step_hint(requested_name)
+    if hint:
+        ranked = sorted(images, key=os.path.getmtime, reverse=True)
+        matched = [
+            path
+            for path in ranked
+            if _step_file_matches_hint(os.path.basename(path), hint)
+        ]
+        if matched:
+            return max(matched, key=lambda path: os.path.getsize(path))
+
+    last_path = next(
+        (path for path in images if _is_last_png_basename(path)),
+        None,
+    )
+    if last_path:
+        return last_path
+
+    return max(images, key=os.path.getmtime)
+
+
+def _is_case_step_filename(name: str) -> bool:
+    import re
+    return bool(re.match(r'^case_\d+_step\d+\.png$', (name or '').lower()))
 
 
 def _resolve_screenshot_file_path(file_path: str):
@@ -469,10 +529,29 @@ def _resolve_screenshot_file_path(file_path: str):
     if not normalized_path:
         return normalized_path, []
 
-    if os.path.exists(normalized_path):
+    search_dirs = _collect_screenshot_candidate_dirs()
+    basename = os.path.basename(normalized_path)
+    strict_case_step = _is_case_step_filename(basename)
+
+    if os.path.exists(normalized_path) and not _is_blank_screenshot(normalized_path):
         return normalized_path, []
 
-    search_dirs = _collect_screenshot_candidate_dirs()
+    if strict_case_step:
+        # case_1332_step3.png 必须精确存在，禁止回退到 step_03.png / last.png
+        if os.path.exists(normalized_path):
+            return normalized_path, search_dirs
+        resolved_path = _search_file_in_dirs(basename, search_dirs)
+        if resolved_path and os.path.exists(resolved_path):
+            return resolved_path, search_dirs
+        return normalized_path, search_dirs
+
+    if os.path.exists(normalized_path) and _is_blank_screenshot(normalized_path):
+        fallback_path = _fallback_non_blank_screenshot(normalized_path)
+        if fallback_path:
+            return fallback_path, search_dirs
+
+    if os.path.exists(normalized_path):
+        return normalized_path, search_dirs
     candidate_names = []
     if os.sep not in normalized_path and '/' not in normalized_path:
         candidate_names.append(normalized_path)
@@ -484,9 +563,14 @@ def _resolve_screenshot_file_path(file_path: str):
     for candidate_name in candidate_names:
         resolved_path = _search_file_in_dirs(candidate_name, search_dirs)
         if resolved_path:
+            if not _is_blank_screenshot(resolved_path):
+                return resolved_path, search_dirs
+            fallback_path = _fallback_non_blank_screenshot(resolved_path)
+            if fallback_path:
+                return fallback_path, search_dirs
             return resolved_path, search_dirs
 
-    fallback_path = _fallback_recent_screenshot(normalized_path)
+    fallback_path = _fallback_non_blank_screenshot(normalized_path)
     if fallback_path and os.path.exists(fallback_path):
         return fallback_path, search_dirs
 
@@ -843,6 +927,76 @@ def _parse_steps(steps_str):
 
 
 # Action 路由
+ACTION_REQUIRED_ARGS = {
+    "get_modules": ("project_id",),
+    "add_module": ("project_id", "name"),
+    "get_testcases": ("project_id", "module_id"),
+    "get_testcase_detail": ("project_id", "case_id"),
+    "add_testcase": ("project_id", "module_id", "name"),
+    "edit_testcase": ("project_id", "case_id"),
+    "upload_screenshot": ("project_id", "case_id", "file_path"),
+    "upload_screenshots": ("project_id", "case_id", "file_paths"),
+    "list_files": ("project_id",),
+    "get_file_detail": ("project_id", "file_id"),
+    "upload_file": ("project_id", "file_path"),
+    "upload_files": ("project_id", "file_paths"),
+    "validate_files": ("project_id", "file_ids"),
+    "get_file_references": ("project_id", "file_id"),
+    "delete_file": ("project_id", "file_id"),
+    "get_file_settings": ("project_id",),
+    "update_file_settings": ("project_id",),
+    "cleanup_unreferenced_files": ("project_id",),
+    "download_file": ("project_id", "file_id"),
+    "preview_file": ("project_id", "file_id"),
+}
+
+ACTION_EXAMPLES = {
+    "get_testcase_detail": (
+        "python whart_tools.py --action get_testcase_detail --project_id 1 --case_id 1332"
+    ),
+    "upload_screenshot": (
+        "python whart_tools.py --action upload_screenshot --project_id 1 --case_id 1332 "
+        "--file_path case_1332_step1.png --step_number 1"
+    ),
+    "get_testcases": (
+        "python whart_tools.py --action get_testcases --project_id 1 --module_id 5"
+    ),
+}
+
+
+def _apply_execution_env_defaults(args):
+    """单条用例执行时，skill_tools 会注入 WHARTTEST_PROJECT_ID / WHARTTEST_CASE_ID。"""
+    if args.project_id is None:
+        env_pid = (os.environ.get("WHARTTEST_PROJECT_ID") or "").strip()
+        if env_pid.isdigit():
+            args.project_id = int(env_pid)
+    if args.case_id is None:
+        env_cid = (os.environ.get("WHARTTEST_CASE_ID") or "").strip()
+        if env_cid.isdigit():
+            args.case_id = int(env_cid)
+    return args
+
+
+def _validate_action_args(args):
+    required = ACTION_REQUIRED_ARGS.get(args.action, ())
+    missing = [
+        name for name in required
+        if getattr(args, name, None) in (None, "")
+    ]
+    if not missing:
+        return None
+    flags = ", ".join(f"--{name}" for name in missing)
+    payload = {
+        "error": f"缺少必填参数: {flags}",
+        "action": args.action,
+        "hint": "用例管理执行时 project_id/case_id 已注入环境变量，请勿省略；或查看消息中的【已注入用例详情】块。",
+    }
+    example = ACTION_EXAMPLES.get(args.action)
+    if example:
+        payload["example"] = example
+    return payload
+
+
 ACTIONS = {
     "get_projects": lambda args: get_projects(),
     "get_modules": lambda args: get_modules(args.project_id),
@@ -932,6 +1086,12 @@ def main():
     parser.add_argument("--auto_delete_zero_refs", help="引用为0时自动删除 (true/false)")
 
     args = parser.parse_args()
+    args = _apply_execution_env_defaults(args)
+    validation_error = _validate_action_args(args)
+    if validation_error:
+        print(json.dumps(validation_error, indent=2, ensure_ascii=False))
+        sys.exit(1)
+
     result = ACTIONS[args.action](args)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 

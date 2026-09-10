@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
 from typing import Any, Optional
 
 from django.utils import timezone
@@ -399,6 +401,37 @@ def ensure_execution_result_report(
     }
 
 
+def _cleanup_testcase_screenshots(testcase_id: int) -> None:
+    """Delete previous screenshots so each run starts with a clean set."""
+    try:
+        from django.conf import settings
+
+        from testcases.models import TestCase, TestCaseScreenshot
+
+        screenshots = list(TestCaseScreenshot.objects.filter(test_case_id=testcase_id))
+        for screenshot in screenshots:
+            if screenshot.screenshot and os.path.isfile(screenshot.screenshot.path):
+                try:
+                    os.remove(screenshot.screenshot.path)
+                except OSError:
+                    pass
+            screenshot.delete()
+
+        testcase = TestCase.objects.filter(id=testcase_id).only("project_id").first()
+        if testcase and testcase.project_id:
+            runtime_dir = os.path.join(
+                settings.MEDIA_ROOT,
+                "skill_runtime",
+                "screenshots",
+                str(testcase.project_id),
+                str(testcase_id),
+            )
+            if os.path.isdir(runtime_dir):
+                shutil.rmtree(runtime_dir, ignore_errors=True)
+    except Exception as exc:
+        logger.warning("Failed to cleanup screenshots for testcase %s: %s", testcase_id, exc)
+
+
 def start_testcase_run_record(
     *,
     testcase_id: int,
@@ -412,6 +445,8 @@ def start_testcase_run_record(
     except TestCase.DoesNotExist:
         logger.warning("Skip run record: testcase %s not found", testcase_id)
         return None
+
+    _cleanup_testcase_screenshots(testcase_id)
 
     record, created = TestCaseRunRecord.objects.get_or_create(
         session_id=session_id,

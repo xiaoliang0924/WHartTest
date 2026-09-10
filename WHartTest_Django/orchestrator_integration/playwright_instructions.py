@@ -53,56 +53,42 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
 
 当请求携带 `test_case_id`（来自用例管理「执行」按钮）时：
 - 该 ID 是**用例管理/功能测试用例**的主键，不是 UI 自动化模块 `UiTestCase` 的 ID。
-- **读取步骤**：使用 `whart-test` → `get_testcase_detail --project_id <项目ID> --case_id <test_case_id>`。
+- **读取步骤**：后端已注入完整步骤；**禁止**再调用 `get_testcase_detail` / `get_testcases`（易漏 `--project_id` 导致退出码 2）。
+- 若必须调用 whart-test，**必须**带 `--project_id` 与 `--case_id`（见上方注入块）。
 - **禁止**直接用 `ui-automation-skill` 的 `get_testcase` / `execute_testcase` 按同一数字 ID 查询（会误报不存在）。
-- **浏览器执行**：优先 `playwright-skill`（或 `agent-browser-skill`）。
-- **截图回传**：使用 `whart-test` 的 `upload_screenshot` / `upload_screenshots`，`case_id` 与上述 test_case_id 相同。
-  - 每步必须先 `page.screenshot({ path: '<SCREENSHOT_DIR>/case_<id>_step<N>.png' })`，再按**该文件名**上传。
-  - `upload_screenshot` 必须带 `step_number=<N>`。
-  - **禁止**多步都上传 `last.png`（会覆盖导致所有步骤显示同一张图）。
-  - 日志里的 `[SCREENSHOT_STEP_FILE] step_XX.png` 仅作参考，上传时仍用 `case_<id>_step<N>.png` 命名。
-  - 禁止中文文件名如 `步骤1_登录成功.png`。
+- **浏览器执行**：**只能**用 `playwright-skill`，全程 `session_id="case_<test_case_id>"`。
+- **禁止** `playwright-cli` / `browser-use`（snapshot 后 `click eXX` 极易 Element not found，且无法保持登录态）。
+- **截图回传（唯一入口）**：
+  - 每步结束后调用 `await helpers.screenshotCaseStep(page, <N>);`（N 与步骤编号一致）。
+  - 系统会自动将该截图上传到用例详情。
+  - **严禁**调用 `whart-test` 的 `upload_screenshot` / `upload_screenshots`；严禁手动上传任何文件。
 
 ## 【步骤执行纪律】（违反会导致跳步、虚报通过）
 
-1. **逐步执行**：必须按 `get_testcase_detail` 返回的步骤编号顺序执行，**一步一脚本、一步一截图**；禁止跳步、合并步骤或省略任何一步。
-2. **筛选步骤单独成步**：若某步描述含「筛选条件」「工单状态」「查询」：
-   - 该步的 `execute_skill_script` **只能**做：点击工单状态下拉 → 选择目标状态（如「处理中」）→ 点击蓝色「查询」→ 等待列表刷新；
-   - **必须**使用 `helpers.filterWorkOrdersByStatus(page, '处理中')` 或 `helpers.selectFormDropdownOption(page, '工单状态', '处理中')`；
-   - **禁止** `page.getByText('处理中').click()` / `getByText('待处理').click()`（会 strict mode 命中表格多行，退出码 1）；
-   - **禁止**在同一段脚本里继续点击「处理/领取/进入详情」；
-   - **禁止**未筛选就在混合状态列表里直接找行点击。
-3. **筛选后必须验收**：刷新后逐行检查「当前状态」列；若仍出现「处理中」「已完成」「已关闭」等非目标状态，输出 `RESULT=FAIL: 筛选未生效，列表仍为混合状态` 并**停止**，不得进入下一步，**不得**在总结里标记该步通过。
-4. **截图与步骤对齐**：每步截图 title/文件名必须含 `步骤N`；第 N 步截图必须是完成第 N 步后的页面（筛选步必须是筛选后的列表页，不能是详情页）。
-   - 禁止不截图直接 upload；禁止连续多步 upload 同一文件。
-   - 若 upload 报「文件不存在」，应重新 `page.screenshot` 保存 `case_<id>_step<N>.png` 后再传，**不得**用其它步骤的旧图凑数。
-5. **结束必须输出完整报告**：通过、失败、或脚本报错无法继续时，都要立刻输出「测试执行结果」完整报告（含基本信息、步骤表、问题分析、结论），格式见下方。禁止沉默结束、禁止等用户追问。
-   脚本问题（SyntaxError / chromium already declared / ERR_BLOCKED_BY_CLIENT / 文件不存在）应先修正重试当前步；重试后仍无法继续，同样输出完整「不通过」报告。
+1. **逐步执行**：按步骤编号一步一脚本、一步一截图；禁止跳步、合并或省略。
+2. **筛选单独成步**：步骤含筛选/查询时，只做选条件 + 查询 + 验收 + 截图，不要同一步点进详情。
+   - 普通下拉：`selectFormDropdownOption(page, 字段标签, 选项)`。选完必须看筛选框里的值，禁止用列表单元格里的同名状态代替。
+   - 弹窗多选：`selectDialogMultiSelect(page, 字段标签, 选项名)`
+   - 禁止用 `getByText('某状态').click()` 点表格里的状态文字。
+   - 禁止 `getByPlaceholder('请选择工单状态')`：Element Plus 下拉通常没有这个 placeholder。
+3. **筛选后验收**：列表列值必须符合该步预期；否则 `RESULT=FAIL` 并停止。
+   断言区块/字段用 `helpers.assertPageShows(page, ['基本信息', '工单类型'])`。
+   禁止 `getByText('工单类型*')`：必填星号是独立节点，整段匹配会误判缺失。
+   断言用 `.first()` / `getByRole`，避免 `getByText` 命中多个节点。
+   「xx标签」以页面徽章文案为准（如高/中/低），不要只搜字段名本身。
+4. **截图**：每步 `screenshotCaseStep(page, N)`，系统自动上传。禁止 `upload_screenshot`。第 N 步图必须是完成第 N 步后的页面。
+5. **结束必须输出完整报告**。脚本 SyntaxError 先改当前步再重试。
 
 """ + EXECUTION_RESULT_REPORT_FORMAT + """
 
 ## 【Playwright 执行铁律】不遵守会出现「命令执行失败 (退出码 1)」
 
 1. **全程同一个 session_id**：所有 `execute_skill_script(skill_name="playwright-skill")` 必须带 `session_id="case_<test_case_id>"`。直接使用已有 `page`，**禁止** `const { chromium } = require('playwright')` / `chromium.launch()` / `newPage()` / `browser.close()`。
-2. **登录或跳转后立刻** `await helpers.dismissBlockingDialogs(page);` 关掉「发现新版本 / 我知道了」，否则点击会被遮罩拦截。
+2. **登录或跳转后立刻** `await helpers.dismissBlockingDialogs(page);` 关掉「我知道了」类提示，否则点击会被遮罩拦截。
 3. **禁止 `#el-id-*`**：Element Plus 动态 ID 每次刷新都变。用 `getByRole('button', { name: '...' })`、`getByPlaceholder(...)`、`getByText(...)`。
 4. **容器内必须无头**：不要 `headless: false`。
 5. **产品不符合预期不要杀进程**：断言失败时 `console.log('RESULT=FAIL: ...')` + 截图上传，禁止 `throw` / `process.exit(1)`。通过则 `RESULT=PASS`。定位超时才允许脚本失败。
-6. **登录页是左右双栏，不要误判只能扫码**：
-   - 左侧：企业微信扫码登录（可忽略）
-   - 右侧：账号密码登录，placeholder 为「请输入用户名」「请输入密码」，按钮「登 录」
-   - 必须用右侧表单登录，例如：
-     `await page.getByPlaceholder('请输入用户名').fill('17670400361');`
-     `await page.getByPlaceholder('请输入密码').fill('000000');`
-     `await page.getByRole('button', { name: '登 录' }).click();`
-   - **禁止**因为页面文案出现「企业微信扫码登录」就判定没有账号密码框并失败。
-7. **工单状态筛选（处理中/待处理等）**：
-   ```javascript
-   await helpers.filterWorkOrdersByStatus(page, '处理中');
-   // 或分步：
-   await helpers.selectFormDropdownOption(page, '工单状态', '处理中');
-   await page.getByRole('button', { name: '查询' }).click();
-   await page.waitForLoadState('networkidle');
-   ```
-   **禁止** `page.getByText('处理中').click()`（表格里有多行「处理中」会 strict mode violation）。
+6. **步骤1登录**：该步只调用 `await helpers.loginStep1(page);`（已含步骤1截图，禁止再调用 `screenshotCaseStep(page, 1)`）。只有 stdout 出现 `RESULT=PASS` 才算成功；出现 `RESULT=FAIL` 必须停止。步骤 N 截图：`await helpers.screenshotCaseStep(page, N);`。禁止手写路径、禁止 Python 风格 goto/fill/click。
+7. **下拉筛选**：`selectFormDropdownOption(page, 字段标签, 选项)`。禁止 `getByText('某状态').click()`。
+8. **菜单页不要走错**：步骤写哪个菜单就进哪个页。优先用 `navigateByMenu(page, 菜单名)`；明确知道目标路由时才传唯一 URL 片段，禁止传 `/work-order` 这类父级公共前缀。
 """

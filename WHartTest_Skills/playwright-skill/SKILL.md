@@ -1,182 +1,57 @@
 ---
 name: playwright-skill
-description: 浏览器自动化执行工具。用于执行 Web 页面测试、表单填写、登录验证、截图等浏览器操作。
+description: 通用浏览器自动化。用于页面操作、表单填写、登录、截图。不绑定具体产品和用例。
 ---
 
 # Playwright 浏览器自动化
 
-执行浏览器自动化任务，支持页面测试、表单操作、登录验证等。
+通用浏览器执行工具。产品文案、菜单路径、筛选字段以**当前用例步骤**为准，不要写死某个系统。
 
-## ⚠️ 强制规则（违反会导致退出码 1）
+## 强制规则
 
-### 1. 多步骤必须用同一个 session_id
+1. **同一 session_id**：多步骤必须全程 `session_id="case_<用例ID>"`，直接用已有 `page`。禁止 `chromium.launch()` / `newPage()` / `browser.close()`。
+2. **跳转后关遮挡弹窗**：`await helpers.dismissBlockingDialogs(page);` 只关「我知道了」类提示，不要点业务弹窗的确定/取消。
+3. **禁止 `#el-id-*`**：用 `getByRole` / `getByPlaceholder` / `getByText`。
+4. **容器必须无头**：有 session_id 时不要自己 launch。
+5. **断言失败不要杀进程**：`console.log('RESULT=FAIL: ...')` + 截图。通过则 `RESULT=PASS`。禁止 `throw` / `process.exit(1)`。
 
-执行测试用例、登录后继续操作时，**每一步** `execute_skill_script` 都必须带相同 `session_id`（建议 `case_{用例ID}`）。
+## 通用 helpers
 
-- 持久化模式下直接使用已有 `page`，**禁止** `chromium.launch()` / `browser.newPage()` / `browser.close()`
-- 不要每步新开浏览器（会反复登录，弹窗反复出现，登录态丢失）
+| 用途 | 调用 |
+|------|------|
+| 步骤1：先截登录页再登录 | 该步只调用 `await helpers.loginStep1(page);`（已含步骤1截图，禁止再调用 `screenshotCaseStep(page, 1)`；只有 `RESULT=PASS` 才算成功） |
+| 按步骤截图（系统自动上传） | `await helpers.screenshotCaseStep(page, <步骤号>);` |
+| 列表页截图 | 自动包含搜索/筛选区 + 列表；步骤≥2 时若仍在登录页会报 `RESULT=FAIL` |
+| 关遮挡弹窗 | `await helpers.dismissBlockingDialogs(page);` |
+| 点按钮（先关遮罩/侧栏） | `await helpers.clickPageButton(page, '查询');`；按钮名带 `+` 时也可写成 `+ 创建工单` |
+| 断言区块/字段可见 | `await helpers.assertPageShows(page, ['基本信息', '工单类型', '工单摘要']);`；禁止 `getByText('工单类型*')`，必填星号是独立节点 |
+| 列表行点操作 | `await helpers.clickRowAction(page, '行内文本', '按钮名');` |
+| 普通下拉 | `await helpers.selectFormDropdownOption(page, '工单状态', '待处理');`；选完以筛选框当前值为准，禁止用列表里的同名文字代替 |
+| 筛选项填值 | `await helpers.fillFilterField(page, '字段标签', '值');` |
+| 弹窗多选（带 + 的筛选） | `await helpers.selectDialogMultiSelect(page, '字段标签', '选项名');` |
+| 点菜单并校验 | `await helpers.navigateByMenu(page, '菜单名');`；也兼容 `'父菜单 > 子菜单'`，明确知道目标路由时才传唯一 URL 片段 |
+| 点嵌套菜单路径 | `await helpers.navigateByMenuPath(page, ['父菜单', '子菜单']);`；禁止使用父级公共 URL 前缀 |
+| 组合筛选 | `await helpers.filterByFields(page, { dropdowns: [{ fieldLabel, option }] });` |
+| 看页面结构 | `await helpers.describePageForAI(page);` |
 
-### 2. 登录或跳转后先关遮挡弹窗
+登录地址/账号优先用环境变量：`WHARTTEST_LOGIN_URL`、`WHARTTEST_USERNAME`、`WHARTTEST_PASSWORD`。
 
-目标系统登录后常弹出「发现新版本」，不关掉则后续点击全部被拦截（`intercepts pointer events` → 退出码 1）。
+## 截图
 
-```javascript
-await helpers.dismissBlockingDialogs(page);
-```
+- 只写 `await helpers.screenshotCaseStep(page, N);`
+- 系统自动上传到用例详情
+- **禁止**调用 `upload_screenshot` / `upload_screenshots`
+- **禁止**手写 `case_xxx.png` 路径字符串
 
-只关「我知道了」这类一次性提示，不要点业务弹窗的「确定/取消」。
-
-登录页是**左右双栏**：左侧企微扫码，**右侧**才是账号密码（`请输入用户名` / `请输入密码` / 按钮 `登 录`）。  
-**禁止**看到「企业微信扫码登录」就判定无法账号登录。
-
-### 3. 禁止使用会变的选择器
-
-**禁止** `#el-id-*`、`#el-id-847-3` 等 Element Plus 自动生成 ID（每次刷新都变）。
-
-优先使用：
-
-```javascript
-page.getByRole('button', { name: '批量操作' })
-page.getByPlaceholder('请输入用户名')
-page.getByText('我的工单', { exact: true })
-```
-
-打开页面后调用 `helpers.describePageForAI(page)` 获取结构，再操作。**禁止猜测选择器，禁止靠截图认元素。**
-
-### 4. Docker / 后台执行必须无头
-
-```javascript
-chromium.launch({ headless: true })
-```
-
-`headless: false` 在容器里会失败。有 `session_id` 时不要自己 launch，系统已按无头启动。
-
-### 5. 产品不符合预期 ≠ 脚本崩溃
-
-定位超时、语法错误可以让脚本失败。  
-**断言没过**（例如按钮该 disabled 却仍可点）时：
-
-1. `console.log('RESULT=FAIL: ...原因...')`
-2. 截图并 `upload_screenshot`
-3. **禁止** `throw` / `process.exit(1)`（界面会显示成「命令执行失败」，不像用例失败）
-
-通过时输出 `RESULT=PASS`。
-
-### 6. 筛选类步骤必须单独执行（用例管理执行时强制）
-
-当用例步骤含「筛选条件」「工单状态」「查询」时：
-
-- **一步一脚本**：该步只执行筛选（选下拉 → 点「查询」→ 等列表刷新 → 验收 → 截图），**禁止**在同一段脚本里点击「处理/领取/进入详情」。
-- **禁止跳步**：不得跳过筛选，直接在混合状态列表里找「待处理」行点击。
-- **验收**：检查「当前状态」列是否**全部**为目标状态；若仍混合多种状态，输出 `RESULT=FAIL: 筛选未生效` 并停止，总结里不得标记该步通过。
-- **禁止** `page.getByText('处理中').click()`：表格多行同文案会 **strict mode violation**。必须用：
-  ```javascript
-  await helpers.filterWorkOrdersByStatus(page, '处理中');
-  // 或 helpers.selectFormDropdownOption(page, '工单状态', '处理中') 后点「查询」
-  ```
-- **截图**：文件名含 `step{步骤号}`，画面必须是筛选后的列表页。
-
-示例流程（步骤 3 = 筛选「待处理」）：
-
-1. `describePageForAI(page)` 找到「工单状态」下拉与蓝色「查询」
-2. 仅在本步骤脚本中：选「待处理」→ 点「查询」→ `waitForLoadState`
-3. 检查 tbody 每行「当前状态」是否均为「待处理」；否则 `RESULT=FAIL`
-4. `screenshot` 保存为 `case_{id}_step3.png`，再 `upload_screenshot`
-
----
-
-## 使用方法
-
-通过 `execute_skill_script` 调用，传入 inline 代码：
+## 调用方式
 
 ```
-node run.js "your playwright code here"
+node run.js "await helpers.loginStep1(page);"
 ```
 
-代码必须写在一行，用分号分隔。run.js 会自动包装 async IIFE 和 require。**禁止** `--session`、`--inline`、`--eval`。
+代码一行、分号分隔。也可以只传以 `await`/`const` 开头的裸 JS。
 
-也可以只传裸 JS（以 `const`/`await` 开头），系统会自动包成 `node run.js '...'`。
+## 逐步执行
 
-## 截图路径约定
-
-**必须使用 `process.env.SCREENSHOT_DIR`**。文件名只用英文和数字，例如 `case_{case_id}_step{step_number}.png`。**禁止**中文文件名（如 `步骤1_登录成功.png`），上传会对不上。
-
-```javascript
-const dir = process.env.SCREENSHOT_DIR;
-await page.screenshot({ path: `${dir}/case_11_step1.png` });
-```
-
-## 先获取页面结构，再操作元素
-
-```javascript
-await page.goto('http://example.com');
-await helpers.dismissBlockingDialogs(page);
-const desc = await helpers.describePageForAI(page);
-console.log(desc);
-```
-
-然后用返回的稳定选择器或 getByRole / getByPlaceholder 操作。
-
-## 持久化会话模式（用例执行默认用这个）
-
-### 核心规则
-
-1. **session_id 全程一致**，否则会开多个浏览器
-2. **直接用 `page`**，不要 `chromium.launch()`
-3. **不要 `browser.close()`**，空闲 15 分钟自动关
-
-### 示例
-
-**步骤 1：打开并登录**
-```
-skill_name="playwright-skill"
-session_id="case_1354"
-command='node run.js "const dir = process.env.SCREENSHOT_DIR; await page.goto(\'http://test.bot.by56.com/work-order/login\', { waitUntil: \'networkidle\' }); await page.getByPlaceholder(\'请输入用户名\').fill(\'19902579992\'); await page.getByPlaceholder(\'请输入密码\').fill(\'000000\'); await page.getByRole(\'button\', { name: \'登 录\' }).click(); await page.waitForLoadState(\'networkidle\'); await helpers.dismissBlockingDialogs(page); await page.screenshot({ path: dir + \'/case_1354_login.png\' });"'
-```
-
-**步骤 2：同一浏览器继续操作**
-```
-skill_name="playwright-skill"
-session_id="case_1354"
-command='node run.js "await helpers.dismissBlockingDialogs(page); const bulkBtn = page.getByRole(\'button\', { name: \'批量操作\' }); console.log(\'isDisabled=\', await bulkBtn.isDisabled());"'
-```
-
-### 持久化 vs 非持久化
-
-| 特性 | 无 session_id | 有 session_id |
-|------|---------------|---------------|
-| 浏览器 | 代码自己 launch/close | 系统管理，直接用 `page` |
-| 跨步骤登录态 | 不保持 | 保持 |
-| 适用 | 单步探查 | **测试用例、多步骤操作** |
-
-## 非持久化单步示例（必须 headless: true）
-
-```
-node run.js "const dir = process.env.SCREENSHOT_DIR; const browser = await chromium.launch({ headless: true }); const page = await browser.newPage(); await page.goto('http://example.com'); await helpers.dismissBlockingDialogs(page); await page.screenshot({ path: dir + '/example.png' }); await browser.close();"
-```
-
-## 其他 helpers
-
-- `helpers.dismissBlockingDialogs(page)`：关掉「发现新版本」等遮挡弹窗
-- `helpers.describePageForAI(page)`：可读的页面元素列表
-- `helpers.getPageStructure(page)`：结构化 JSON
-- `helpers.getPageText(page)`：可见文本
-
-## 常用定位（推荐）
-
-```javascript
-await page.getByPlaceholder('请输入用户名').fill('admin');
-await page.getByRole('button', { name: '登 录' }).click();
-await page.getByRole('button', { name: '批量操作' }).click();
-await page.getByText('我的工单', { exact: true }).click();
-```
-
-不要用：`#el-id-7201-8`、`#el-id-847-3`
-
-## 注意事项
-
-1. 截图路径必须用 `process.env.SCREENSHOT_DIR`
-2. inline 代码一行、分号分隔；字符串内双引号转义 `\"`
-3. 有 session_id 时不要 close 浏览器
-4. 用 `console.log()` 输出进度和 `RESULT=PASS/FAIL`
-5. Docker 里必须 `headless: true`
+按用例步骤编号一步一脚本、一步一截图。登录步骤的截图由 `loginStep1` 自带，不要重复截图。登录输出 `RESULT=FAIL` 时立即停止，禁止继续菜单步骤。筛选步只做筛选和验收，不要在同一步点进详情。
+禁止用 `page.getByText('某状态').click()` 选状态下拉（表格里常有多行同文案）。

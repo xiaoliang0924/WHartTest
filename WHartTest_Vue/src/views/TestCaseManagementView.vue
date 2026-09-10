@@ -258,11 +258,12 @@ const EXECUTION_RESULT_REPORT = `【结束报告（必须遵守）】
 未执行的步骤必须标「未执行」，不得标通过。`;
 
 const EXECUTION_STEP_DISCIPLINE = `【步骤执行纪律（必须遵守）】
-- 必须严格按用例步骤编号顺序逐步执行，禁止跳步、合并步骤或自行省略任何一步。
-- 若某步包含「筛选条件」「工单状态」「查询」等筛选操作：必须先完成下拉选择并点击蓝色「查询」，等待列表刷新后，逐行检查「当前状态」列是否全部符合该步预期；禁止在未筛选的混合列表中直接找行点击。
-- 筛选类步骤的预期结果未满足时（例如列表仍出现「处理中」「已完成」等其他状态标签）：必须判定该步失败并停止后续步骤，不得虚报通过。
-- 筛选工单状态禁止 \`page.getByText('处理中').click()\`（会 strict mode 命中表格多行）；必须用 \`helpers.filterWorkOrdersByStatus(page, '处理中')\` 或 \`helpers.selectFormDropdownOption(page, '工单状态', '处理中')\` 后再点「查询」。
-- 每一步必须单独截图并上传，截图序号与步骤编号一致；截图内容必须是完成该步操作后的页面状态，禁止用下一步的页面冒充上一步。
+- 严格按用例步骤编号逐步执行，禁止跳步、合并或省略。
+- 筛选步只做选条件、查询、验收、截图；不要在同一步点进详情。
+- 普通下拉用 selectFormDropdownOption；选完必须看筛选框显示的值，禁止用列表里的「待处理」文案代替已筛选。弹窗多选用 selectDialogMultiSelect(page, 字段标签, 选项名)；禁止 getByText 点表格里的状态文字。
+- 断言区块/字段用 helpers.assertPageShows(page, ['基本信息', '工单类型'])；禁止 getByText('工单类型*')，必填星号是独立节点。
+- 筛选未生效必须判定该步失败并停止，不得虚报通过。
+- 每步只用 screenshotCaseStep(page, N)，系统自动上传；禁止 upload_screenshot。
 - ${EXECUTION_RESULT_REPORT}`;
 
 // 根据测试类型列表生成提示词片段
@@ -816,17 +817,16 @@ ${EXECUTION_STEP_DISCIPLINE}
 
 【重要】此 ID 属于「用例管理」模块，不是 UI 自动化模块的用例 ID。
 - 禁止在 ui-automation-skill 中用 get_testcase / get_testcase_execute_data / execute_testcase 查询或执行该 ID（会误报不存在）。
-- 必须先用 whart-test skill：get_testcase_detail --project_id ${currentProjectId.value} --case_id ${testCase.id} 读取完整步骤与预期结果。
-- 浏览器操作优先 agent-browser-skill，必要时 playwright-skill 兜底。
-- 截图上传使用 whart-test：upload_screenshot / upload_screenshots（case_id=${testCase.id}）。
+- 后端已注入完整步骤，**禁止**再调用 get_testcase_detail。
+- 浏览器**只能**用 playwright-skill，全程 session_id="case_${testCase.id}"；**禁止** playwright-cli / browser-use（会 Element not found）。
+- 步骤1若是登录：该步只调用 await helpers.loginStep1(page);（已含步骤1截图，禁止重复截图；只有 RESULT=PASS 才能继续）
+- 每步截图：await helpers.screenshotCaseStep(page, <步骤号>); 系统自动上传，**禁止** upload_screenshot。
 
 请调用工具完成以下任务：
-1. 读取该测试用例的完整定义（步骤、预期、前置条件）。
-2. 按步骤编号顺序在浏览器中逐步执行，每一步都验证预期结果后再进入下一步。
-3. 每一步执行完成后立即截图，可单张或批量上传；截图必须对应当前步骤编号。
-4. 必须上传截图以供查看。
-5. 执行结束后必须输出完整「测试执行结果」报告（基本信息、步骤表、问题分析、结论）；未执行步骤标「未执行」。
-6. 若失败或中途无法继续：立刻输出完整「不通过」报告，不要等用户追问。不要只写三行【执行失败】。
+1. 按已注入的步骤编号顺序在浏览器中逐步执行，每一步都验证预期结果后再进入下一步。
+2. 每一步执行完成后调用 screenshotCaseStep，截图必须对应当前步骤编号。
+3. 执行结束后必须输出完整「测试执行结果」报告；未执行步骤标「未执行」。
+4. 若失败或中途无法继续：立刻输出完整「不通过」报告，不要等用户追问。
 
 附加信息：
 - 测试用例名称：${testCase.name}

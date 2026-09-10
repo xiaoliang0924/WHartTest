@@ -74,8 +74,8 @@
                 </div>
               </template>
               <template #passRate="{ record }">{{ record.pass_rate ?? progressPercent(record) }}%</template>
-              <template #status="{ record }"><a-tag :color="runStatusColor(record.status)">{{ runStatusText(record.status) }}</a-tag></template>
-              <template #createdAt="{ record }">{{ formatRunDate(record.created_at) }}</template>
+          <template #status="{ record }"><a-tag :color="runStatusColor(record.status)">{{ runStatusText(record.status) }}</a-tag></template>
+          <template #createdAt="{ record }">{{ formatRunDate(record.created_at) }}</template>
               <template #actions="{ record }">
                 <a-space wrap>
                   <a-button type="text" @click="openRun(record)">进入任务</a-button>
@@ -83,7 +83,7 @@
                   <a-button v-if="isManager" type="text" @click="openTaskEdit(record)">编辑</a-button>
                   <a-button v-if="isManager" type="text" status="danger" @click="removeTask(record)">删除</a-button>
                 </a-space>
-              </template>
+    </template>
             </a-table>
             <div v-if="runPagination.total > 0" class="table-pagination">
               <a-pagination
@@ -425,7 +425,7 @@
                   <a-button type="text" size="mini" :disabled="saving" @click="selectAllCases('create')">全选</a-button>
                   <a-button type="text" size="mini" :disabled="saving" @click="clearAllCases('create')">取消全选</a-button>
                   <a-tag color="arcoblue">已选 {{ form.testcase_ids.length }} 条</a-tag>
-                </div>
+  </div>
               </div>
               <a-spin :loading="optionsLoading" class="picker-spin">
                 <a-tree :data="caseTree" checkable block-node checked-strategy="child" :checked-keys="form.testcase_ids" :field-names="{ key: 'key', title: 'title', children: 'children' }" @check="(keys, event) => onTreeCheck(keys, event)">
@@ -528,7 +528,7 @@
                 style="margin-top:6px"
                 @update:model-value="(value: string) => setStepResult(record.step_number, { comment: value })"
               />
-            </template>
+</template>
           </a-table>
           <h4>备注</h4><p>{{ active.testcase_detail?.notes || '-' }}</p>
         </section>

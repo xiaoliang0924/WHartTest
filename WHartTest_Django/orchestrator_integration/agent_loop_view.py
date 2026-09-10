@@ -1204,6 +1204,23 @@ class AgentLoopStreamAPIView(View):
                 if pre_data_result.message_suffix:
                     effective_user_message = user_message + pre_data_result.message_suffix
 
+                from data_generation.testcase_pre_data import (
+                    build_testcase_navigation_hint_by_id,
+                    build_testcase_detail_suffix_by_id,
+                )
+
+                detail_suffix = await sync_to_async(build_testcase_detail_suffix_by_id)(
+                    int(test_case_id)
+                )
+                if detail_suffix:
+                    effective_user_message = effective_user_message + detail_suffix
+
+                nav_hint = await sync_to_async(build_testcase_navigation_hint_by_id)(
+                    int(test_case_id)
+                )
+                if nav_hint:
+                    effective_user_message = effective_user_message + nav_hint
+
             # 8.2 用例管理「执行」传入的 test_case_id 需明确 ID 命名空间
             if test_case_id:
                 effective_prompt = (effective_prompt or "") + MANUAL_TESTCASE_EXECUTION_HINT

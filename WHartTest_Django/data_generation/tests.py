@@ -359,6 +359,14 @@ class IntentRouterStateTests(DjangoTestCase):
             infer_business_template_key('筛选工单状态为待处理'),
             'biz_create_and_assign',
         )
+        self.assertEqual(
+            infer_business_template_key('点击查询，等待列表刷新完成\n工单状态筛选为待处理'),
+            'biz_create_and_assign',
+        )
+        self.assertEqual(
+            infer_business_template_key('完成工单并闭环'),
+            'biz_create_assign_resolve',
+        )
 
     def test_approval_ticket_uses_approval_processing_template(self):
         from data_generation.intent_router import (
@@ -373,6 +381,16 @@ class IntentRouterStateTests(DjangoTestCase):
         )
         params = build_input_params(text, {'input_params': {}, 'steps': []})
         self.assertEqual(params['ticketType'], 'approval')
+
+    def test_granted_access_permission_is_not_ticket_assign(self):
+        from data_generation.intent_router import infer_business_template_key
+
+        text = (
+            '普通用户-工单总览页面访问-权限验证\n'
+            '普通用户账号已分配访问权限\n'
+            '尝试访问工单总览页面'
+        )
+        self.assertIsNone(infer_business_template_key(text))
 
 
 class TestcasePreDataResolverTests(DjangoTestCase):
@@ -458,3 +476,206 @@ class TestcasePreDataResolverTests(DjangoTestCase):
         resolution = resolve_pre_data_for_testcase(testcase)
         self.assertEqual(resolution.source, 'module')
         self.assertEqual(resolution.plan.id, plan.id)
+
+    def test_page_access_permission_case_skips_ticket_pre_data(self):
+        from data_generation.testcase_pre_data import (
+            extract_login_credentials,
+            resolve_pre_data_for_testcase,
+        )
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='普通用户-工单总览页面访问-权限验证',
+            precondition=(
+                '1. 使用普通用户账号(test/test123)登录系统'
+                '(http://test.bot.by56.com/work-order/login)\n'
+                '2. 普通用户账号已分配访问权限'
+            ),
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=1,
+            description='使用普通用户账号登录系统',
+            expected_result='登录成功进入系统',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=2,
+            description='尝试访问工单总览页面',
+            expected_result='正常进入页面，数据根据权限展示',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=3,
+            description='检查页面数据范围',
+            expected_result='只展示该用户可见范围内的统计数据，数据隔离正确',
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.source, 'none')
+        self.assertIsNone(resolution.template_key)
+
+        creds = extract_login_credentials(testcase.precondition)
+        self.assertEqual(creds['username'], 'test')
+        self.assertEqual(creds['password'], 'test123')
+        self.assertIn('/work-order/login', creds['login_url'])
+
+    def test_create_page_display_case_skips_inferred_pre_data(self):
+        from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='页面入口展示-三大区块均展示',
+            precondition=(
+                '使用李亮账号(17670400361/000000)登录系统'
+                '(http://test.bot.by56.com/work-order/login)'
+            ),
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=1,
+            description='使用李亮账号登录系统',
+            expected_result='登录成功进入首页',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=2,
+            description='点击左侧导航【工单中心】->【工单列表】',
+            expected_result='进入工单列表页',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=3,
+            description='点击右上角【+ 创建工单】按钮',
+            expected_result='进入创建工单页面',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=4,
+            description='查看页面中“基本信息”区块',
+            expected_result='展示工单类型、工单摘要字段',
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.source, 'none')
+        self.assertIsNone(resolution.template_key)
+        self.assertEqual(resolution.skip_reason, '未识别到工单类前置数据需求')
+
+    def test_create_form_field_case_skips_inferred_pre_data(self):
+        from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='创建工单',
+            precondition='使用卖家账号(17670400028/000000)登录系统',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=3,
+            description='点击右上角创建工单按钮',
+            expected_result='跳转创建页，表单展示',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=4,
+            description='查看页面中“工单基本信息”区块',
+            expected_result='包含工单类型、工单来源字段',
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.source, 'none')
+        self.assertIsNone(resolution.template_key)
+
+    def test_pending_filter_export_case_skips_inferred_pre_data(self):
+        from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='待处理状态筛选后-文件仅含待处理工单',
+            precondition='系统中同时存在状态为「待处理」和其他状态的工单',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=3,
+            description='在筛选条件区域选择工单状态为待处理',
+            expected_result='筛选框显示待处理',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=4,
+            description='点击查询按钮，等待列表刷新完成',
+            expected_result='列表当前状态列仅显示待处理',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=6,
+            description='点击导出全部，核对导出文件数据行数',
+            expected_result='文件可打开且仅含待处理工单',
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.source, 'none')
+        self.assertIsNone(resolution.template_key)
+
+    def test_message_suffix_skips_row_action_when_case_is_page_access(self):
+        from data_generation.testcase_pre_data import (
+            PreDataResolution,
+            _build_message_suffix,
+        )
+
+        run = DataGenerationRun(
+            plan=None,
+            status=DataGenerationRun.STATUS_SUCCESS,
+            output_snapshot={'ticketNo': '2026090753915004'},
+            step_logs=[],
+        )
+        resolution = PreDataResolution(
+            plan=None,
+            template_key=None,
+            input_params={},
+            default_environment_id=None,
+            source='inferred',
+            fail_fast=False,
+        )
+        suffix = _build_message_suffix(
+            run,
+            resolution,
+            case_text='普通用户-工单总览页面访问-权限验证\n尝试访问工单总览页面',
+        )
+        self.assertIn('2026090753915004', suffix)
+        self.assertNotIn('fillFilterField', suffix)
+        self.assertNotIn('clickRowAction', suffix)
+        self.assertNotIn("'审批'", suffix)
+
+    def test_execution_hints_require_stable_login_and_unique_navigation(self):
+        from data_generation.testcase_pre_data import (
+            build_testcase_step_script_hints,
+        )
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='页面访问',
+            creator=self.user,
+        )
+        hints = build_testcase_step_script_hints(testcase)
+        self.assertIn('只有 stdout 出现 `RESULT=PASS` 才能判通过', hints)
+        self.assertIn('禁止再调 screenshotCaseStep', hints)
+        self.assertIn("navigateByMenu(page, '步骤里的菜单名')", hints)
+        self.assertIn('禁止用 `/work-order` 这类父级公共前缀', hints)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -38,6 +39,102 @@ _TICKET_CONTEXT_KEYWORDS = (
     'ticketno',
 )
 
+_PAGE_ACCESS_KEYWORDS = (
+    '页面访问',
+    '权限验证',
+    '权限校验',
+    '访问权限',
+    '菜单权限',
+    '无权限',
+    '权限不足',
+)
+
+_EXPORT_VERIFY_KEYWORDS = (
+    '导出全部',
+    '导出文件',
+    '核对导出',
+    '文件仅含',
+    '文件包含',
+    '仅导出',
+)
+
+_ROW_MUTATION_KEYWORDS = (
+    '领取',
+    '转派',
+    '派发',
+    '点击处理',
+    '确认领取',
+    '关闭工单',
+    '完成工单',
+    '处理人弹窗',
+)
+
+_UI_DISPLAY_ONLY_KEYWORDS = (
+    '入口展示',
+    '页面入口',
+    '区块',
+    '页面展示',
+    '均展示',
+    '查看页面',
+    '字段展示',
+    '表单展示',
+    '三大区块',
+)
+
+_EXISTING_TICKET_DATA_KEYWORDS = (
+    '系统内存在',
+    '系统中存在',
+    '至少1个',
+    '至少一条',
+    '至少1条',
+    '列表中存在',
+    '已存在',
+    '待分配',
+    'pending_assign',
+    '待处理',
+    'pending_process',
+    '处理中',
+    '领取',
+    'claimed',
+    '转派',
+    '派发',
+    '筛选',
+    '工单号',
+    'ticketno',
+    'ticket_no',
+    '处理人',
+    '审批工单',
+    '已完成',
+    '已关闭',
+    '造数',
+)
+
+_TICKET_ROW_ACTION_KEYWORDS = (
+    '工单号',
+    'ticketno',
+    'ticket_no',
+    '筛选',
+    '查询',
+    '处理人',
+    '待处理',
+    '待分配',
+    '领取',
+    '转派',
+    '派发',
+    '我的工单',
+    '工单列表',
+    '工单状态',
+    '审批工单',
+    '处理中',
+    '已完成',
+    '已关闭',
+)
+
+_LOGIN_CREDENTIAL_RE = re.compile(
+    r'(?:账号|用户名)\s*[（(]\s*([^/\s）)]+)\s*/\s*([^/\s）)]+)\s*[）)]'
+)
+_LOGIN_URL_RE = re.compile(r'(https?://[^\s)）]+)')
+
 
 @dataclass
 class PreDataResolution:
@@ -67,9 +164,64 @@ def collect_testcase_text(testcase: TestCase) -> str:
     return '\n'.join(part for part in parts if part)
 
 
+def is_page_access_permission_case(text: str) -> bool:
+    return any(keyword in (text or '') for keyword in _PAGE_ACCESS_KEYWORDS)
+
+
+def is_ui_display_only_case(text: str) -> bool:
+    return any(keyword in (text or '') for keyword in _UI_DISPLAY_ONLY_KEYWORDS)
+
+
+def is_export_verify_case(text: str) -> bool:
+    return any(keyword in (text or '') for keyword in _EXPORT_VERIFY_KEYWORDS)
+
+
+def needs_row_mutation(text: str) -> bool:
+    return any(keyword in (text or '') for keyword in _ROW_MUTATION_KEYWORDS)
+
+
+def needs_existing_ticket_data(text: str) -> bool:
+    lowered = (text or '').lower()
+    return any(
+        keyword in (text or '') or keyword in lowered
+        for keyword in _EXISTING_TICKET_DATA_KEYWORDS
+    )
+
+
+def needs_ticket_row_action(text: str) -> bool:
+    lowered = (text or '').lower()
+    return any(
+        keyword in (text or '') or keyword in lowered
+        for keyword in _TICKET_ROW_ACTION_KEYWORDS
+    )
+
+
 def needs_ticket_pre_data(text: str) -> bool:
-    lowered = text.lower()
+    existing = needs_existing_ticket_data(text)
+    if is_page_access_permission_case(text) and not existing:
+        return False
+    if is_ui_display_only_case(text) and not existing:
+        return False
+    if is_export_verify_case(text) and not needs_row_mutation(text):
+        return False
+    lowered = (text or '').lower()
     return any(keyword in text or keyword in lowered for keyword in _TICKET_CONTEXT_KEYWORDS)
+
+
+def extract_login_credentials(text: str) -> Dict[str, str]:
+    """Parse username/password/login URL from case precondition or steps."""
+    result: Dict[str, str] = {}
+    blob = text or ''
+    cred = _LOGIN_CREDENTIAL_RE.search(blob)
+    if cred:
+        result['username'] = cred.group(1).strip()
+        result['password'] = cred.group(2).strip()
+    urls = _LOGIN_URL_RE.findall(blob)
+    login_url = next((url for url in urls if 'login' in url.lower()), None)
+    chosen = login_url or (urls[0] if urls else '')
+    if chosen:
+        result['login_url'] = chosen.rstrip('。，,;；')
+    return result
 
 
 def resolve_module_pre_data_plan(
@@ -222,7 +374,89 @@ def resolve_pre_data_for_testcase(testcase: TestCase) -> PreDataResolution:
     )
 
 
-def _build_message_suffix(run: DataGenerationRun, resolution: PreDataResolution) -> str:
+def build_testcase_step_script_hints(testcase: TestCase) -> str:
+    """Generic execution hints. Do not hardcode a product or case script here."""
+    return '\n'.join(
+        [
+            '',
+            '【执行脚本指南 — 通用】',
+            '- 步骤1若是登录：该步只调用 `await helpers.loginStep1(page);`；它已包含步骤1截图，禁止再调 screenshotCaseStep；账号取自用例前置条件，禁止改用其他账号',
+            '- 登录只有 stdout 出现 `RESULT=PASS` 才能判通过；出现 `RESULT=FAIL` 必须停止，禁止继续执行菜单步骤',
+            '- 点菜单进入页面：`await helpers.navigateByMenu(page, \'步骤里的菜单名\');`；仅在明确知道目标路由时传唯一 URL 片段，禁止用 `/work-order` 这类父级公共前缀',
+            '- 普通下拉：`await helpers.selectFormDropdownOption(page, \'字段标签\', \'选项\');`',
+            '- 筛选项填值：`await helpers.fillFilterField(page, \'字段标签\', \'值\');`',
+            '- 弹窗多选：`await helpers.selectDialogMultiSelect(page, \'字段标签\', \'选项名\');`',
+            '- 点按钮：`await helpers.clickPageButton(page, \'按钮名\');`（会先关遮罩/侧栏）',
+            '- 列表点操作列：`await helpers.clickRowAction(page, \'行内文本\', \'按钮名\');`',
+            '- 每步截图：`await helpers.screenshotCaseStep(page, <步骤号>);` 系统自动上传',
+            '- 断言用 .first() / getByRole，避免 getByText 命中多个节点被判失败',
+            '- 禁止 expect()；loginStep1 输出 RESULT=FAIL 时该步骤必须判失败，不得继续',
+            '- stdout 出现 RESULT=PASS: 步骤N 即该步通过，以 PASS 为准',
+            '- 「xx标签」指页面上的徽章文案（如高/中/低），不要只搜标签名字本身',
+            '- 执行结果由系统自动保存；禁止调用 whart_tools 或其他工具更新用例执行结果',
+            '- 禁止手写路径、禁止 upload_screenshot、禁止 Python 风格 goto/fill/click',
+        ]
+    )
+
+
+def build_testcase_navigation_hint(testcase: TestCase) -> str:
+    """Do not inject product-specific scripts into execution prompts."""
+    return ''
+
+
+def build_testcase_navigation_hint_by_id(testcase_id: int) -> str:
+    testcase = TestCase.objects.filter(id=testcase_id).first()
+    if testcase is None:
+        return ''
+    return build_testcase_navigation_hint(testcase)
+
+
+def build_testcase_detail_suffix(testcase: TestCase) -> str:
+    steps = [
+        {
+            'step_number': step.step_number,
+            'description': step.description or '',
+            'expected_result': step.expected_result or '',
+        }
+        for step in testcase.steps.order_by('step_number')
+    ]
+    lines = [
+        '',
+        '【已注入用例详情 — 禁止再调用 get_testcase_detail / get_testcases】',
+        f'- project_id: {testcase.project_id}',
+        f'- case_id: {testcase.id}',
+        f'- 名称: {testcase.name or ""}',
+        f'- 等级: {testcase.level or ""}',
+        f'- 前置条件: {testcase.precondition or "无"}',
+        '- 测试步骤:',
+        json.dumps(steps, ensure_ascii=False, indent=2),
+        build_testcase_step_script_hints(testcase),
+        '',
+        '请直接从步骤 1 开始用 playwright-skill 执行，不要先查项目/模块/用例列表。',
+        '步骤1若含登录：只调用 await helpers.loginStep1(page);（已含截图，禁止再调用 screenshotCaseStep(page, 1)）',
+        '步骤N截图：await helpers.screenshotCaseStep(page, <步骤号>); 系统自动上传，禁止 upload_screenshot。',
+        'Playwright 必须是 JavaScript，禁止 Python 风格 goto/fill/click。',
+    ]
+    return '\n'.join(lines)
+
+
+def build_testcase_detail_suffix_by_id(testcase_id: int) -> str:
+    testcase = (
+        TestCase.objects.prefetch_related('steps')
+        .filter(id=testcase_id)
+        .first()
+    )
+    if testcase is None:
+        return ''
+    return build_testcase_detail_suffix(testcase)
+
+
+def _build_message_suffix(
+    run: DataGenerationRun,
+    resolution: PreDataResolution,
+    *,
+    case_text: str = '',
+) -> str:
     snapshot = run.output_snapshot if isinstance(run.output_snapshot, dict) else {}
     continued = [
         entry.get('name') or f"步骤{entry.get('index')}"
@@ -244,11 +478,23 @@ def _build_message_suffix(run: DataGenerationRun, resolution: PreDataResolution)
         lines.append('- 数据快照:')
         lines.append(json.dumps(snapshot, ensure_ascii=False, indent=2))
     ticket_no = snapshot.get('ticketNo')
-    if ticket_no:
-        lines.append(f'- 目标工单号: {ticket_no}（筛选后请优先定位该行验证操作列）')
-    lines.append(
-        '请优先使用上述数据满足前置条件；若 UI 列表需按状态筛选，仍按用例步骤操作并验证筛选结果。'
-    )
+    if ticket_no and needs_ticket_row_action(case_text):
+        lines.append(
+            f'- 可用数据标识: {ticket_no}。'
+            f'若步骤需要按编号定位列表行，用 `await helpers.fillFilterField(page, \'步骤里的筛选字段名\', \'{ticket_no}\');` 、'
+            f'`await helpers.clickPageButton(page, \'步骤里的查询按钮名\');` 、'
+            f'`await helpers.clickRowAction(page, \'{ticket_no}\', \'步骤里的操作按钮名\');`。'
+            '列表状态列以页面为准；摘要/主题里的状态词不是状态列。'
+            '不要先筛状态再找目标编号，以免把目标行筛掉。'
+        )
+        lines.append(
+            '请优先使用上述数据满足前置条件；若按用例筛选后找不到目标数据，改用编号查询。'
+        )
+    elif ticket_no:
+        lines.append(
+            f'- 可用数据标识: {ticket_no}。仅在步骤需要定位该数据时使用；'
+            '步骤未要求筛选或行操作时，不要用这条数据去点列表。'
+        )
     return '\n'.join(lines)
 
 
@@ -318,7 +564,11 @@ def run_testcase_pre_data(
     return TestcasePreDataResult(
         run=run,
         resolution=resolution,
-        message_suffix=_build_message_suffix(run, resolution),
+        message_suffix=_build_message_suffix(
+            run,
+            resolution,
+            case_text=collect_testcase_text(testcase),
+        ),
     )
 
 

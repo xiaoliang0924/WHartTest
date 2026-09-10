@@ -100,13 +100,138 @@ function stripRedeclaredPlaywrightBindings(code) {
   // 用户脚本再写 const { chromium } = require('playwright') 会 SyntaxError 并中断整步。
   return String(code || '')
     .replace(
-      /^\s*(?:const|let|var)\s*\{[\s\S]*?\}\s*=\s*require\(\s*['"]playwright['"]\s*\)\s*;?\s*$/gm,
+      /(?:const|let|var)\s*\{[^}]*\}\s*=\s*require\(\s*['"]playwright['"]\s*\)\s*;?/g,
       ''
     )
     .replace(
-      /^\s*(?:const|let|var)\s+(?:chromium|firefox|webkit|devices|helpers)\s*=\s*[^;\n]+;?\s*$/gm,
+      /(?:const|let|var)\s*\{[^}]*\}\s*=\s*require\(\s*['"]\.\/lib\/helpers['"]\s*\)\s*;?/g,
+      ''
+    )
+    .replace(
+      /^\s*(?:const|let|var)\s+(?:chromium|firefox|webkit|devices|helpers|browser|context|page)\s*=\s*[^;\n]+;?\s*$/gm,
+      ''
+    )
+    .replace(
+      /^\s*(?:const|let|var)\s+browser\s*=\s*await\s+chromium\.launch[\s\S]*?;?\s*$/gm,
       ''
     );
+}
+
+const PERSISTENT_USER_CODE_PREFIX = `
+let { browser, context, page } = state;
+if (page && helpers && typeof helpers.dismissBlockingDialogs === 'function') {
+  try { await helpers.dismissBlockingDialogs(page); } catch (_) {}
+}
+if (page && String(process.env.WHARTTEST_NOTIFICATION_CASE || '') === '1') {
+  const __url = String(page.url() || '');
+  if (__url && !/\\/login(?:\\?|$|\\/)/.test(__url) && !/\\/notifications(?:\\?|$|\\/)/.test(__url)) {
+    try {
+      if (helpers && typeof helpers.navigateToNotificationRecordsPage === 'function') {
+        await helpers.navigateToNotificationRecordsPage(page);
+      } else {
+        const __origin = new URL(__url).origin;
+        await page.goto(__origin + '/work-order/notifications', { waitUntil: 'domcontentloaded' });
+      }
+    } catch (_) {}
+  }
+}
+const __screenshotDir = process.env.SCREENSHOT_DIR;
+if (page && __screenshotDir) {
+  const __fs = require('fs');
+  const __path = require('path');
+  try { __fs.mkdirSync(__screenshotDir, { recursive: true }); } catch (_) {}
+  if (!page.__wharttestOriginalScreenshot) {
+    Object.defineProperty(page, '__wharttestOriginalScreenshot', {
+      value: page.screenshot.bind(page),
+      configurable: false,
+      enumerable: false,
+      writable: false,
+    });
+  }
+  const __origScreenshot = page.__wharttestOriginalScreenshot;
+  const __minScreenshotBytes = 15000;
+  const __isBlankScreenshot = (filePath) => {
+    try {
+      return __fs.statSync(filePath).size < __minScreenshotBytes;
+    } catch (_) {
+      return true;
+    }
+  };
+  page.screenshot = async (opts = {}) => {
+    const requested = opts && opts.path;
+    const basename = requested ? __path.basename(String(requested)) : 'last.png';
+    const savedPath = __path.join(__screenshotDir, basename);
+    const onLogin = String(page.url() || '').includes('/login');
+    if (!onLogin && String(process.env.WHARTTEST_NOTIFICATION_CASE || '') === '1'
+        && !String(page.url() || '').includes('/notifications')) {
+      try {
+        if (helpers && typeof helpers.navigateToNotificationRecordsPage === 'function') {
+          await helpers.navigateToNotificationRecordsPage(page);
+        }
+      } catch (_) {}
+    }
+    if (onLogin || opts.plain === true || page.__inScreenshotCapture) {
+      const result = await __origScreenshot({
+        ...opts,
+        path: savedPath,
+        timeout: opts.timeout || 8000,
+      });
+      console.log('[SCREENSHOT_SAVED] ' + savedPath);
+      return result;
+    }
+    page.__inScreenshotCapture = true;
+    let result;
+    try {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (attempt > 0) {
+          try { await page.waitForTimeout(600); } catch (_) {}
+        }
+        if (helpers && typeof helpers.captureStepScreenshot === 'function') {
+          await helpers.captureStepScreenshot(page, savedPath, { ...opts, prepare: attempt === 0, plain: true });
+          result = savedPath;
+        } else {
+          if (opts.prepare !== false && helpers && typeof helpers.prepareStepScreenshot === 'function') {
+            try { await helpers.prepareStepScreenshot(page); } catch (_) {}
+          }
+          result = await __origScreenshot({ ...opts, path: savedPath });
+        }
+        if (!__isBlankScreenshot(savedPath)) {
+          break;
+        }
+      }
+    } finally {
+      page.__inScreenshotCapture = false;
+    }
+    console.log('[SCREENSHOT_SAVED] ' + savedPath);
+    if (basename !== 'last.png' && !__isBlankScreenshot(savedPath)) {
+      try {
+        __fs.copyFileSync(savedPath, __path.join(__screenshotDir, 'last.png'));
+      } catch (_) {
+        try {
+          await __origScreenshot({ path: __path.join(__screenshotDir, 'last.png') });
+        } catch (__) {}
+      }
+    }
+    return result;
+  };
+}
+`;
+
+const PERSISTENT_USER_CODE_SUFFIX = `
+if (page && helpers && typeof helpers.dismissBlockingDialogs === 'function') {
+  try { await helpers.dismissBlockingDialogs(page); } catch (_) {}
+}
+state.browser = browser;
+state.context = context;
+state.page = page;
+`;
+
+function buildPersistentUserCodeBody(code) {
+  return (
+    PERSISTENT_USER_CODE_PREFIX +
+    stripRedeclaredPlaywrightBindings(code) +
+    PERSISTENT_USER_CODE_SUFFIX
+  );
 }
 
 async function safeClose(target, timeoutMs = 5000) {
@@ -196,25 +321,30 @@ async function main() {
   };
 
   async function loadDeps() {
-    if (playwright && helpers) return;
-    playwright = requireFromSkill('playwright');
-    chromium = playwright.chromium;
-    firefox = playwright.firefox;
-    webkit = playwright.webkit;
-    devices = playwright.devices;
+    if (!playwright) {
+      playwright = requireFromSkill('playwright');
+      chromium = playwright.chromium;
+      firefox = playwright.firefox;
+      webkit = playwright.webkit;
+      devices = playwright.devices;
+    }
     try {
-      helpers = requireFromSkill('./lib/helpers');
+      const helpersPath = requireFromSkill.resolve('./lib/helpers');
+      delete require.cache[helpersPath];
+      helpers = require(helpersPath);
     } catch (_) {
-      helpers = {
-        launchBrowser: async (type) => {
-          const browsers = { chromium, firefox, webkit };
-          return browsers[type || 'chromium'].launch({
-            headless: process.env.HEADLESS !== 'false',
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-          });
-        },
-        getExtraHeadersFromEnv: () => null,
-      };
+      if (!helpers) {
+        helpers = {
+          launchBrowser: async (type) => {
+            const browsers = { chromium, firefox, webkit };
+            return browsers[type || 'chromium'].launch({
+              headless: process.env.HEADLESS !== 'false',
+              args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            });
+          },
+          getExtraHeadersFromEnv: () => null,
+        };
+      }
     }
   }
 
@@ -311,6 +441,11 @@ async function main() {
 
     if (!state.page || (typeof state.page.isClosed === 'function' && state.page.isClosed())) {
       state.page = await state.context.newPage();
+      try {
+        await state.page.setViewportSize({ width: 1280, height: 1024 });
+      } catch (_) {
+        // ignore
+      }
     }
   }
 
@@ -341,54 +476,100 @@ async function main() {
     serverLog('[runUserCode] Code length:', code.length);
     serverLog('[runUserCode] Code preview:', code.slice(0, 200));
 
-    const fn = new AsyncFunction(
-      'console',
-      'state',
-      'helpers',
-      'chromium',
-      'firefox',
-      'webkit',
-      'devices',
-      'require',
-      'process',
-      'getContextOptionsWithHeaders',
-      `
-let { browser, context, page } = state;
-if (page && helpers && typeof helpers.dismissBlockingDialogs === 'function') {
-  try { await helpers.dismissBlockingDialogs(page); } catch (_) {}
-}
-const __screenshotDir = process.env.SCREENSHOT_DIR;
-if (page && __screenshotDir) {
-  const __fs = require('fs');
-  const __path = require('path');
-  try { __fs.mkdirSync(__screenshotDir, { recursive: true }); } catch (_) {}
-  const __origScreenshot = page.screenshot.bind(page);
-  page.screenshot = async (opts = {}) => {
-    const requested = opts && opts.path;
-    const basename = requested ? __path.basename(String(requested)) : 'last.png';
-    const savedPath = __path.join(__screenshotDir, basename);
-    const result = await __origScreenshot({ ...opts, path: savedPath });
-    console.log('[SCREENSHOT_SAVED] ' + savedPath);
-    if (basename !== 'last.png') {
-      try { await __origScreenshot({ path: __path.join(__screenshotDir, 'last.png') }); } catch (_) {}
+    const body = buildPersistentUserCodeBody(code);
+    let fn;
+    try {
+      fn = new AsyncFunction(
+        'console',
+        'state',
+        'helpers',
+        'chromium',
+        'firefox',
+        'webkit',
+        'devices',
+        'require',
+        'process',
+        'getContextOptionsWithHeaders',
+        body
+      );
+    } catch (syntaxError) {
+      const message = syntaxError?.message || String(syntaxError);
+      serverLog('[runUserCode] SyntaxError:', message);
+      serverLog('[runUserCode] Body preview:', body.slice(0, 500));
+      return {
+        ok: false,
+        stdout: [],
+        stderr: [
+          `SyntaxError: ${message}`,
+          '提示: 步骤1登录用 await helpers.loginStep1(page); 步骤N截图用 await helpers.screenshotCaseStep(page, N); 禁止手写路径。'
+        ],
+        error: message,
+      };
     }
-    return result;
-  };
-}
-${stripRedeclaredPlaywrightBindings(code)}
-if (page && helpers && typeof helpers.dismissBlockingDialogs === 'function') {
-  try { await helpers.dismissBlockingDialogs(page); } catch (_) {}
-}
-state.browser = browser;
-state.context = context;
-state.page = page;
-`
-    );
+
+    const prepareScreenshotView = async (page) => {
+      if (helpers && typeof helpers.prepareStepScreenshot === 'function') {
+        try {
+          await helpers.prepareStepScreenshot(page);
+          return;
+        } catch (_) {
+          // fall through to generic scroll
+        }
+      }
+      try {
+        await page.evaluate(() => {
+          window.scrollBy(0, Math.min(480, window.innerHeight * 0.55));
+        });
+        await page.waitForTimeout(200);
+      } catch (_) {
+        // ignore
+      }
+    };
 
     const saveLastScreenshot = async () => {
       const dir = process.env.SCREENSHOT_DIR;
       const page = state.page;
       if (!dir || !page || (typeof page.isClosed === 'function' && page.isClosed())) {
+        return;
+      }
+      const stdoutText = captured.stdout.join('\n');
+      const caseScreenshotLogged =
+        stdoutText.includes('[CASE_SCREENSHOT]')
+        || /\[SCREENSHOT_SAVED\]\s+\S*case_\d+_step\d+\.png/i.test(stdoutText);
+      if (caseScreenshotLogged) {
+        return;
+      }
+      const caseId = process.env.WHARTTEST_CASE_ID;
+      if (caseId) {
+        try {
+          fs.mkdirSync(dir, { recursive: true });
+          const requestedSteps = [
+            ...String(code || '').matchAll(
+              /screenshotCaseStep\s*\(\s*page\s*,\s*(\d+)/gi,
+            ),
+          ];
+          if (requestedSteps.length === 0) {
+            return;
+          }
+          const step = Number(requestedSteps[requestedSteps.length - 1][1]);
+          const maxStep = Number(process.env.WHARTTEST_CASE_STEP_COUNT || 0) || 30;
+          if (!Number.isInteger(step) || step < 1 || step > maxStep) {
+            return;
+          }
+          if (helpers && typeof helpers.screenshotCaseStep === 'function') {
+            await helpers.screenshotCaseStep(page, step, caseId);
+          } else {
+            const stepPath = path.join(dir, `case_${caseId}_step${step}.png`);
+            if (helpers && typeof helpers.captureStepScreenshot === 'function') {
+              await helpers.captureStepScreenshot(page, stepPath);
+            } else {
+              await page.screenshot({ path: stepPath, fullPage: false });
+            }
+            captured.stdout.push(`[CASE_SCREENSHOT] ${stepPath}`);
+          }
+        } catch (err) {
+          captured.stderr.push(`[SCREENSHOT_SAVE_FAILED] ${err?.message || String(err)}`);
+        }
         return;
       }
       try {
@@ -398,7 +579,12 @@ state.page = page;
         const stepFile = `step_${seq}.png`;
         const stepPath = path.join(dir, stepFile);
         const lastPath = path.join(dir, 'last.png');
-        await page.screenshot({ path: stepPath });
+        if (helpers && typeof helpers.captureStepScreenshot === 'function') {
+          await helpers.captureStepScreenshot(page, stepPath);
+        } else {
+          await prepareScreenshotView(page);
+          await page.screenshot({ path: stepPath });
+        }
         try {
           fs.copyFileSync(stepPath, lastPath);
         } catch (_) {
@@ -412,6 +598,8 @@ state.page = page;
       }
     };
 
+    const originalGlobalConsole = global.console;
+    global.console = captured.console;
     try {
       await fn(
         captured.console,
@@ -432,6 +620,8 @@ state.page = page;
       captured.stderr.push(msg);
       await saveLastScreenshot();
       return { ok: false, stdout: captured.stdout, stderr: captured.stderr, error: msg };
+    } finally {
+      global.console = originalGlobalConsole;
     }
   }
 
@@ -504,7 +694,46 @@ state.page = page;
             return;
           }
 
-          const result = await runUserCode(code);
+          const execTimeoutMs = Number(process.env.PW_EXEC_TIMEOUT_MS || 45000);
+          let timer;
+          let result;
+          try {
+            result = await Promise.race([
+              runUserCode(code),
+              new Promise((_, reject) => {
+                timer = setTimeout(() => {
+                  reject(new Error(`Playwright exec timed out after ${execTimeoutMs}ms`));
+                }, execTimeoutMs);
+              }),
+            ]);
+          } catch (e) {
+            const msg = e?.message || String(e);
+            if (String(msg).includes('timed out')) {
+              serverLog('[exec] hard timeout, resetting browser');
+              await resetBrowserState().catch(() => {});
+              send({
+                id,
+                ok: false,
+                error: msg,
+                stdout: [],
+                stderr: [
+                  msg,
+                  '浏览器已重置。请先重新打开该步骤所在页面（登录/菜单/按钮），再做断言和截图，不要只重复同一段 waitFor。',
+                ],
+              });
+              return;
+            }
+            send({
+              id,
+              ok: false,
+              error: msg,
+              stdout: [],
+              stderr: [msg],
+            });
+            return;
+          } finally {
+            if (timer) clearTimeout(timer);
+          }
           await pruneUntrackedResources();
           const pageUrl = state.page && typeof state.page.url === 'function' ? state.page.url() : null;
           send({

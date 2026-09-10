@@ -11,6 +11,12 @@ python manage.py migrate --noinput
 echo "Creating default admin user if it does not exist..."
 python manage.py init_admin
 
+# 2.5 同步 bundled_skills -> media/skills（Playwright 实际从 media 目录加载）
+if [ -d /app/bundled_skills ]; then
+  echo "Syncing bundled skills..."
+  python manage.py init_skills || echo "Warning: init_skills failed, continuing startup"
+fi
+
 # 3. 启动 supervisord 来管理所有服务
 echo "Starting supervisord..."
 exec supervisord -c /app/supervisord.conf
