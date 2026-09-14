@@ -15,10 +15,28 @@
     </div>
     <div v-else class="execution-drawer">
       <div class="status-bar">
-        <a-tag :color="statusColor">{{ statusLabel }}</a-tag>
-        <span v-if="record?.started_at" class="meta">{{ text.startedAt }}：{{ formatTime(record.started_at) }}</span>
-        <span v-if="record?.completed_at" class="meta">{{ text.completedAt }}：{{ formatTime(record.completed_at) }}</span>
-        <a-spin v-if="isRunning" size="small" />
+        <div class="status-meta">
+          <a-tag :color="statusColor">{{ statusLabel }}</a-tag>
+          <span v-if="record?.started_at" class="meta">{{ text.startedAt }}：{{ formatTime(record.started_at) }}</span>
+          <span v-if="record?.completed_at" class="meta">{{ text.completedAt }}：{{ formatTime(record.completed_at) }}</span>
+          <a-spin v-if="isRunning" size="small" />
+        </div>
+        <a-space class="top-actions" :size="8">
+          <a-button
+            type="outline"
+            :disabled="!effectiveSessionId"
+            @click="openChatInCurrentPage"
+          >
+            {{ text.openChatCurrentPage }}
+          </a-button>
+          <a-button
+            type="primary"
+            :disabled="!effectiveSessionId"
+            @click="openChatInNewWindow"
+          >
+            {{ text.openChatNewWindow }}
+          </a-button>
+        </a-space>
       </div>
 
       <a-alert v-if="streamError" type="error" :title="streamError" show-icon class="block" />
@@ -69,7 +87,6 @@
       </a-card>
 
       <div class="footer-actions">
-        <a-button v-if="sessionId" type="outline" @click="openChat">{{ text.openChat }}</a-button>
         <a-button type="primary" @click="refreshRecord" :loading="loading">{{ text.refresh }}</a-button>
       </div>
     </div>
@@ -89,7 +106,10 @@ import {
   type TestCaseScreenshot,
 } from '@/services/testcaseService';
 import { useAppI18n } from '@/composables/useAppI18n';
-import { openLangGraphChatInNewWindow } from '@/features/langgraph/utils/openLangGraphChat';
+import {
+  openLangGraphChatInCurrentPage,
+  openLangGraphChatInNewWindow,
+} from '@/features/langgraph/utils/openLangGraphChat';
 
 const props = defineProps<{
   visible: boolean;
@@ -132,6 +152,8 @@ const text = computed(() => (
         noSteps: 'No structured step results',
         screenshots: 'Screenshots',
         openChat: 'Open in LLM Chat',
+        openChatCurrentPage: 'Open on this page',
+        openChatNewWindow: 'Open in new window',
         refresh: 'Refresh',
         step: 'Step',
         description: 'Description',
@@ -158,6 +180,8 @@ const text = computed(() => (
         noSteps: '暂无结构化步骤结果',
         screenshots: '执行截图',
         openChat: '在 LLM 对话中查看',
+        openChatCurrentPage: '当前页打开',
+        openChatNewWindow: '打开新窗口',
         refresh: '刷新',
         step: '步骤',
         description: '描述',
@@ -174,6 +198,22 @@ const text = computed(() => (
 ));
 
 const isRunning = computed(() => record.value?.status === 'running');
+
+const resolveSessionId = (): string | null => {
+  const candidates = [
+    props.sessionId,
+    record.value?.session_id,
+    props.testCase?.latest_run?.session_id,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return null;
+};
+
+const effectiveSessionId = computed(() => resolveSessionId());
 
 const failReasonText = computed(() => {
   const summary = record.value?.summary || '';
@@ -260,11 +300,18 @@ const refreshRecord = async () => {
   if (!props.projectId || !props.testCase) return;
   loading.value = true;
   try {
-    const response = await getLatestTestCaseRunRecord(
+    const preferredSessionId = resolveSessionId() || undefined;
+    let response = await getLatestTestCaseRunRecord(
       props.projectId,
       props.testCase.id,
-      props.sessionId || undefined
+      preferredSessionId,
     );
+    if (!response.success && preferredSessionId) {
+      response = await getLatestTestCaseRunRecord(
+        props.projectId,
+        props.testCase.id,
+      );
+    }
     if (response.success && response.data) {
       record.value = response.data;
       if (response.data.status !== 'running') {
@@ -291,13 +338,16 @@ const startPolling = () => {
 
 watch(
   () => [props.visible, props.projectId, props.testCase?.id, props.sessionId] as const,
-  async ([visible]) => {
+  async ([visible, , testCaseId]) => {
     if (!visible) {
       stopPolling();
       return;
     }
     streamError.value = '';
-    record.value = props.testCase?.latest_run || null;
+    const shouldResetRecord = !record.value || record.value.testcase !== testCaseId;
+    if (shouldResetRecord) {
+      record.value = props.testCase?.latest_run || null;
+    }
     await refreshRecord();
     if (isRunning.value) {
       startPolling();
@@ -312,8 +362,12 @@ const handleClose = () => {
   drawerVisible.value = false;
 };
 
-const openChat = () => {
-  openLangGraphChatInNewWindow(router, props.sessionId, props.projectId);
+const openChatInCurrentPage = () => {
+  openLangGraphChatInCurrentPage(router, effectiveSessionId.value, props.projectId);
+};
+
+const openChatInNewWindow = () => {
+  openLangGraphChatInNewWindow(router, effectiveSessionId.value, props.projectId);
 };
 
 defineExpose({
@@ -336,14 +390,27 @@ defineExpose({
 
 .status-bar {
   display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.status-meta {
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
+  min-width: 0;
+  flex: 1;
 }
 
 .meta {
   color: var(--color-text-3);
   font-size: 12px;
+}
+
+.top-actions {
+  flex-shrink: 0;
 }
 
 .block {

@@ -477,6 +477,95 @@ class TestcasePreDataResolverTests(DjangoTestCase):
         self.assertEqual(resolution.source, 'module')
         self.assertEqual(resolution.plan.id, plan.id)
 
+    def test_overview_dashboard_case_skips_inferred_pre_data(self):
+        from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
+
+        overview_module = TestCaseModule.objects.create(
+            project=self.project,
+            name='工单总览',
+            creator=self.user,
+        )
+        testcase = ManualTestCase.objects.create(
+            project=self.project,
+            module=overview_module,
+            name='工单总览-默认近7天进入-KPI与图表加载完整',
+            precondition=(
+                '1. 使用李亮账号(17670400361/000000)登录系统'
+                '(http://test.bot.by56.com/work-order/login)\n'
+                '2. 系统近7天内存在工单新增、处理、关闭、超时等数据\n'
+                '3. 存在不同SLA状态（红灯/黄灯/绿灯）的工单样本'
+            ),
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=1,
+            description='使用李亮账号登录系统',
+            expected_result='登录成功进入首页',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=2,
+            description='点击左侧导航进入工单总览页',
+            expected_result='默认展示近7天数据，KPI与图表加载完整',
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.source, 'none')
+        self.assertIsNone(resolution.template_key)
+        self.assertIn('工单总览', resolution.skip_reason)
+
+    def test_overview_sla_detail_case_classification(self):
+        from data_generation.testcase_pre_data import (
+            is_overview_dashboard_case,
+            is_overview_sla_detail_case,
+            resolve_pre_data_for_testcase,
+        )
+
+        overview_module = TestCaseModule.objects.create(
+            project=self.project,
+            name='工单总览',
+            creator=self.user,
+        )
+        testcase = ManualTestCase.objects.create(
+            project=self.project,
+            module=overview_module,
+            name='工单总览-SLA预警-点击工单ID进入工单详情',
+            precondition=(
+                '1. 使用李亮账号登录系统\n'
+                '2. SLA预警明细表格中存在至少一行数据，工单ID列为蓝色可点击链接'
+            ),
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=2,
+            description='在左侧菜单点击进入【工单中心】>【工单总览】',
+            expected_result='成功进入数据总览页面',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=3,
+            description='在SLA预警明细表格中，点击第一行的蓝色工单ID链接',
+            expected_result='成功跳转到该工单的详情页面',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=4,
+            description='查看工单详情页面工单ID',
+            expected_result='详情页面显示的工单ID与点击的链接工单ID一致',
+            creator=self.user,
+        )
+
+        self.assertTrue(is_overview_sla_detail_case(testcase))
+        self.assertFalse(is_overview_dashboard_case(testcase))
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.source, 'none')
+        self.assertIsNone(resolution.template_key)
+
     def test_page_access_permission_case_skips_ticket_pre_data(self):
         from data_generation.testcase_pre_data import (
             extract_login_credentials,

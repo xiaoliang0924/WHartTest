@@ -125,7 +125,7 @@ const { locale, isEnglish } = useAppI18n();
 const tableText = computed(() => (
   isEnglish.value
     ? {
-        searchPlaceholder: 'Search case name',
+        searchPlaceholder: 'Search name/ID/precondition',
         moduleFilter: 'Filter module',
         priorityFilter: 'Filter priority',
         testTypeFilter: 'Filter test type',
@@ -159,7 +159,7 @@ const tableText = computed(() => (
         } as Record<string, string>,
       }
     : {
-        searchPlaceholder: '搜索用例名称',
+        searchPlaceholder: '搜索用例名称/ID/前置条件',
         moduleFilter: '筛选模块',
         priorityFilter: '筛选优先级',
         testTypeFilter: '筛选测试类型',

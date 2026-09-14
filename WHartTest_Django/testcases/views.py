@@ -41,7 +41,7 @@ from .permissions import (
     IsProjectMemberForTestCaseModule,
     IsProjectMemberForManualTestRun,
 )
-from .filters import TestCaseFilter  # 导入自定义过滤器
+from .filters import TestCaseFilter, TestCaseSearchFilter  # 导入自定义过滤器
 from wharttest_django.pagination import StandardPagination
 from projects.models import ProjectMember
 
@@ -88,7 +88,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     pagination_class = StandardPagination
     filter_backends = [
         DjangoFilterBackend,
-        filters.SearchFilter,
+        TestCaseSearchFilter,
         filters.OrderingFilter,
     ]  # 添加 DjangoFilterBackend、搜索与排序
     filterset_class = TestCaseFilter  # 使用自定义的 FilterSet

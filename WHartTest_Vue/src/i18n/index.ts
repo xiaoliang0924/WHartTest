@@ -964,7 +964,7 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '暂无模块数据': 'No module data',
   '选择': 'Select',
   '搜索套件名称': 'Search suite name',
-  '搜索用例名称': 'Search case name',
+  '搜索用例名称': 'Search case name/ID/precondition',
   '搜索用例描述': 'Search case description',
   '统计': 'Statistics',
   '未执行': 'Not Run',

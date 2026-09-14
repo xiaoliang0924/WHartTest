@@ -49,6 +49,7 @@ from .middleware_config import (
 )
 from .playwright_instructions import (
     MANUAL_TESTCASE_EXECUTION_HINT,
+    OVERVIEW_SLA_DETAIL_EXECUTION_HINT,
     PLAYWRIGHT_SCRIPT_INSTRUCTION,
 )
 from .stop_signal import should_stop, clear_stop_signal
@@ -1220,6 +1221,17 @@ class AgentLoopStreamAPIView(View):
                 )
                 if nav_hint:
                     effective_user_message = effective_user_message + nav_hint
+
+                from data_generation.testcase_pre_data import is_overview_sla_detail_case
+                from testcases.models import TestCase as ManualTestCaseModel
+
+                sla_case = await sync_to_async(
+                    ManualTestCaseModel.objects.filter(id=int(test_case_id)).first
+                )()
+                if sla_case and is_overview_sla_detail_case(sla_case):
+                    effective_prompt = (effective_prompt or "") + OVERVIEW_SLA_DETAIL_EXECUTION_HINT
+                    if nav_hint:
+                        effective_prompt = effective_prompt + nav_hint
 
             # 8.2 用例管理「执行」传入的 test_case_id 需明确 ID 命名空间
             if test_case_id:

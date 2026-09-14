@@ -154,7 +154,10 @@ import OptimizationSuggestionModal from '@/components/testcase/OptimizationSugge
 import {
   sendChatMessageStream
 } from '@/features/langgraph/services/chatService';
-import { openLangGraphChatInNewWindow } from '@/features/langgraph/utils/openLangGraphChat';
+import {
+  openLangGraphChatInCurrentPage,
+  openLangGraphChatInNewWindow,
+} from '@/features/langgraph/utils/openLangGraphChat';
 import type { ChatRequest } from '@/features/langgraph/types/chat';
 import {
   updateTestCaseReviewStatus,
@@ -302,6 +305,8 @@ const taskText = computed(() => (
         executionStartedContent: 'Preparing prerequisite data and starting case execution.',
         executionStartedWithGenerationContent: 'Preparing prerequisite data and starting case execution. UI automation generation will continue after execution completes.',
         viewExecutionProgress: 'Click to view execution progress',
+        openChatCurrentPage: 'Open on this page',
+        openChatNewWindow: 'Open in new window',
         optimizationStarted: 'Optimization started',
         optimizationStartedContent: 'Case optimization task has started processing in the background.',
         viewOptimizationProgress: 'Click to view optimization progress',
@@ -324,6 +329,8 @@ const taskText = computed(() => (
         executionStartedContent: '正在准备前置数据并启动用例执行，请稍候。',
         executionStartedWithGenerationContent: '正在准备前置数据并启动用例执行，完成后将继续生成 UI 自动化用例。',
         viewExecutionProgress: '点此查看执行进度',
+        openChatCurrentPage: '当前页打开',
+        openChatNewWindow: '打开新窗口',
         optimizationStarted: '优化已开始',
         optimizationStartedContent: '用例优化任务已在后台开始处理。',
         viewOptimizationProgress: '点此查看优化过程',
@@ -402,6 +409,84 @@ const notifyExecutionOutcome = async (caseId: number, sessionId: string) => {
   Message.info(isEnglish.value ? 'Execution finished. See result drawer.' : '用例执行已结束，请查看右侧执行结果。');
 };
 
+const EXECUTION_PENDING_NOTIFICATION_ID = 'exec-case-pending';
+
+const showExecutionProgressNotification = (
+  sessionId: string,
+  notificationTitle: string,
+  notificationContent: string,
+  notificationIdPrefix: string,
+  footerLinkText: string,
+  dualChatLinks = false,
+) => {
+  Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
+
+  const notificationReturn = Notification.info({
+    title: notificationTitle,
+    content: notificationContent,
+    footer: () => h(
+      'div',
+      {
+        style: dualChatLinks
+          ? 'display:flex; justify-content:flex-end; gap:16px; margin-top:12px;'
+          : 'text-align: right; margin-top: 12px;',
+      },
+      dualChatLinks
+        ? [
+            h(
+              'a',
+              {
+                href: 'javascript:;',
+                onClick: () => {
+                  openLangGraphChatInCurrentPage(
+                    router,
+                    sessionId,
+                    currentProjectId.value,
+                  );
+                  notificationReturn?.close();
+                },
+              },
+              taskText.value.openChatCurrentPage,
+            ),
+            h(
+              'a',
+              {
+                href: 'javascript:;',
+                onClick: () => {
+                  openLangGraphChatInNewWindow(
+                    router,
+                    sessionId,
+                    currentProjectId.value,
+                  );
+                  notificationReturn?.close();
+                },
+              },
+              taskText.value.openChatNewWindow,
+            ),
+          ]
+        : [
+            h(
+              'a',
+              {
+                href: 'javascript:;',
+                onClick: () => {
+                  openLangGraphChatInNewWindow(
+                    router,
+                    sessionId,
+                    currentProjectId.value,
+                  );
+                  notificationReturn?.close();
+                },
+              },
+              footerLinkText,
+            ),
+          ],
+    ),
+    duration: 0,
+    id: `${notificationIdPrefix}-${sessionId}`,
+  });
+};
+
 const startAutomationTask = (
   requestData: ChatRequest,
   notificationTitle: string,
@@ -432,33 +517,14 @@ const startAutomationTask = (
       };
       localStorage.setItem('langgraph_knowledge_settings', JSON.stringify(knowledgeSettings));
 
-      const notificationReturn = Notification.info({
-        title: notificationTitle,
-        content: notificationContent,
-        footer: () => h(
-          'div',
-          { style: 'text-align: right; margin-top: 12px;' },
-          [
-            h(
-              'a',
-              {
-                href: 'javascript:;',
-                onClick: () => {
-                  openLangGraphChatInNewWindow(
-                    router,
-                    sessionId,
-                    currentProjectId.value,
-                  );
-                  notificationReturn?.close();
-                },
-              },
-              footerLinkText
-            ),
-          ]
-        ),
-        duration: 10000,
-        id: `${notificationIdPrefix}-${sessionId}`,
-      });
+      showExecutionProgressNotification(
+        sessionId,
+        notificationTitle,
+        notificationContent,
+        notificationIdPrefix,
+        footerLinkText,
+        notificationIdPrefix === 'exec-case',
+      );
     },
     undefined,
     {
@@ -852,6 +918,13 @@ ${EXECUTION_STEP_DISCIPLINE}
   executionSessionId.value = null;
   isExecutionResultDrawerVisible.value = true;
 
+  Notification.info({
+    id: EXECUTION_PENDING_NOTIFICATION_ID,
+    title: taskText.value.executionStarted,
+    content: notificationContent,
+    duration: 0,
+  });
+
   startAutomationTask(
     requestData,
     taskText.value.executionStarted,
@@ -877,9 +950,17 @@ ${EXECUTION_STEP_DISCIPLINE}
   pendingExecuteTestCase.value = null;
 };
 
-const handleViewExecutionReport = (testCase: TestCase) => {
+const handleViewExecutionReport = async (testCase: TestCase) => {
   executionResultTestCase.value = testCase;
   executionSessionId.value = testCase.latest_run?.session_id || null;
+
+  if (!executionSessionId.value && currentProjectId.value) {
+    const response = await getLatestTestCaseRunRecord(currentProjectId.value, testCase.id);
+    if (response.success && response.data?.session_id) {
+      executionSessionId.value = response.data.session_id;
+    }
+  }
+
   isExecutionResultDrawerVisible.value = true;
 };
 

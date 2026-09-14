@@ -30,3 +30,30 @@ export function openLangGraphChatInNewWindow(
   });
   window.open(href, '_blank', 'noopener,noreferrer');
 }
+
+/** Navigate to LLM chat in the current tab. */
+export function openLangGraphChatInCurrentPage(
+  router: Router,
+  sessionId?: string | null,
+  projectId?: number | null,
+): void {
+  if (sessionId) {
+    localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+  }
+  if (projectId) {
+    localStorage.setItem(PROJECT_STORAGE_KEY, String(projectId));
+  }
+
+  const query: Record<string, string> = {};
+  if (sessionId) {
+    query.session_id = sessionId;
+  }
+  if (projectId) {
+    query.project_id = String(projectId);
+  }
+
+  router.push({
+    name: 'LangGraphChat',
+    query: Object.keys(query).length > 0 ? query : undefined,
+  });
+}

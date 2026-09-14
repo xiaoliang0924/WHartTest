@@ -1,6 +1,37 @@
 import django_filters
+from django.db.models import Q
 from django_filters import BaseInFilter, CharFilter
+from rest_framework import filters
+
 from .models import TestCase, TestCaseModule
+
+
+class TestCaseSearchFilter(filters.SearchFilter):
+    """Search by name/precondition and exact numeric case id (supports #1316)."""
+
+    def filter_queryset(self, request, queryset, view):
+        search_terms = self.get_search_terms(request)
+        if not search_terms:
+            return queryset
+
+        search_fields = getattr(view, "search_fields", None) or []
+        conditions = Q()
+
+        for term in search_terms:
+            term_query = Q()
+            for field in search_fields:
+                term_query |= Q(**{f"{field}__icontains": term})
+
+            normalized = term.lstrip("#").strip()
+            if normalized.isdigit():
+                term_query |= Q(id=int(normalized))
+
+            conditions &= term_query
+
+        queryset = queryset.filter(conditions)
+        if self.must_call_distinct(queryset, search_fields):
+            queryset = queryset.distinct()
+        return queryset
 
 
 class CharInFilter(BaseInFilter, CharFilter):

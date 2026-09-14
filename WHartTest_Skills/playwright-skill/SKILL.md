@@ -32,6 +32,8 @@ description: 通用浏览器自动化。用于页面操作、表单填写、登�
 | 点菜单并校验 | `await helpers.navigateByMenu(page, '菜单名');`；也兼容 `'父菜单 > 子菜单'`，明确知道目标路由时才传唯一 URL 片段 |
 | 点嵌套菜单路径 | `await helpers.navigateByMenuPath(page, ['父菜单', '子菜单']);`；禁止使用父级公共 URL 前缀 |
 | 组合筛选 | `await helpers.filterByFields(page, { dropdowns: [{ fieldLabel, option }] });` |
+| 工单详情类（查询→进详情→沟通区） | `await helpers.runTicketDetailCaseStep(page, <步骤号>);`（ticketNo 来自 WHARTTEST_TICKET_NO） |
+| 工单总览 SLA 预警点工单号进详情 | **每步只调用** `await helpers.runOverviewSlaDetailCaseStep(page, <步骤号>);`（禁止手写 cl-table/tl-link 定位） |
 | 看页面结构 | `await helpers.describePageForAI(page);` |
 
 登录地址/账号优先用环境变量：`WHARTTEST_LOGIN_URL`、`WHARTTEST_USERNAME`、`WHARTTEST_PASSWORD`。
@@ -53,5 +55,5 @@ node run.js "await helpers.loginStep1(page);"
 
 ## 逐步执行
 
-按用例步骤编号一步一脚本、一步一截图。登录步骤的截图由 `loginStep1` 自带，不要重复截图。登录输出 `RESULT=FAIL` 时立即停止，禁止继续菜单步骤。筛选步只做筛选和验收，不要在同一步点进详情。
+按用例步骤编号一步一脚本、一步一截图。登录步骤的截图由 `loginStep1` 自带，不要重复截图。登录输出 `RESULT=FAIL` 时立即停止，禁止继续菜单步骤。筛选步只做筛选和验收，不要在同一步点进详情；若用例已拆分为「步骤3查询、步骤4进详情」，则分别执行，或使用 `runTicketDetailCaseStep`。
 禁止用 `page.getByText('某状态').click()` 选状态下拉（表格里常有多行同文案）。

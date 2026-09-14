@@ -1169,6 +1169,11 @@ def get_skill_tools(
                         from data_generation.testcase_pre_data import (
                             collect_testcase_text,
                             extract_login_credentials,
+                            get_latest_pre_data_ticket_id,
+                            get_latest_pre_data_ticket_no,
+                            is_overview_dashboard_case,
+                            is_overview_sla_detail_case,
+                            is_ticket_detail_boundary_case,
                         )
 
                         blob = collect_testcase_text(tc)
@@ -1182,10 +1187,20 @@ def get_skill_tools(
                             env["WHARTTEST_PASSWORD"] = creds["password"]
                         if creds.get("login_url"):
                             env["WHARTTEST_LOGIN_URL"] = creds["login_url"]
-                        if "工单总览" in blob or "数据总览" in blob:
+                        if is_overview_sla_detail_case(tc):
+                            env["WHARTTEST_OVERVIEW_SLA_DETAIL_CASE"] = "1"
+                        elif is_overview_dashboard_case(tc):
                             env["WHARTTEST_OVERVIEW_CASE"] = "1"
                         if "通知记录" in blob or "通知中心" in blob:
                             env["WHARTTEST_NOTIFICATION_CASE"] = "1"
+                        if is_ticket_detail_boundary_case(tc):
+                            env["WHARTTEST_TICKET_DETAIL_CASE"] = "1"
+                            ticket_no = get_latest_pre_data_ticket_no(tc)
+                            ticket_id = get_latest_pre_data_ticket_id(tc)
+                            if ticket_no:
+                                env["WHARTTEST_TICKET_NO"] = ticket_no
+                            if ticket_id:
+                                env["WHARTTEST_TICKET_ID"] = ticket_id
                 except Exception as exc:
                     logger.debug(
                         "[execute_skill_script] overview case hint skipped: %s", exc

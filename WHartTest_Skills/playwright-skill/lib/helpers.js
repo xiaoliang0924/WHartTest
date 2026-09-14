@@ -488,6 +488,23 @@ function isOverviewCaseContext() {
   return String(process.env.WHARTTEST_OVERVIEW_CASE || '').trim() === '1';
 }
 
+function isOverviewSlaDetailCaseContext() {
+  return String(process.env.WHARTTEST_OVERVIEW_SLA_DETAIL_CASE || '').trim() === '1';
+}
+
+let lastClickedSlaTicketNo = '';
+
+function getClickedSlaTicketNo() {
+  return String(process.env.WHARTTEST_CLICKED_TICKET_NO || lastClickedSlaTicketNo || '').trim();
+}
+
+function setClickedSlaTicketNo(value) {
+  lastClickedSlaTicketNo = String(value || '').trim();
+  if (lastClickedSlaTicketNo) {
+    process.env.WHARTTEST_CLICKED_TICKET_NO = lastClickedSlaTicketNo;
+  }
+}
+
 function isDashboardUrl(url) {
   return /\/work-order\/dashboard(?:\?|$|\/)/.test(String(url || ''));
 }
@@ -705,6 +722,318 @@ async function runOverviewCaseStep(page, stepNumber, caseId) {
   return target;
 }
 
+function getSlaWarningSectionLocator(page) {
+  return page
+    .locator('.dashboard-content, .layout-content, main')
+    .filter({ hasText: /SLA预警明细|SLA预警|预警明细/ })
+    .last();
+}
+
+async function scrollToSlaWarningSection(page) {
+  await dismissBlockingDialogs(page);
+  const section = getSlaWarningSectionLocator(page);
+  try {
+    if ((await section.count()) > 0) {
+      await section.scrollIntoViewIfNeeded({ timeout: 10000 });
+    }
+  } catch (_) {
+    // fall through
+  }
+  await page.evaluate(() => {
+    const anchor = Array.from(document.querySelectorAll('h3,h4,div,span')).find((node) => {
+      const text = (node.textContent || '').trim();
+      return /SLA预警明细|SLA预警/.test(text) && text.length < 30;
+    });
+    if (anchor) {
+      anchor.scrollIntoView({ block: 'center', inline: 'nearest' });
+    }
+    const main = document.querySelector('.layout-content, .el-main, main');
+    if (main) {
+      main.scrollTop = main.scrollHeight;
+    }
+  });
+  await page.waitForTimeout(1000);
+}
+
+async function findSlaTicketRows(page) {
+  await scrollToSlaWarningSection(page);
+  const rowSelectors = [
+    '.el-table__body tr',
+    '.cl-table tbody tr',
+    'table tbody tr',
+    '.el-table .el-table__row',
+  ];
+
+  const title = page.getByText(/SLA预警明细|SLA预警/, { exact: false }).first();
+  if ((await title.count()) > 0) {
+    const scoped = title.locator(
+      'xpath=ancestor::*[.//table or .//*[contains(@class,"el-table") or contains(@class,"cl-table")]][1]',
+    );
+    if ((await scoped.count()) > 0) {
+      for (const sel of rowSelectors) {
+        const rows = scoped.locator(sel);
+        if ((await rows.count()) > 0) {
+          return rows;
+        }
+      }
+    }
+  }
+
+  const section = getSlaWarningSectionLocator(page);
+  for (const sel of rowSelectors) {
+    if ((await section.count()) > 0) {
+      const rows = section.locator(sel);
+      if ((await rows.count()) > 0) {
+        return rows;
+      }
+    }
+  }
+
+  return page.locator(
+    '.dashboard-content .cl-table tbody tr, .dashboard-content .el-table__body tr, .dashboard-content table tbody tr',
+  );
+}
+
+async function findTicketNoLinkInRow(row) {
+  const linkSelectors = ['a.tl-link', 'a.el-link', 'a[href*="/tickets/"]', 'td a', 'a'];
+  for (const sel of linkSelectors) {
+    const links = row.locator(sel);
+    const count = await links.count();
+    for (let i = 0; i < count; i += 1) {
+      const link = links.nth(i);
+      const text = String((await link.textContent()) || '').replace(/\s/g, '');
+      if (/^20\d{12,}$/.test(text) || /^\d{12,}$/.test(text)) {
+        return link;
+      }
+    }
+  }
+  const fallback = row.getByRole('link').first();
+  if ((await fallback.count()) > 0) {
+    return fallback;
+  }
+  return null;
+}
+
+async function assertSlaWarningTableHasRows(page) {
+  const rows = await findSlaTicketRows(page);
+  const count = await rows.count();
+  if (count > 0) {
+    return true;
+  }
+  console.log(
+    'RESULT=FAIL: SLA预警明细表无数据行，请确认测试环境有近7天 SLA 超时/预警工单',
+  );
+  return false;
+}
+
+async function ensureOverviewDashboardPage(page) {
+  if (isDashboardUrl(page.url())) {
+    return assertOverviewPageLoaded(page);
+  }
+  await navigateToOverviewPage(page);
+  await page.waitForLoadState('networkidle').catch(() => {});
+  return assertOverviewPageLoaded(page);
+}
+
+async function clickFirstSlaTicketLink(page) {
+  if (!(await assertSlaWarningTableHasRows(page))) {
+    return '';
+  }
+
+  const rows = await findSlaTicketRows(page);
+  const firstRow = rows.first();
+  await firstRow.waitFor({ state: 'visible', timeout: 15000 });
+
+  const ticketLink = await findTicketNoLinkInRow(firstRow);
+  if (!ticketLink) {
+    console.log('RESULT=FAIL: SLA 预警明细第一行未找到蓝色工单号链接');
+    return '';
+  }
+  await ticketLink.waitFor({ state: 'visible', timeout: 10000 });
+  const ticketNo = String((await ticketLink.textContent()) || '').trim();
+  if (!ticketNo) {
+    console.log('RESULT=FAIL: SLA 预警明细第一行未读取到工单号链接文本');
+    return '';
+  }
+
+  await Promise.all([
+    page.waitForURL(/\/work-order\/tickets\/\d+(?:\?|$|\/)/, { timeout: 20000 }).catch(() => null),
+    ticketLink.click(),
+  ]);
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  await dismissBlockingDialogs(page);
+
+  if (!(await waitForTicketDetailNavigation(page, 20000))) {
+    console.log(`RESULT=FAIL: 点击 SLA 工单号后未进入详情页 ticketNo=${ticketNo} URL=${page.url()}`);
+    return '';
+  }
+
+  setClickedSlaTicketNo(ticketNo);
+  console.log(`RESULT=PASS: 已点击 SLA 工单号 ${ticketNo} 并进入详情 URL=${page.url()}`);
+  return ticketNo;
+}
+
+async function assertTicketNoOnDetailPage(page, ticketNo) {
+  const no = String(ticketNo || getClickedSlaTicketNo()).trim();
+  if (!no) {
+    console.log('RESULT=FAIL: 缺少点击时的工单号，无法校验详情页');
+    return false;
+  }
+  if (!(await waitForTicketDetailNavigation(page, 15000))) {
+    console.log(`RESULT=FAIL: 详情页未就绪 URL=${page.url()}`);
+    return false;
+  }
+
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  if (bodyText.includes(no)) {
+    console.log(`RESULT=PASS: 详情页已展示工单号 ${no}`);
+    return true;
+  }
+
+  try {
+    await page.getByText(no, { exact: false }).first().waitFor({ state: 'visible', timeout: 8000 });
+    console.log(`RESULT=PASS: 详情页已展示工单号 ${no}`);
+    return true;
+  } catch (_) {
+    console.log(
+      `RESULT=FAIL: 详情页未找到工单号 ${no}，也未找到「基本信息/返回列表」等详情页标志 URL=${page.url()}`,
+    );
+    return false;
+  }
+}
+
+async function navigateBackToOverviewFromDetail(page) {
+  if (isTicketDetailUrl(page.url())) {
+    try {
+      await page.getByRole('button', { name: /返回列表|返回/ }).first().click({ timeout: 8000 });
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+    } catch (_) {
+      // fall through
+    }
+  }
+  if (!isDashboardUrl(page.url())) {
+    await navigateToOverviewPage(page);
+  }
+  await page.waitForLoadState('networkidle').catch(() => {});
+  return ensureOverviewDashboardPage(page);
+}
+
+async function clickSlaRowDetailButton(page, rowIndex = 0) {
+  if (!(await assertSlaWarningTableHasRows(page))) {
+    return false;
+  }
+  const rows = await findSlaTicketRows(page);
+  const row = rows.nth(rowIndex);
+  await row.waitFor({ state: 'visible', timeout: 15000 });
+
+  const detailBtn = row.getByRole('button', { name: '详情' });
+  if ((await detailBtn.count()) > 0) {
+    await detailBtn.first().click();
+  } else {
+    const detailText = row.getByText('详情', { exact: true });
+    if ((await detailText.count()) > 0) {
+      await detailText.first().click();
+    } else {
+      const ticketLink = row.getByRole('link').first();
+      if ((await ticketLink.count()) === 0) {
+        console.log('RESULT=FAIL: SLA 行未找到「详情」按钮或可点击工单号');
+        return false;
+      }
+      const ticketNo = String((await ticketLink.textContent()) || '').trim();
+      await ticketLink.click();
+      setClickedSlaTicketNo(ticketNo);
+    }
+  }
+
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  if (!(await waitForTicketDetailNavigation(page, 20000))) {
+    console.log(`RESULT=FAIL: 点击详情后未进入工单详情页 URL=${page.url()}`);
+    return false;
+  }
+  console.log(`RESULT=PASS: 已通过详情入口进入工单详情 URL=${page.url()}`);
+  return true;
+}
+
+/**
+ * 工单总览 SLA 预警表 → 工单详情类用例专用。
+ */
+async function runOverviewSlaDetailCaseStep(page, stepNumber, caseId) {
+  const step = Number(stepNumber);
+  const cid = caseId || process.env.WHARTTEST_CASE_ID || 'unknown';
+  const pathMod = require('path');
+  const dir = process.env.SCREENSHOT_DIR || '.';
+  const target = pathMod.join(dir, `case_${cid}_step${step}.png`);
+
+  if (step === 1) {
+    const path = await loginStep1(page, cid);
+    if (!isLoginPageUrl(page.url())) {
+      console.log(`RESULT=PASS: 步骤1登录成功 URL=${page.url()}`);
+    }
+    return path;
+  }
+
+  if (step === 2) {
+    const ok = await ensureOverviewDashboardPage(page);
+    await scrollToSlaWarningSection(page);
+    await captureDashboardStepView(page, target, 7);
+    console.log('[CASE_SCREENSHOT]', target);
+    if (!ok) {
+      return null;
+    }
+    console.log(`RESULT=PASS: 步骤2已进入数据总览 URL=${page.url()}`);
+    return target;
+  }
+
+  if (step === 3) {
+    const onDashboard = await ensureOverviewDashboardPage(page);
+    if (!onDashboard) {
+      await page.screenshot({ path: target, fullPage: false, timeout: 8000 });
+      console.log('[CASE_SCREENSHOT]', target);
+      return null;
+    }
+    const ticketNo = await clickFirstSlaTicketLink(page);
+    await captureTicketDetailView(page, target, 3);
+    console.log('[CASE_SCREENSHOT]', target);
+    return ticketNo ? target : null;
+  }
+
+  if (step === 4) {
+    if (!isTicketDetailUrl(page.url())) {
+      const ticketNo = getClickedSlaTicketNo();
+      if (!ticketNo || !(await clickFirstSlaTicketLink(page))) {
+        await captureTicketDetailView(page, target, 4);
+        console.log('[CASE_SCREENSHOT]', target);
+        return null;
+      }
+    }
+    const ok = await assertTicketNoOnDetailPage(page, getClickedSlaTicketNo());
+    await captureTicketDetailView(page, target, 4);
+    console.log('[CASE_SCREENSHOT]', target);
+    if (ok) {
+      console.log(`RESULT=PASS: 步骤4详情页工单号校验通过 URL=${page.url()}`);
+    }
+    return ok ? target : null;
+  }
+
+  if (step >= 5) {
+    const backOk = await navigateBackToOverviewFromDetail(page);
+    if (!backOk) {
+      await page.screenshot({ path: target, fullPage: false, timeout: 8000 });
+      console.log('[CASE_SCREENSHOT]', target);
+      return null;
+    }
+    const clicked = await clickSlaRowDetailButton(page, 0);
+    await captureTicketDetailView(page, target, step);
+    console.log('[CASE_SCREENSHOT]', target);
+    if (clicked) {
+      console.log(`RESULT=PASS: 步骤${step}已通过详情按钮进入工单详情 URL=${page.url()}`);
+    }
+    return clicked ? target : null;
+  }
+
+  return screenshotCaseStep(page, step, cid);
+}
+
 /**
  * 步骤截图：优先主内容区（含搜索/筛选 + 列表），登录页用整页视口。
  */
@@ -878,10 +1207,18 @@ async function screenshotCaseStep(page, stepNumber, caseId) {
   const onLoginPage = isLoginPageUrl(url);
   const onDashboard = isDashboardUrl(url);
   const overviewCase = isOverviewCaseContext();
+  const overviewSlaDetailCase = isOverviewSlaDetailCaseContext();
   const notificationCase = isNotificationCaseContext();
 
   // loginStep1 已在登录前提交步骤1图。登录后再截步骤1会覆盖成列表页。
-  if (step === 1 && !onLoginPage && fs.existsSync(target) && !overviewCase && !notificationCase) {
+  if (
+    step === 1
+    && !onLoginPage
+    && fs.existsSync(target)
+    && !overviewCase
+    && !overviewSlaDetailCase
+    && !notificationCase
+  ) {
     console.log('[CASE_SCREENSHOT]', target);
     return target;
   }
@@ -897,6 +1234,25 @@ async function screenshotCaseStep(page, stepNumber, caseId) {
       timeout: 8000,
       plain: true,
     });
+    console.log('[CASE_SCREENSHOT]', target);
+    return target;
+  }
+
+  if (step >= 2 && overviewSlaDetailCase) {
+    if (step === 2 || onDashboard) {
+      const ready = await ensureOverviewPageForScreenshot(page, step);
+      if (!ready) {
+        await page.screenshot({ path: target, fullPage: false, timeout: 8000 });
+        console.log('[CASE_SCREENSHOT]', target);
+        return target;
+      }
+      await waitForPageBodyText(page, 120, 15000);
+      await captureDashboardStepView(page, target, Math.min(step, 7));
+    } else if (isTicketDetailUrl(url)) {
+      await captureTicketDetailView(page, target, step);
+    } else {
+      await captureMainContentView(page, target);
+    }
     console.log('[CASE_SCREENSHOT]', target);
     return target;
   }
@@ -930,6 +1286,19 @@ async function screenshotCaseStep(page, stepNumber, caseId) {
     }
     console.log('[CASE_SCREENSHOT]', target);
     console.log(`RESULT=PASS: 步骤${step}截图完成 URL=${page.url()}`);
+    return target;
+  }
+
+  const ticketDetailCase = isTicketDetailCaseContext();
+  if (step >= 4 && ticketDetailCase && !(await isTicketDetailVisible(page))) {
+    console.log(
+      `RESULT=FAIL: 步骤${step}应在工单详情页截图，当前仍在列表或其他页 URL=${url}`,
+    );
+  }
+  if (step >= 4 && ticketDetailCase && (await isTicketDetailVisible(page))) {
+    await waitForPageBodyText(page, 80, 8000);
+    await captureTicketDetailView(page, target, step);
+    console.log('[CASE_SCREENSHOT]', target);
     return target;
   }
 
@@ -1542,15 +1911,18 @@ async function navigateByMenuPath(page, menuPath, urlPattern, fallbackPath) {
   );
 }
 
-async function detectWorkOrderPage(page) {
-  const url = page.url();
+function detectWorkOrderPage(page) {
+  const url = String(page.url() || '');
   if (/notifications/.test(url)) {
     return 'notification-records';
   }
   if (/\/work-order\/dashboard(?:\?|$|\/)/.test(url)) {
     return 'overview';
   }
-  if (/\/work-order\/tickets(?:\?|$|\/)/.test(url)) {
+  if (/\/work-order\/tickets\/\d+(?:\?|$|\/)/.test(url)) {
+    return 'ticket-detail';
+  }
+  if (/\/work-order\/tickets(?:\?|$)/.test(url)) {
     return 'ticket-list';
   }
   if (/my-tickets/.test(url)) {
@@ -1789,6 +2161,415 @@ async function runNotificationCaseStep(page, stepNumber, caseId) {
   return target;
 }
 
+function isTicketDetailCaseContext() {
+  return String(process.env.WHARTTEST_TICKET_DETAIL_CASE || '').trim() === '1';
+}
+
+function getTicketNoFromEnv() {
+  return String(process.env.WHARTTEST_TICKET_NO || '').trim();
+}
+
+function getTicketIdFromEnv() {
+  return String(process.env.WHARTTEST_TICKET_ID || '').trim();
+}
+
+function isTicketDetailUrl(url) {
+  return /\/work-order\/tickets\/\d+(?:\?|$|\/)/.test(String(url || ''));
+}
+
+function buildTicketDetailUrl(page, ticketId) {
+  const id = String(ticketId || getTicketIdFromEnv()).trim();
+  if (!id || !page) {
+    return '';
+  }
+  const origin = new URL(page.url()).origin;
+  return `${origin}/work-order/tickets/${id}`;
+}
+
+async function waitForTicketDetailReady(page, timeoutMs = 15000) {
+  if (!page) {
+    return false;
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (isTicketDetailUrl(page.url())) {
+      try {
+        const backVisible = await page
+          .getByRole('button', { name: /返回列表/ })
+          .first()
+          .isVisible({ timeout: 800 });
+        if (backVisible) {
+          return true;
+        }
+      } catch (_) {
+        // ignore
+      }
+      try {
+        const detailVisible = await page
+          .locator('main, .layout-content, .el-main')
+          .filter({ hasText: /基本信息|暂无沟通记录|工单详情/ })
+          .first()
+          .isVisible({ timeout: 800 });
+        if (detailVisible) {
+          return true;
+        }
+      } catch (_) {
+        // ignore
+      }
+    }
+    await page.waitForTimeout(250);
+  }
+  return isTicketDetailUrl(page.url());
+}
+
+async function isTicketDetailVisible(page) {
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+    return false;
+  }
+  const strict = isTicketDetailCaseContext();
+  if (!isTicketDetailUrl(page.url())) {
+    return false;
+  }
+  if (strict) {
+    return waitForTicketDetailReady(page, 8000);
+  }
+  try {
+    if (
+      await page
+        .getByRole('button', { name: /返回列表/ })
+        .first()
+        .isVisible({ timeout: 2500 })
+    ) {
+      return true;
+    }
+  } catch (_) {
+    // ignore
+  }
+  try {
+    if (await page.getByText(/暂无沟通记录/).first().isVisible({ timeout: 2500 })) {
+      return true;
+    }
+  } catch (_) {
+    // ignore
+  }
+  return true;
+}
+
+async function waitForTicketDetailNavigation(page, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (isTicketDetailUrl(page.url()) && (await waitForTicketDetailReady(page, 1200))) {
+      return true;
+    }
+    await page.waitForTimeout(400);
+  }
+  return isTicketDetailUrl(page.url()) && (await waitForTicketDetailReady(page, 2000));
+}
+
+async function gotoTicketDetailById(page, ticketId) {
+  const detailUrl = buildTicketDetailUrl(page, ticketId);
+  if (!detailUrl) {
+    console.log('RESULT=FAIL: 缺少 ticketId，无法直达工单详情');
+    return false;
+  }
+  if (isTicketDetailUrl(page.url()) && page.url().includes(`/tickets/${ticketId}`)) {
+    return waitForTicketDetailReady(page, 5000);
+  }
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  await dismissBlockingDialogs(page);
+  try {
+    await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  } catch (err) {
+    console.log(`RESULT=INFO: ticketId goto 首次异常 ${err?.message || err}，重试一次`);
+    await page.waitForTimeout(800);
+    try {
+      await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (retryErr) {
+      console.log(`RESULT=FAIL: ticketId goto 失败 ${retryErr?.message || retryErr}`);
+      return false;
+    }
+  }
+  await page.waitForLoadState('networkidle').catch(() => {});
+  await dismissBlockingDialogs(page);
+  if (!(await waitForTicketDetailNavigation(page, 20000))) {
+    console.log(`RESULT=FAIL: ticketId 直达详情失败 URL=${page.url()}`);
+    return false;
+  }
+  console.log(`RESULT=PASS: 已通过 ticketId 进入工单详情 URL=${page.url()}`);
+  return true;
+}
+
+async function ensureTicketListPage(page) {
+  const kind = detectWorkOrderPage(page);
+  if (kind === 'ticket-list') {
+    return true;
+  }
+  if (kind === 'ticket-detail') {
+    try {
+      await page.getByRole('button', { name: /返回列表/ }).click({ timeout: 8000 });
+      await page.waitForURL(/\/work-order\/tickets(?:\?|$)/, { timeout: 12000 });
+    } catch (_) {
+      const origin = new URL(page.url()).origin;
+      await page.goto(`${origin}/work-order/tickets`, { waitUntil: 'domcontentloaded' });
+    }
+    return detectWorkOrderPage(page) === 'ticket-list';
+  }
+  await navigateToTicketListPage(page);
+  return detectWorkOrderPage(page) === 'ticket-list';
+}
+
+async function queryTicketInList(page, ticketNo) {
+  const no = String(ticketNo || getTicketNoFromEnv()).trim();
+  if (!no) {
+    console.log('RESULT=FAIL: 缺少 ticketNo，无法查询工单');
+    return false;
+  }
+  if (!(await ensureTicketListPage(page))) {
+    console.log(`RESULT=FAIL: 未能进入工单列表 URL=${page.url()}`);
+    return false;
+  }
+  await fillFilterField(page, '工单号', no);
+  await clickPageButton(page, '查询');
+  await page.waitForLoadState('networkidle').catch(() => {});
+  const row = page.locator('.el-table__body tr').filter({ hasText: no }).first();
+  try {
+    await row.waitFor({ state: 'visible', timeout: 15000 });
+  } catch (_) {
+    console.log(`RESULT=FAIL: 查询后未找到工单 ${no}`);
+    return false;
+  }
+  console.log(`RESULT=PASS: 已查询到目标工单 ${no}`);
+  return true;
+}
+
+async function openTicketDetailFromList(page, ticketNo) {
+  const no = String(ticketNo || getTicketNoFromEnv()).trim();
+  const ticketId = getTicketIdFromEnv();
+  if (!no) {
+    console.log('RESULT=FAIL: 缺少 ticketNo，无法打开工单详情');
+    return false;
+  }
+  if (await isTicketDetailVisible(page)) {
+    console.log(`RESULT=PASS: 已在工单详情 URL=${page.url()}`);
+    return true;
+  }
+  if (!isTicketDetailUrl(page.url()) && !(await ensureTicketListPage(page))) {
+    console.log(`RESULT=FAIL: 打开详情前不在工单列表 URL=${page.url()}`);
+    return false;
+  }
+
+  const row = page.locator('.el-table__body tr').filter({ hasText: no }).first();
+  try {
+    await row.waitFor({ state: 'visible', timeout: 15000 });
+  } catch (_) {
+    console.log(`RESULT=FAIL: 列表中未找到工单 ${no}`);
+    return false;
+  }
+
+  let clicked = false;
+  await dismissBlockingDialogs(page);
+  const processBtn = row.getByRole('button', { name: '处理' }).first();
+  await processBtn.scrollIntoViewIfNeeded().catch(() => {});
+  try {
+    await processBtn.click({ timeout: 10000 });
+    clicked = true;
+  } catch (_) {
+    try {
+      await dismissBlockingDialogs(page);
+      await processBtn.evaluate((el) => el.click());
+      clicked = true;
+    } catch (_) {
+      // fall through to ticketId goto
+    }
+  }
+
+  if (await waitForTicketDetailNavigation(page, 18000)) {
+    console.log(`RESULT=PASS: 已进入工单详情 URL=${page.url()}`);
+    return true;
+  }
+
+  if (ticketId) {
+    console.log(`RESULT=INFO: 点击「处理」未跳转，改用 ticketId=${ticketId} 直达详情`);
+    if (await gotoTicketDetailById(page, ticketId)) {
+      return true;
+    }
+  }
+
+  console.log(
+    `RESULT=FAIL: 点击「处理」后未进入工单详情 clicked=${clicked} URL=${page.url()}`,
+  );
+  return false;
+}
+
+async function assertCommunicationReadOnly(page) {
+  await dismissBlockingDialogs(page);
+  if (!(await isTicketDetailVisible(page))) {
+    const ticketId = getTicketIdFromEnv();
+    if (ticketId && (await gotoTicketDetailById(page, ticketId))) {
+      await dismissBlockingDialogs(page);
+    }
+  }
+  if (!(await isTicketDetailVisible(page))) {
+    console.log(`RESULT=FAIL: 不在工单详情页，无法检查沟通区 URL=${page.url()}`);
+    return false;
+  }
+  const sendButtons = await page.getByRole('button', { name: /发送|提交消息|回复消息/ }).count();
+  const textareas = await page.locator('textarea:visible').count();
+  if (sendButtons > 0 || textareas > 0) {
+    console.log(
+      `RESULT=FAIL: 页面存在消息发送控件 sendButtons=${sendButtons} textareas=${textareas}`,
+    );
+    return false;
+  }
+  console.log('RESULT=PASS: 沟通区只读，无发送控件');
+  return true;
+}
+
+async function captureTicketDetailView(page, targetPath, stepNumber) {
+  const fs = require('fs');
+  const step = Number(stepNumber);
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+    return false;
+  }
+  await dismissBlockingDialogs(page);
+  if (!(await isTicketDetailVisible(page))) {
+    return captureMainContentView(page, targetPath);
+  }
+
+  const detailPanel = page
+    .locator('.layout-content, .el-main, main')
+    .filter({ hasText: /返回列表|基本信息|暂无沟通记录|工单摘要/ })
+    .last();
+
+  if (step >= 5) {
+    await page.evaluate(() => {
+      const marker = Array.from(document.querySelectorAll('*')).find((node) => {
+        const text = (node.textContent || '').trim();
+        return /暂无沟通记录|沟通记录|沟通区|消息记录/.test(text) && node.childElementCount < 16;
+      });
+      if (marker) {
+        marker.scrollIntoView({ block: 'center', inline: 'nearest' });
+      }
+    });
+    await page.waitForTimeout(400);
+  } else {
+    try {
+      await page
+        .getByRole('button', { name: /返回列表|返回/ })
+        .first()
+        .scrollIntoViewIfNeeded();
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  try {
+    if ((await detailPanel.count()) > 0) {
+      await detailPanel.first().screenshot({ path: targetPath, timeout: 8000 });
+      if (fs.existsSync(targetPath)) {
+        return true;
+      }
+    }
+  } catch (_) {
+    // fall through
+  }
+
+  try {
+    const clip = await page.evaluate(() => {
+      const anchor =
+        Array.from(document.querySelectorAll('button, a, span')).find((node) =>
+          /返回列表|返回/.test((node.textContent || '').trim()),
+        ) || null;
+      const host =
+        (anchor && anchor.closest('.layout-content, .el-main, main')) ||
+        document.querySelector('.layout-content, .el-main, main');
+      if (!host) {
+        return null;
+      }
+      const rect = host.getBoundingClientRect();
+      const y = anchor ? Math.max(0, anchor.getBoundingClientRect().top - 12) : Math.max(0, rect.top);
+      return {
+        x: 0,
+        y: Math.floor(y),
+        width: window.innerWidth,
+        height: Math.min(920, window.innerHeight - y - 8),
+      };
+    });
+    if (clip && clip.width > 120 && clip.height > 120) {
+      await page.screenshot({ path: targetPath, clip, fullPage: false, timeout: 8000 });
+      if (fs.existsSync(targetPath)) {
+        return true;
+      }
+    }
+  } catch (_) {
+    // fall through
+  }
+
+  return captureMainContentView(page, targetPath);
+}
+
+/**
+ * 工单列表查询 + 进详情 + 沟通区只读类用例（如 case 1316）。
+ * 每步只调用：await helpers.runTicketDetailCaseStep(page, <步骤号>);
+ */
+async function runTicketDetailCaseStep(page, stepNumber, caseId) {
+  const step = Number(stepNumber);
+  const cid = caseId || process.env.WHARTTEST_CASE_ID || 'unknown';
+  const pathMod = require('path');
+  const dir = process.env.SCREENSHOT_DIR || '.';
+  const target = pathMod.join(dir, `case_${cid}_step${step}.png`);
+  const ticketNo = getTicketNoFromEnv();
+
+  if (step === 1) {
+    return loginStep1(page, cid);
+  }
+
+  if (step === 2) {
+    await navigateToTicketListPage(page);
+    await waitForPageBodyText(page, 80, 10000);
+    await screenshotCaseStep(page, 2, cid);
+    console.log(`RESULT=PASS: 步骤2已进入工单列表 URL=${page.url()}`);
+    return target;
+  }
+
+  if (step === 3) {
+    const ok = await queryTicketInList(page, ticketNo);
+    await screenshotCaseStep(page, 3, cid);
+    if (ok) {
+      console.log(`RESULT=PASS: 步骤3已查询到目标工单 URL=${page.url()}`);
+    }
+    return ok ? target : null;
+  }
+
+  if (step === 4) {
+    const ok = await openTicketDetailFromList(page, ticketNo);
+    await captureTicketDetailView(page, target, 4);
+    console.log('[CASE_SCREENSHOT]', target);
+    if (ok) {
+      console.log(`RESULT=PASS: 步骤4已进入工单详情 URL=${page.url()}`);
+    }
+    return ok ? target : null;
+  }
+
+  if (step >= 5) {
+    if (!(await isTicketDetailVisible(page))) {
+      const ticketId = getTicketIdFromEnv();
+      if (!(ticketId && (await gotoTicketDetailById(page, ticketId)))) {
+        await openTicketDetailFromList(page, ticketNo);
+      }
+    }
+    const ok = await assertCommunicationReadOnly(page);
+    await captureTicketDetailView(page, target, step);
+    console.log('[CASE_SCREENSHOT]', target);
+    if (ok) {
+      console.log(`RESULT=PASS: 步骤${step}沟通区检查通过 URL=${page.url()}`);
+    }
+    return ok ? target : null;
+  }
+
+  return screenshotCaseStep(page, step, cid);
+}
+
 /**
  * 按字段筛选并点查询。字段标签由调用方传入。
  */
@@ -1896,11 +2677,13 @@ async function dismissBlockingDialogs(page) {
       // ignore
     }
 
-    dismissedThisRound =
-      (await clickIfVisible(
-        page.locator('.el-drawer__close-btn, .el-drawer .el-drawer__close, .el-drawer [aria-label="关闭"]'),
-        '侧栏抽屉',
-      )) || dismissedThisRound;
+    if (!isTicketDetailUrl(page.url())) {
+      dismissedThisRound =
+        (await clickIfVisible(
+          page.locator('.el-drawer__close-btn, .el-drawer .el-drawer__close, .el-drawer [aria-label="关闭"]'),
+          '侧栏抽屉',
+        )) || dismissedThisRound;
+    }
 
     if (!dismissedThisRound) {
       break;
@@ -1911,7 +2694,11 @@ async function dismissBlockingDialogs(page) {
 
   const hasDialog = await page.locator('.el-dialog:visible, [role="dialog"]:visible').count();
   const hasDrawer = await page.locator('.el-drawer:visible, .el-popper:visible').count();
-  if (hasDrawer > 0 || (hasDialog === 0 && (await page.locator('.el-overlay:visible').count()) > 0)) {
+  const onTicketDetail = isTicketDetailUrl(page.url());
+  if (
+    !onTicketDetail &&
+    (hasDrawer > 0 || (hasDialog === 0 && (await page.locator('.el-overlay:visible').count()) > 0))
+  ) {
     await page.keyboard.press('Escape').catch(() => {});
     await page.waitForTimeout(200);
     dismissed = true;
@@ -2009,9 +2796,19 @@ async function clickRowAction(page, rowText, buttonName) {
   await dismissBlockingDialogs(page);
 
   const entered = await Promise.race([
-    page.getByRole('button', { name: /返回/ }).first().waitFor({ state: 'visible', timeout: 8000 }).then(() => true),
-    page.locator('h1, h2').filter({ hasText: String(rowText) }).first().waitFor({ state: 'visible', timeout: 8000 }).then(() => true),
-    page.waitForTimeout(8000).then(() => false),
+    page.waitForURL(/\/work-order\/tickets\/\d+/, { timeout: 12000 }).then(() => true),
+    page
+      .getByRole('button', { name: /返回列表|返回/ })
+      .first()
+      .waitFor({ state: 'visible', timeout: 12000 })
+      .then(() => true),
+    page
+      .locator('main, .layout-content, .el-main')
+      .filter({ hasText: /基本信息|暂无沟通记录/ })
+      .first()
+      .waitFor({ state: 'visible', timeout: 12000 })
+      .then(() => true),
+    page.waitForTimeout(12000).then(() => false),
   ]);
   if (!entered) {
     console.log(`RESULT=FAIL: 已点「${buttonName}」但未见详情（当前 URL=${page.url()}）`);
@@ -2322,12 +3119,19 @@ module.exports = {
   assertOverviewPageLoaded,
   assertOverviewKpiCards,
   runOverviewCaseStep,
+  runOverviewSlaDetailCaseStep,
   navigateToNotificationRecordsPage,
   assertNotificationRecordsPageLoaded,
   runNotificationCaseStep,
   captureNotificationStepView,
   navigateToTicketListPage,
   navigateToMyTicketsPage,
+  isTicketDetailVisible,
+  queryTicketInList,
+  openTicketDetailFromList,
+  assertCommunicationReadOnly,
+  captureTicketDetailView,
+  runTicketDetailCaseStep,
   filterTicketList,
   handleCookieBanner,
   retryWithBackoff,

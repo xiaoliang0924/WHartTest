@@ -168,6 +168,51 @@ def is_page_access_permission_case(text: str) -> bool:
     return any(keyword in (text or '') for keyword in _PAGE_ACCESS_KEYWORDS)
 
 
+def is_overview_sla_detail_case(testcase: TestCase) -> bool:
+    """总览页 SLA 预警表点击工单号/详情进入详情页的用例。"""
+    text = collect_testcase_text(testcase)
+    name = testcase.name or ''
+    blob = f'{name}\n{text}'
+
+    if not re.search(r'工单总览|数据总览|SLA|预警', blob):
+        return False
+    if re.search(r'工单详情|详情页|进入工单详情|跳转.*详情', blob):
+        return True
+    if re.search(r'点击.*工单ID|点击.*工单号|工单ID.*链接|工单号.*链接', blob):
+        return True
+    if re.search(r'SLA预警.*点击|预警明细.*点击', blob):
+        return True
+    return False
+
+
+def is_overview_dashboard_case(testcase: TestCase) -> bool:
+    """True only when the case under test is the dashboard/overview page itself."""
+    if is_overview_sla_detail_case(testcase):
+        return False
+
+    text = collect_testcase_text(testcase)
+    name = testcase.name or ''
+
+    if re.search(r'工单列表|我的工单|通知记录', name):
+        return False
+    if is_page_access_permission_case(text) and re.search(
+        r'工单列表|我的工单|通知记录', text
+    ):
+        return False
+
+    if re.search(r'(进入|点击|访问|打开|查看).*工单总览', text):
+        return True
+    if re.search(r'(进入|点击|访问|打开|查看).*数据总览', text):
+        return True
+    if '/work-order/dashboard' in text:
+        return True
+    if re.search(r'工单总览页|数据总览页', text):
+        return True
+    if re.search(r'工单总览|数据总览', name) and not re.search(r'工单列表', name):
+        return True
+    return False
+
+
 def is_ui_display_only_case(text: str) -> bool:
     return any(keyword in (text or '') for keyword in _UI_DISPLAY_ONLY_KEYWORDS)
 
@@ -197,9 +242,9 @@ def needs_ticket_row_action(text: str) -> bool:
 
 
 def needs_ticket_pre_data(text: str) -> bool:
-    existing = needs_existing_ticket_data(text)
-    if is_page_access_permission_case(text) and not existing:
+    if is_page_access_permission_case(text):
         return False
+    existing = needs_existing_ticket_data(text)
     if is_ui_display_only_case(text) and not existing:
         return False
     if is_export_verify_case(text) and not needs_row_mutation(text):
@@ -333,6 +378,17 @@ def resolve_pre_data_for_testcase(testcase: TestCase) -> PreDataResolution:
         )
 
     text = collect_testcase_text(testcase)
+    if is_overview_dashboard_case(testcase) or is_overview_sla_detail_case(testcase):
+        return PreDataResolution(
+            plan=None,
+            template_key=None,
+            input_params={},
+            default_environment_id=None,
+            source='none',
+            fail_fast=False,
+            skip_reason='工单总览/数据总览类用例依赖环境已有统计数据，跳过自动推断造数',
+        )
+
     if not needs_ticket_pre_data(text):
         return PreDataResolution(
             plan=None,
@@ -374,10 +430,61 @@ def resolve_pre_data_for_testcase(testcase: TestCase) -> PreDataResolution:
     )
 
 
-def build_testcase_step_script_hints(testcase: TestCase) -> str:
-    """Generic execution hints. Do not hardcode a product or case script here."""
+def is_ticket_detail_boundary_case(testcase: TestCase) -> bool:
+    blob = collect_testcase_text(testcase)
+    return (
+        '沟通记录' in blob
+        and '处理' in blob
+        and ('详情' in blob or '工单详情' in blob)
+    )
+
+
+def _latest_pre_data_snapshot(testcase: TestCase) -> dict:
+    plan_id = getattr(testcase, 'pre_data_plan_id', None)
+    queryset = DataGenerationRun.objects.filter(
+        project_id=testcase.project_id,
+        trigger_type=DataGenerationRun.TRIGGER_CASE_PRE,
+        status=DataGenerationRun.STATUS_SUCCESS,
+    )
+    if plan_id:
+        queryset = queryset.filter(plan_id=plan_id)
+    run = queryset.order_by('-id').first()
+    return run.output_snapshot if run and isinstance(run.output_snapshot, dict) else {}
+
+
+def get_latest_pre_data_ticket_no(testcase: TestCase) -> str:
+    snapshot = _latest_pre_data_snapshot(testcase)
+    return str(snapshot.get('ticketNo') or '').strip()
+
+
+def get_latest_pre_data_ticket_id(testcase: TestCase) -> str:
+    snapshot = _latest_pre_data_snapshot(testcase)
+    for key in ('ticketId', 'work_order_id', 'processingTicketId'):
+        value = snapshot.get(key)
+        if value not in (None, ''):
+            return str(value).strip()
+    return ''
+
+
+def build_ticket_detail_case_hints(testcase: TestCase) -> str:
+    if not is_ticket_detail_boundary_case(testcase):
+        return ''
     return '\n'.join(
         [
+            '',
+            '【工单详情类用例 — 专用 helper】',
+            '- 每步只调用 `await helpers.runTicketDetailCaseStep(page, <步骤号>);`',
+            '- 该 helper 已包含：步骤3仅查询列表、步骤4点「处理」进详情、步骤5检查沟通区只读，并完成截图',
+            '- ticketNo 由造数注入环境变量 WHARTTEST_TICKET_NO，禁止手写或编造工单号',
+            '- 禁止在本用例中混用 fillFilterField + screenshotCaseStep 自行组合',
+            '- 禁止 getByText(\'沟通记录\') 单点 waitFor；步骤5 由 helper 断言只读空态',
+        ]
+    )
+
+
+def build_testcase_step_script_hints(testcase: TestCase) -> str:
+    """Generic execution hints. Do not hardcode a product or case script here."""
+    lines = [
             '',
             '【执行脚本指南 — 通用】',
             '- 步骤1若是登录：该步只调用 `await helpers.loginStep1(page);`；它已包含步骤1截图，禁止再调 screenshotCaseStep；账号取自用例前置条件，禁止改用其他账号',
@@ -395,13 +502,75 @@ def build_testcase_step_script_hints(testcase: TestCase) -> str:
             '- 「xx标签」指页面上的徽章文案（如高/中/低），不要只搜标签名字本身',
             '- 执行结果由系统自动保存；禁止调用 whart_tools 或其他工具更新用例执行结果',
             '- 禁止手写路径、禁止 upload_screenshot、禁止 Python 风格 goto/fill/click',
+    ]
+    lines.extend(build_ticket_detail_case_hints(testcase).splitlines())
+    lines.extend(build_overview_sla_detail_case_hints(testcase).splitlines())
+    return '\n'.join(lines)
+
+
+def build_overview_sla_detail_case_hints(testcase: TestCase) -> str:
+    if not is_overview_sla_detail_case(testcase):
+        return ''
+    return '\n'.join(
+        [
+            '',
+            '【工单总览-SLA进详情类用例 — 专用 helper】',
+            '- 每步只调用 `await helpers.runOverviewSlaDetailCaseStep(page, <步骤号>);`',
+            '- 步骤3会点击 SLA 预警明细第一行蓝色工单号并等待详情页加载',
+            '- 步骤4会校验详情页工单号与点击链接一致',
+            '- 禁止混用 runOverviewCaseStep / screenshotCaseStep 自行组合',
         ]
     )
 
 
+def build_overview_sla_detail_navigation_hint(testcase: TestCase) -> str:
+    if not is_overview_sla_detail_case(testcase):
+        return ''
+    step_count = testcase.steps.count()
+    lines = [
+        '',
+        '【固定 Playwright 脚本 — 禁止改写】',
+        '全程 session_id 不变；每步只执行下面一行 JavaScript：',
+    ]
+    for step in testcase.steps.order_by('step_number'):
+        lines.append(
+            f'- 步骤{step.step_number}: '
+            f'`await helpers.runOverviewSlaDetailCaseStep(page, {step.step_number});`'
+        )
+    lines.extend(
+        [
+            '- 禁止自行组合 getByText / screenshotCaseStep / runOverviewCaseStep',
+            f'- 本用例共 {step_count} 步，每步单独一次 execute_skill_script',
+        ]
+    )
+    return '\n'.join(lines)
+
+
 def build_testcase_navigation_hint(testcase: TestCase) -> str:
-    """Do not inject product-specific scripts into execution prompts."""
-    return ''
+    """Inject fixed playwright scripts for specialized case patterns."""
+    sla_hint = build_overview_sla_detail_navigation_hint(testcase)
+    if sla_hint:
+        return sla_hint
+    if not is_ticket_detail_boundary_case(testcase):
+        return ''
+    step_count = testcase.steps.count()
+    lines = [
+        '',
+        '【固定 Playwright 脚本 — 禁止改写】',
+        '全程 session_id 不变；每步只执行下面一行 JavaScript：',
+    ]
+    for step in testcase.steps.order_by('step_number'):
+        lines.append(
+            f'- 步骤{step.step_number}: `await helpers.runTicketDetailCaseStep(page, {step.step_number});`'
+        )
+    lines.extend(
+        [
+            '- 禁止自行组合 fillFilterField / clickRowAction / screenshotCaseStep',
+            '- 禁止 getByText(\'沟通记录\')；步骤5 由 helper 检查只读空态',
+            f'- 本用例共 {step_count} 步，每步单独一次 execute_skill_script',
+        ]
+    )
+    return '\n'.join(lines)
 
 
 def build_testcase_navigation_hint_by_id(testcase_id: int) -> str:

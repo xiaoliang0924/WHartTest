@@ -7,7 +7,7 @@
           allow-clear
           class="search-input"
           @search="onSearch"
-          :style="{ width: isSmallScreen ? '70px' : '130px' }"
+          :style="{ width: isSmallScreen ? '90px' : '170px' }"
           v-model="localSearchKeyword"
         />
         <a-select
@@ -335,7 +335,7 @@ const { isEnglish } = useAppI18n();
 const pageText = computed(() => (
   isEnglish.value
     ? {
-        searchPlaceholder: 'Search case name/precondition',
+        searchPlaceholder: 'Search name/ID/precondition',
         priorityShort: 'Priority',
         priorityFilter: 'Filter priority',
         reviewStatusFilter: 'Filter review status',
@@ -408,7 +408,7 @@ const pageText = computed(() => (
         runStopped: 'Stopped',
       }
     : {
-        searchPlaceholder: '搜索用例名称/前置条件',
+        searchPlaceholder: '搜索用例名称/ID/前置条件',
         priorityShort: '优先级',
         priorityFilter: '筛选优先级',
         reviewStatusFilter: '筛选审核状态',

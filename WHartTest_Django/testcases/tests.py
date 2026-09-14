@@ -8,6 +8,65 @@ from .models import TestCaseModule, TestCaseStep
 from projects.models import Project, ProjectMember
 
 
+class TestCaseSearchFilterTests(DjangoTestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_superuser(
+            username="search-filter-admin",
+            password="test-password",
+            email="search-filter-admin@example.com",
+        )
+        self.project = Project.objects.create(name="Search filter project", creator=self.user)
+        self.module = TestCaseModule.objects.create(
+            project=self.project,
+            name="Search module",
+            creator=self.user,
+        )
+        self.target_case = TestCaseModel.objects.create(
+            project=self.project,
+            module=self.module,
+            name="Normal transfer flow",
+            precondition="Signed in",
+            creator=self.user,
+        )
+        self.other_case = TestCaseModel.objects.create(
+            project=self.project,
+            module=self.module,
+            name="Other case",
+            precondition="Ready",
+            creator=self.user,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def _search(self, term):
+        return self.client.get(
+            f"/api/projects/{self.project.id}/testcases/",
+            {"search": term},
+        )
+
+    def test_search_by_numeric_id(self):
+        response = self._search(str(self.target_case.id))
+
+        self.assertEqual(response.status_code, 200)
+        ids = [item["id"] for item in response.data["results"]]
+        self.assertEqual(ids, [self.target_case.id])
+
+    def test_search_by_hash_prefixed_id(self):
+        response = self._search(f"#{self.target_case.id}")
+
+        self.assertEqual(response.status_code, 200)
+        ids = [item["id"] for item in response.data["results"]]
+        self.assertEqual(ids, [self.target_case.id])
+
+    def test_search_by_name_still_works(self):
+        response = self._search("transfer")
+
+        self.assertEqual(response.status_code, 200)
+        ids = [item["id"] for item in response.data["results"]]
+        self.assertIn(self.target_case.id, ids)
+        self.assertNotIn(self.other_case.id, ids)
+
+
 class TestCaseReviewStatusTests(SimpleTestCase):
     def test_pending_product_confirmation_is_a_valid_review_status(self):
         choices = dict(TestCaseModel.REVIEW_STATUS_CHOICES)

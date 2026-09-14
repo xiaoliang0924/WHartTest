@@ -92,3 +92,17 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
 7. **下拉筛选**：`selectFormDropdownOption(page, 字段标签, 选项)`。禁止 `getByText('某状态').click()`。
 8. **菜单页不要走错**：步骤写哪个菜单就进哪个页。优先用 `navigateByMenu(page, 菜单名)`；明确知道目标路由时才传唯一 URL 片段，禁止传 `/work-order` 这类父级公共前缀。
 """
+
+OVERVIEW_SLA_DETAIL_EXECUTION_HINT = """
+
+## 【工单总览-SLA进详情 — 强制专用 helper】
+
+当用例名称/步骤含「工单总览 + SLA预警 + 点击工单ID/进详情」时：
+
+1. **每一步只允许一行脚本**：`await helpers.runOverviewSlaDetailCaseStep(page, <步骤号>);`
+2. **禁止**手写 `.cl-table` / `.el-table` / `a.tl-link` / `getByText('基本信息')` 等定位去点 SLA 表或验详情。
+3. **禁止**使用 `runOverviewCaseStep`（那是 KPI/图表类总览用例，不含 SLA 点链进详情）。
+4. helper 会自动：滚到 SLA 预警明细 → 点第一行蓝色工单号 → 等详情页 → 校验工单号。
+5. 若 stdout 出现 `SLA预警明细表无数据行`，说明环境缺 SLA 预警数据，停止并如实报告，不要改 selector 重试。
+
+"""
