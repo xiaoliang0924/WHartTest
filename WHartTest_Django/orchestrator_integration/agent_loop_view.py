@@ -1120,6 +1120,20 @@ class AgentLoopStreamAPIView(View):
             tools.extend(builtin_tools)
             logger.info(f"AgentLoopStreamAPI: Added {len(builtin_tools)} builtin tools")
 
+            # 6.5 用例管理单条执行：未指定 prompt 时自动使用「测试用例执行」提示词
+            if test_case_id and not prompt_id:
+                from prompts.models import PromptType, UserPrompt
+
+                exec_prompt = await sync_to_async(UserPrompt.get_user_prompt_by_type)(
+                    request.user, PromptType.TEST_CASE_EXECUTION
+                )
+                if exec_prompt:
+                    prompt_id = exec_prompt.id
+                    logger.info(
+                        "AgentLoopStreamAPI: Auto-selected test_case_execution prompt %s",
+                        prompt_id,
+                    )
+
             # 7. 获取或创建 ChatSession（使用 get_or_create 避免竞态条件）
             prompt_obj = None
             if prompt_id:
@@ -1171,6 +1185,7 @@ class AgentLoopStreamAPIView(View):
                     {
                         "type": "pre_data_start",
                         "test_case_id": int(test_case_id),
+                        "session_id": session_id,
                     }
                 )
                 pre_data_result = await sync_to_async(run_testcase_pre_data_by_id)(

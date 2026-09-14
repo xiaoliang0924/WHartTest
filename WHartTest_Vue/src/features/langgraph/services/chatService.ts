@@ -451,6 +451,16 @@ export async function sendChatMessageStream(
   const authStore = useAuthStore();
   let token = authStore.getAccessToken;
   let streamSessionId: string | null = data.session_id || null;
+  let onStartInvoked = false;
+
+  const invokeOnStart = (sessionId: string) => {
+    if (onStartInvoked) {
+      return;
+    }
+    onStartInvoked = true;
+    markSessionRunning(sessionId);
+    onStart(sessionId);
+  };
 
   // 错误处理函数，用于更新全局状态
   const handleError = (error: any, sessionId: string | null) => {
@@ -620,6 +630,11 @@ export async function sendChatMessageStream(
             return;
           }
 
+          if (parsed.type === 'pre_data_start' && parsed.session_id) {
+            streamSessionId = parsed.session_id;
+            invokeOnStart(parsed.session_id);
+          }
+
           if (parsed.type === 'start' && parsed.session_id) {
             streamSessionId = parsed.session_id;
             if (streamSessionId) {
@@ -643,8 +658,7 @@ export async function sendChatMessageStream(
                   : data.message, // 优先使用后端规范化后的展示文本
                 userMessageTime: formatIsoTime(parsed.created_at) // 使用会话创建时间
               };
-              markSessionRunning(streamSessionId);
-              onStart(streamSessionId);
+              invokeOnStart(streamSessionId);
             }
           }
 

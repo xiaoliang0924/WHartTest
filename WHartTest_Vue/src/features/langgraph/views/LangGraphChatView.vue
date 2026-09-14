@@ -194,6 +194,10 @@ import {
   STREAM_COMPLETE_STORAGE_KEY,
 } from '@/features/langgraph/utils/runningSession';
 import {
+  clearExecCaseSessionContext,
+  getExecCaseSessionContext,
+} from '@/features/langgraph/utils/execCaseSessionBridge';
+import {
   extractFirstExecutionReport,
   isExecutionReportContent,
   parseExecutionReportStatus,
@@ -1383,6 +1387,34 @@ const handleStreamCompleteSignal = (chatSessionId?: string | null) => {
   void finalizeSessionDisplayAfterRunEnd(chatSessionId!);
 };
 
+const applyPendingExecCaseContext = (targetSessionId: string) => {
+  const pendingContext = getExecCaseSessionContext(targetSessionId);
+  if (!pendingContext) {
+    return;
+  }
+
+  const hasHumanMessage = messages.value.some((item) => item.isUser);
+  if (hasHumanMessage) {
+    clearExecCaseSessionContext(targetSessionId);
+    return;
+  }
+
+  messages.value = [
+    {
+      content: pendingContext.displayMessage || pendingContext.message,
+      isUser: true,
+      time: getCurrentTime(),
+      messageType: 'human',
+    },
+    ...messages.value,
+  ];
+
+  if (pendingContext.promptId) {
+    selectedPromptId.value = pendingContext.promptId;
+    localStorage.setItem(PROMPT_STORAGE_KEY, String(pendingContext.promptId));
+  }
+};
+
 // 加载聊天历史记录
 const applyChatHistoryResponse = (data: ChatHistoryResponseData) => {
   sessionId.value = data.session_id;
@@ -1400,6 +1432,13 @@ const applyChatHistoryResponse = (data: ChatHistoryResponseData) => {
 
   const tempMessages = enrichMessagesWithSeparators(data.history, formatHistoryTime);
   messages.value = mergeThinkingProcessMessages(promoteExecutionReportInMessages(tempMessages));
+
+  const hasHumanMessage = (data.history || []).some((item) => item.type === 'human');
+  if (hasHumanMessage) {
+    clearExecCaseSessionContext(data.session_id);
+  } else {
+    applyPendingExecCaseContext(data.session_id);
+  }
 
   syncRemoteGenerating();
   if (isRemoteGenerating.value) {
@@ -2092,6 +2131,13 @@ const switchSession = async (id: string) => {
       // 🎨 合并连续的思考过程消息，并补全执行报告卡片
       messages.value = mergeThinkingProcessMessages(promoteExecutionReportInMessages(tempMessages));
 
+      const hasHumanMessage = (response.data.history || []).some((item) => item.type === 'human');
+      if (hasHumanMessage) {
+        clearExecCaseSessionContext(id);
+      } else {
+        applyPendingExecCaseContext(id);
+      }
+
       // 更新会话信息（不更新时间，因为这是加载历史记录）
       updateSessionInList(id, undefined, false);
       startRemoteSessionPolling();
@@ -2498,6 +2544,19 @@ const displayedMessages = computed(() => {
           executionStatus: stream.executionReport.status,
         });
       }
+    }
+  }
+
+  // 跨标签页：原窗口执行中，本页无本地流时补展示用户执行提示词
+  if (!stream && combined.length === 0 && sessionId.value) {
+    const pendingContext = getExecCaseSessionContext(sessionId.value);
+    if (pendingContext?.message) {
+      combined.push({
+        content: pendingContext.displayMessage || pendingContext.message,
+        isUser: true,
+        time: getCurrentTime(),
+        messageType: 'human',
+      });
     }
   }
 

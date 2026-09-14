@@ -158,6 +158,8 @@ import {
   openLangGraphChatInCurrentPage,
   openLangGraphChatInNewWindow,
 } from '@/features/langgraph/utils/openLangGraphChat';
+import { storeExecCaseSessionContext } from '@/features/langgraph/utils/execCaseSessionBridge';
+import { getUserPrompts } from '@/features/prompts/services/promptService';
 import type { ChatRequest } from '@/features/langgraph/types/chat';
 import {
   updateTestCaseReviewStatus,
@@ -410,6 +412,76 @@ const notifyExecutionOutcome = async (caseId: number, sessionId: string) => {
 };
 
 const EXECUTION_PENDING_NOTIFICATION_ID = 'exec-case-pending';
+const EXEC_CASE_LINK_STYLE = 'color: rgb(var(--primary-6)); cursor: pointer; font-size: 13px;';
+
+const resolveExecCaseSessionId = (): string | null => {
+  const candidates = [
+    executionSessionId.value,
+    localStorage.getItem('langgraph_session_id'),
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return null;
+};
+
+const openExecCaseChatInCurrentPage = (close?: () => void) => {
+  const sessionId = resolveExecCaseSessionId();
+  if (!sessionId) {
+    Message.info(isEnglish.value ? 'Preparing execution, please wait...' : '正在准备前置数据，请稍候...');
+    return;
+  }
+  openLangGraphChatInCurrentPage(router, sessionId, currentProjectId.value);
+  close?.();
+};
+
+const openExecCaseChatInNewWindow = (close?: () => void) => {
+  const sessionId = resolveExecCaseSessionId();
+  if (!sessionId) {
+    Message.info(isEnglish.value ? 'Preparing execution, please wait...' : '正在准备前置数据，请稍候...');
+    return;
+  }
+  openLangGraphChatInNewWindow(router, sessionId, currentProjectId.value);
+  close?.();
+};
+
+const renderExecCaseNotificationFooter = (close?: () => void) => () => h(
+  'div',
+  { style: 'display:flex; justify-content:flex-end; gap:16px; margin-top:12px;' },
+  [
+    h(
+      'a',
+      {
+        href: 'javascript:;',
+        style: EXEC_CASE_LINK_STYLE,
+        onClick: () => openExecCaseChatInCurrentPage(close),
+      },
+      taskText.value.openChatCurrentPage,
+    ),
+    h(
+      'a',
+      {
+        href: 'javascript:;',
+        style: EXEC_CASE_LINK_STYLE,
+        onClick: () => openExecCaseChatInNewWindow(close),
+      },
+      taskText.value.openChatNewWindow,
+    ),
+  ],
+);
+
+const showExecCaseStartedNotification = (content: string) => {
+  let notificationReturn: { close?: () => void } | undefined;
+  notificationReturn = Notification.info({
+    id: EXECUTION_PENDING_NOTIFICATION_ID,
+    title: taskText.value.executionStarted,
+    content,
+    duration: 0,
+    footer: renderExecCaseNotificationFooter(() => notificationReturn?.close?.()),
+  });
+};
 
 const showExecutionProgressNotification = (
   sessionId: string,
@@ -421,66 +493,42 @@ const showExecutionProgressNotification = (
 ) => {
   Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
 
+  if (dualChatLinks) {
+    let notificationReturn: { close?: () => void } | undefined;
+    notificationReturn = Notification.info({
+      title: notificationTitle,
+      content: notificationContent,
+      duration: 0,
+      id: `${notificationIdPrefix}-${sessionId}`,
+      footer: renderExecCaseNotificationFooter(() => notificationReturn?.close?.()),
+    });
+    return;
+  }
+
   const notificationReturn = Notification.info({
     title: notificationTitle,
     content: notificationContent,
     footer: () => h(
       'div',
-      {
-        style: dualChatLinks
-          ? 'display:flex; justify-content:flex-end; gap:16px; margin-top:12px;'
-          : 'text-align: right; margin-top: 12px;',
-      },
-      dualChatLinks
-        ? [
-            h(
-              'a',
-              {
-                href: 'javascript:;',
-                onClick: () => {
-                  openLangGraphChatInCurrentPage(
-                    router,
-                    sessionId,
-                    currentProjectId.value,
-                  );
-                  notificationReturn?.close();
-                },
-              },
-              taskText.value.openChatCurrentPage,
-            ),
-            h(
-              'a',
-              {
-                href: 'javascript:;',
-                onClick: () => {
-                  openLangGraphChatInNewWindow(
-                    router,
-                    sessionId,
-                    currentProjectId.value,
-                  );
-                  notificationReturn?.close();
-                },
-              },
-              taskText.value.openChatNewWindow,
-            ),
-          ]
-        : [
-            h(
-              'a',
-              {
-                href: 'javascript:;',
-                onClick: () => {
-                  openLangGraphChatInNewWindow(
-                    router,
-                    sessionId,
-                    currentProjectId.value,
-                  );
-                  notificationReturn?.close();
-                },
-              },
-              footerLinkText,
-            ),
-          ],
+      { style: 'text-align: right; margin-top: 12px;' },
+      [
+        h(
+          'a',
+          {
+            href: 'javascript:;',
+            style: EXEC_CASE_LINK_STYLE,
+            onClick: () => {
+              openLangGraphChatInNewWindow(
+                router,
+                sessionId,
+                currentProjectId.value,
+              );
+              notificationReturn?.close();
+            },
+          },
+          footerLinkText,
+        ),
+      ],
     ),
     duration: 0,
     id: `${notificationIdPrefix}-${sessionId}`,
@@ -865,11 +913,32 @@ const handleExecuteTestCase = (testCase: TestCase) => {
   isExecuteModalVisible.value = true;
 };
 
-const handleExecuteConfirm = (options: { generatePlaywrightScript: boolean }) => {
+let cachedExecutionPromptId: number | null | undefined;
+
+const resolveTestCaseExecutionPromptId = async (): Promise<number | undefined> => {
+  if (cachedExecutionPromptId !== undefined) {
+    return cachedExecutionPromptId ?? undefined;
+  }
+  try {
+    const response = await getUserPrompts({
+      prompt_type: 'test_case_execution',
+      is_active: true,
+      page_size: 1,
+    });
+    cachedExecutionPromptId = response.data?.results?.[0]?.id ?? null;
+  } catch {
+    cachedExecutionPromptId = null;
+  }
+  return cachedExecutionPromptId ?? undefined;
+};
+
+const handleExecuteConfirm = async (options: { generatePlaywrightScript: boolean }) => {
   const testCase = pendingExecuteTestCase.value;
   if (!testCase || !currentProjectId.value) {
     return;
   }
+
+  const executionPromptId = await resolveTestCaseExecutionPromptId();
 
   const moduleInfo = testCase.module_detail
     ? testCase.module_detail
@@ -905,6 +974,7 @@ ${EXECUTION_STEP_DISCIPLINE}
     message,
     project_id: String(currentProjectId.value),
     use_knowledge_base: false,
+    prompt_id: executionPromptId,
     // Playwright 脚本生成参数
     generate_playwright_script: options.generatePlaywrightScript,
     test_case_id: testCase.id,  // 始终传递，用于截图目录隔离
@@ -918,12 +988,7 @@ ${EXECUTION_STEP_DISCIPLINE}
   executionSessionId.value = null;
   isExecutionResultDrawerVisible.value = true;
 
-  Notification.info({
-    id: EXECUTION_PENDING_NOTIFICATION_ID,
-    title: taskText.value.executionStarted,
-    content: notificationContent,
-    duration: 0,
-  });
+  showExecCaseStartedNotification(notificationContent);
 
   startAutomationTask(
     requestData,
@@ -934,6 +999,13 @@ ${EXECUTION_STEP_DISCIPLINE}
     {
       onStarted: (sessionId) => {
         executionSessionId.value = sessionId;
+        storeExecCaseSessionContext(sessionId, {
+          message,
+          displayMessage: message,
+          promptId: executionPromptId ?? null,
+          testCaseId: testCase.id,
+          projectId: currentProjectId.value,
+        });
       },
       onComplete: async (sessionId) => {
         executionSessionId.value = sessionId;
