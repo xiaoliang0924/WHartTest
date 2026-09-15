@@ -439,6 +439,17 @@ def is_ticket_detail_boundary_case(testcase: TestCase) -> bool:
     )
 
 
+def is_claimable_ticket_detail_case(testcase: TestCase) -> bool:
+    """Cases that must open an unassigned pending ticket and expose claim."""
+    blob = collect_testcase_text(testcase)
+    return (
+        '待处理' in blob
+        and '未分配' in blob
+        and '处理' in blob
+        and '领取工单' in blob
+    )
+
+
 def _latest_pre_data_snapshot(testcase: TestCase) -> dict:
     plan_id = getattr(testcase, 'pre_data_plan_id', None)
     queryset = DataGenerationRun.objects.filter(
@@ -578,6 +589,21 @@ def build_testcase_navigation_hint(testcase: TestCase) -> str:
     sla_hint = build_overview_sla_detail_navigation_hint(testcase)
     if sla_hint:
         return sla_hint
+    if is_claimable_ticket_detail_case(testcase):
+        lines = [
+            '',
+            '【待处理未分配工单 — 固定 Playwright 脚本，禁止改写】',
+            '全程 session_id 不变；每步只执行下面一行 JavaScript：',
+        ]
+        for step in testcase.steps.order_by('step_number'):
+            lines.append(
+                f'- 步骤{step.step_number}: `await helpers.runClaimableTicketCaseStep(page, {step.step_number});`'
+            )
+        lines.extend([
+            '- 步骤4只有点击“未分配”行的“处理”并确认详情页“领取工单”按钮后才会截图。',
+            '- helper 返回 null 或输出 RESULT=FAIL 时立即判不通过，禁止自行补截图或改报通过。',
+        ])
+        return '\n'.join(lines)
     if not is_ticket_detail_boundary_case(testcase):
         return ''
     step_count = testcase.steps.count()

@@ -186,17 +186,21 @@ def build_input_params(description: str, llm_payload: Dict[str, Any]) -> Dict[st
     params = dict(llm_payload.get('input_params') or {})
     params.update(_collect_step_params(llm_payload.get('steps') or []))
 
-    ticket_type = infer_ticket_type(description)
+    claimable_pending = _needs_unassigned_pending_ticket(description or '')
+    ticket_type = 'TYPE_A' if claimable_pending else infer_ticket_type(description)
     if _TICKET_TYPE_PATTERN.search(description or ''):
         params['ticketType'] = ticket_type
     else:
         params.setdefault('ticketType', ticket_type)
 
     assignee_name = extract_assignee_name(description)
-    if assignee_name:
+    if assignee_name and not claimable_pending:
         params.setdefault('assigneeName', assignee_name)
 
-    if '待处理' in description and 'summary' not in params:
+    if claimable_pending:
+        params['ticketType'] = 'TYPE_A'
+        params['summary'] = 'TYPE_A待处理未分配测试工单'
+    elif '待处理' in description and 'summary' not in params:
         params.setdefault('summary', f'{ticket_type}待处理测试工单')
 
     return _apply_param_aliases(params)

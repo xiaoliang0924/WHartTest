@@ -3101,6 +3101,86 @@ async function runTicketDetailCaseStep(page, stepNumber, caseId) {
 }
 
 /**
+ * 待处理、未分配工单的固定流程：筛选 -> 点处理 -> 验证领取工单。
+ * 步骤4失败时故意不保存截图，避免把列表页误作详情页证据。
+ */
+async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
+  const step = Number(stepNumber);
+  const cid = caseId || process.env.WHARTTEST_CASE_ID || 'unknown';
+  const pathMod = require('path');
+  const dir = process.env.SCREENSHOT_DIR || '.';
+  const target = pathMod.join(dir, `case_${cid}_step${step}.png`);
+
+  const claimableRow = async () => {
+    const row = page.locator('.el-table__body tr').filter({ hasText: '未分配' }).first();
+    try {
+      await row.waitFor({ state: 'visible', timeout: 12000 });
+      return row;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  if (step === 1) return loginStep1(page, cid);
+
+  if (step === 2) {
+    await navigateToMyTicketsPage(page);
+    await waitForPageBodyText(page, 80, 10000);
+    await screenshotCaseStep(page, step, cid);
+    console.log(`RESULT=PASS: 步骤2已进入我的工单列表 URL=${page.url()}`);
+    return target;
+  }
+
+  if (step === 3) {
+    await selectFormDropdownOption(page, '工单状态', '待处理');
+    await clickPageButton(page, '查询');
+    await page.waitForLoadState('networkidle').catch(() => {});
+    const row = await claimableRow();
+    await screenshotCaseStep(page, step, cid);
+    if (!row) {
+      console.log('RESULT=FAIL: 待处理筛选结果中没有处理人为“未分配”的工单');
+      return null;
+    }
+    console.log('RESULT=PASS: 步骤3筛选后存在待处理且未分配的工单');
+    return target;
+  }
+
+  if (step === 4) {
+    const row = await claimableRow();
+    if (!row) {
+      console.log('RESULT=FAIL: 步骤4未找到处理人为“未分配”的工单，未保存截图');
+      return null;
+    }
+    const button = row.getByRole('button', { name: '处理' }).first();
+    try {
+      await button.click({ timeout: 10000 });
+    } catch (error) {
+      console.log(`RESULT=FAIL: 点击“处理”失败，未保存截图: ${error?.message || error}`);
+      return null;
+    }
+    if (!(await waitForTicketDetailNavigation(page, 18000))) {
+      console.log(`RESULT=FAIL: 点击“处理”后未进入详情页，未保存截图 URL=${page.url()}`);
+      return null;
+    }
+    try {
+      await page.getByRole('button', { name: '领取工单' }).waitFor({ state: 'visible', timeout: 10000 });
+    } catch (_) {
+      console.log('RESULT=FAIL: 详情页未出现“领取工单”按钮，未保存截图');
+      return null;
+    }
+    if (!(await captureTicketDetailView(page, target, step))) {
+      console.log('RESULT=FAIL: 详情页截图保存失败');
+      return null;
+    }
+    console.log('[CASE_SCREENSHOT]', target);
+    console.log(`RESULT=PASS: 步骤4已进入详情页且确认“领取工单”按钮 URL=${page.url()}`);
+    return target;
+  }
+
+  return screenshotCaseStep(page, step, cid);
+}
+
+/**
  * 按字段筛选并点查询。字段标签由调用方传入。
  */
 async function filterByFields(page, filters = {}) {
@@ -3685,6 +3765,7 @@ module.exports = {
   assertCommunicationReadOnly,
   captureTicketDetailView,
   runTicketDetailCaseStep,
+  runClaimableTicketCaseStep,
   filterTicketList,
   handleCookieBanner,
   retryWithBackoff,

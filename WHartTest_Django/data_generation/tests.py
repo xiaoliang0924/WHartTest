@@ -398,7 +398,7 @@ class IntentRouterStateTests(DjangoTestCase):
         self.assertTrue(all(step['variables']['ticketType'] == 'TYPE_A' for step in created))
 
     def test_unassigned_pending_case_does_not_route_to_assignment_or_resolve(self):
-        from data_generation.intent_router import infer_business_template_key
+        from data_generation.intent_router import build_input_params, infer_business_template_key
 
         case_text = (
             '待处理工单-列表点击处理进入详情页-正常流程\n'
@@ -410,6 +410,9 @@ class IntentRouterStateTests(DjangoTestCase):
             infer_business_template_key(case_text),
             'biz_create_type_a',
         )
+        params = build_input_params(case_text, {'input_params': {}, 'steps': []})
+        self.assertEqual(params['ticketType'], 'TYPE_A')
+        self.assertEqual(params['summary'], 'TYPE_A待处理未分配测试工单')
 
     def test_approval_ticket_uses_approval_processing_template(self):
         from data_generation.intent_router import (
