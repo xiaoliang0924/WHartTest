@@ -947,35 +947,9 @@ const handleExecuteConfirm = async (options: { generatePlaywrightScript: boolean
 
   const executionPromptId = await resolveTestCaseExecutionPromptId();
 
-  const moduleInfo = testCase.module_detail
-    ? testCase.module_detail
-    : `ID: ${testCase.module_id ?? '未分配'}`;
-
-  const message = `
-执行ID为 ${testCase.id} 的测试用例（用例管理/功能测试用例，project_id=${currentProjectId.value}）。
-你是一名测试执行人员，需要按用例步骤在浏览器中执行并验证。
-
-${EXECUTION_STEP_DISCIPLINE}
-
-【重要】此 ID 属于「用例管理」模块，不是 UI 自动化模块的用例 ID。
-- 禁止在 ui-automation-skill 中用 get_testcase / get_testcase_execute_data / execute_testcase 查询或执行该 ID（会误报不存在）。
-- 后端已注入完整步骤，**禁止**再调用 get_testcase_detail。
-- 浏览器**只能**用 playwright-skill，全程 session_id="case_${testCase.id}"；**禁止** playwright-cli / browser-use（会 Element not found）。
-- 步骤1若是登录：该步只调用 await helpers.loginStep1(page);（已含步骤1截图，禁止重复截图；只有 RESULT=PASS 才能继续）
-- 每步截图：await helpers.screenshotCaseStep(page, <步骤号>); 系统自动上传，**禁止** upload_screenshot。
-
-请调用工具完成以下任务：
-1. 按已注入的步骤编号顺序在浏览器中逐步执行，每一步都验证预期结果后再进入下一步。
-2. 每一步执行完成后调用 screenshotCaseStep，截图必须对应当前步骤编号。
-3. 执行结束后必须输出完整「测试执行结果」报告；未执行步骤标「未执行」。
-4. 若失败或中途无法继续：立刻输出完整「不通过」报告，不要等用户追问。
-
-附加信息：
-- 测试用例名称：${testCase.name}
-- 测试用例等级：${testCase.level}
-- 前置条件：${testCase.precondition || '无'}
-- 测试用例模块信息：${moduleInfo}
-  `.trim();
+  // 执行上下文由后端按最新数据库记录统一生成。前端不能再拼接用例
+  // 内容，否则列表缓存中的旧前置条件会与后端最新步骤发生冲突。
+  const message = `执行用例管理测试用例 ID=${testCase.id}。请使用后端注入的最新用例步骤和执行规则。`;
 
   const requestData: ChatRequest = {
     message,

@@ -521,6 +521,16 @@ def build_row_action_evidence_hints(steps) -> str:
 
 def build_testcase_step_script_hints(testcase: TestCase) -> str:
     """Generic execution hints. Do not hardcode a product or case script here."""
+    if (
+        is_claimable_ticket_detail_case(testcase)
+        or is_ticket_detail_boundary_case(testcase)
+        or is_overview_sla_detail_case(testcase)
+    ):
+        return '\n'.join([
+            '',
+            '【执行方式】本用例已匹配专用 helper；仅执行后续“固定 Playwright 脚本”中的单行调用。',
+            '不要自行组合筛选、按编号查询、行操作或截图脚本。',
+        ])
     lines = [
             '',
             '【执行脚本指南 — 通用】',
@@ -700,7 +710,16 @@ def _build_message_suffix(
         lines.append('- 数据快照:')
         lines.append(json.dumps(snapshot, ensure_ascii=False, indent=2))
     ticket_no = snapshot.get('ticketNo')
+    fixed_claimable_flow = (
+        '待处理' in case_text and '未分配' in case_text and '领取工单' in case_text
+    )
     if ticket_no and needs_ticket_row_action(case_text):
+        if fixed_claimable_flow:
+            lines.append(
+                f'- 本次造数工单号: {ticket_no}。该用例使用专用 helper 验证待处理、未分配工单；'
+                '不要手工按工单号筛选或自行拼接行操作。'
+            )
+            return '\n'.join(lines)
         lines.append(
             f'- 可用数据标识: {ticket_no}。'
             f'若步骤需要按编号定位列表行，用 `await helpers.fillFilterField(page, \'步骤里的筛选字段名\', \'{ticket_no}\');` 、'

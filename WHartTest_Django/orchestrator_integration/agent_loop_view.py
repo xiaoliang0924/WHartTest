@@ -1217,8 +1217,14 @@ class AgentLoopStreamAPIView(View):
                         }
                     )
 
+                # 单条用例执行只接受数据库中的最新用例详情。前端消息可能来自
+                # 列表缓存，若再次携带前置条件或步骤会与最新记录冲突。
+                effective_user_message = (
+                    f'执行用例管理功能测试用例 ID={int(test_case_id)}。'
+                    '以下注入内容是唯一有效的执行上下文。'
+                )
                 if pre_data_result.message_suffix:
-                    effective_user_message = user_message + pre_data_result.message_suffix
+                    effective_user_message += pre_data_result.message_suffix
 
                 from data_generation.testcase_pre_data import (
                     build_testcase_navigation_hint_by_id,
