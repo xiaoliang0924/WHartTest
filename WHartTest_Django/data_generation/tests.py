@@ -348,6 +348,20 @@ class BindSuitePreDataPlanTests(DjangoTestCase):
 
 
 class IntentRouterStateTests(DjangoTestCase):
+    def test_claim_button_expectation_requires_detail_page_evidence(self):
+        from types import SimpleNamespace
+        from data_generation.testcase_pre_data import build_row_action_evidence_hints
+
+        hint = build_row_action_evidence_hints([
+            SimpleNamespace(
+                step_number=4,
+                expected_result='成功进入该工单的处理详情页，右上角可见蓝色“领取工单”按钮',
+            ),
+        ])
+        self.assertIn("assertPageShows(page, ['领取工单'])", hint)
+        self.assertIn('screenshotCaseStep(page, 4)', hint)
+        self.assertIn('列表页截图不能作为该步骤证据', hint)
+
     def test_processing_status_uses_claim_template(self):
         from data_generation.intent_router import infer_business_template_key
 

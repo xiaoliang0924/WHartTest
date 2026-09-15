@@ -482,6 +482,32 @@ def build_ticket_detail_case_hints(testcase: TestCase) -> str:
     )
 
 
+def build_row_action_evidence_hints(steps) -> str:
+    """Require a detail-page assertion before screenshotting a row-action step.
+
+    A list screenshot after clicking an action is not evidence that the detail
+    page loaded.  This stays data-driven so every case expecting the same
+    action receives the same evidence rule.
+    """
+    claim_steps = [
+        step for step in steps
+        if '领取工单' in (getattr(step, 'expected_result', '') or '')
+    ]
+    if not claim_steps:
+        return ''
+    lines = ['', '【列表进入详情取证 — 必须执行】']
+    for step in claim_steps:
+        step_number = getattr(step, 'step_number', '?')
+        lines.extend([
+            f'- 步骤{step_number}：列表行操作成功后，先执行 '
+            "`await helpers.assertPageShows(page, ['领取工单']);`，确认已进入详情页且按钮可见。",
+            f'- 仅确认成功后，执行 `await helpers.screenshotCaseStep(page, {step_number});`。'
+            '截图必须包含详情页和“领取工单”按钮；列表页截图不能作为该步骤证据。',
+            '- 找不到该按钮时输出 RESULT=FAIL 并停止，禁止截列表页后报通过。',
+        ])
+    return '\n'.join(lines)
+
+
 def build_testcase_step_script_hints(testcase: TestCase) -> str:
     """Generic execution hints. Do not hardcode a product or case script here."""
     lines = [
@@ -503,6 +529,7 @@ def build_testcase_step_script_hints(testcase: TestCase) -> str:
             '- 执行结果由系统自动保存；禁止调用 whart_tools 或其他工具更新用例执行结果',
             '- 禁止手写路径、禁止 upload_screenshot、禁止 Python 风格 goto/fill/click',
     ]
+    lines.extend(build_row_action_evidence_hints(testcase.steps.order_by('step_number')).splitlines())
     lines.extend(build_ticket_detail_case_hints(testcase).splitlines())
     lines.extend(build_overview_sla_detail_case_hints(testcase).splitlines())
     return '\n'.join(lines)
