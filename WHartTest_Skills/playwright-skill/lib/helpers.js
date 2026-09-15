@@ -3124,10 +3124,12 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
   if (step === 1) return loginStep1(page, cid);
 
   if (step === 2) {
-    await navigateToMyTicketsPage(page);
+    // “未分配”属于全量工单列表的处理人字段；“我的工单”只展示当前用户范围，
+    // 无法稳定验证未分配条件。
+    await navigateToTicketListPage(page);
     await waitForPageBodyText(page, 80, 10000);
     await screenshotCaseStep(page, step, cid);
-    console.log(`RESULT=PASS: 步骤2已进入我的工单列表 URL=${page.url()}`);
+    console.log(`RESULT=PASS: 步骤2已进入工单列表 URL=${page.url()}`);
     return target;
   }
 
