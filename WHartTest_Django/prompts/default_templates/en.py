@@ -596,7 +596,7 @@ Start executing now.''',
 
       **Login step rules (MUST follow)**:
       - For features that require login: write the account in preconditions, then write login again as step 1
-      - Login is 1 step only, e.g. "Log in with 17670400361/000000 at http://test.bot.by56.com/work-order/login"
+      - Login is 1 step only, e.g. "Log in with 802714/000000 at https://test.bot.by56.com/work-order/login"
       - Forbidden: open login URL, enter username, enter password, click Login as four steps
 
       Minimum business-step split after login (normally >= 3):

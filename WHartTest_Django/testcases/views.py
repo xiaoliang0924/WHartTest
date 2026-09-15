@@ -977,7 +977,10 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     @action(
         detail=True,
         methods=["get"],
-        url_path=r"run-records/(?P<record_id>[^/.]+)",
+        # 仅匹配数字 id：否则 "run-records/latest" 会被本路由先吃掉
+        # （DRF 的 extra action 按字母序注册，get_run_record 先于 latest_run_record），
+        # 导致 record_id='latest' 传入 filter(id=...) 抛 ValueError。
+        url_path=r"run-records/(?P<record_id>\d+)",
     )
     def get_run_record(self, request, project_pk=None, pk=None, record_id=None):
         testcase = self.get_object()

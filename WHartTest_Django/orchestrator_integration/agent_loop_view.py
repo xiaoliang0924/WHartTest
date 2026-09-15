@@ -1243,7 +1243,13 @@ class AgentLoopStreamAPIView(View):
                 sla_case = await sync_to_async(
                     ManualTestCaseModel.objects.filter(id=int(test_case_id)).first
                 )()
-                if sla_case and is_overview_sla_detail_case(sla_case):
+                # 注意：is_overview_sla_detail_case 内部会惰性查询 testcase.steps，
+                # 必须在 sync_to_async 线程中执行，否则抛 SynchronousOnlyOperation。
+                is_sla_detail = bool(
+                    sla_case
+                    and await sync_to_async(is_overview_sla_detail_case)(sla_case)
+                )
+                if is_sla_detail:
                     effective_prompt = (effective_prompt or "") + OVERVIEW_SLA_DETAIL_EXECUTION_HINT
                     if nav_hint:
                         effective_prompt = effective_prompt + nav_hint

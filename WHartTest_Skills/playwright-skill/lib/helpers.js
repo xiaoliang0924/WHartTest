@@ -510,6 +510,32 @@ function isDashboardUrl(url) {
 }
 
 /**
+ * 截取「左侧导航栏 + 主内容区」的整页视口。
+ *
+ * 两个场景都用它，否则侧栏被裁掉、截图证明不了任何东西：
+ * 1) 验收点在左侧导航栏的步骤（菜单展开 / 菜单高亮 / 子菜单出现）；
+ * 2) 普通用例「路过」数据总览时的兜底（例如点了「工单中心」父菜单，系统跳到默认页
+ *    /work-order/dashboard）——此时裁 .dashboard-content 会得到几千像素高的长条。
+ */
+async function captureViewportWithSidebar(page, targetPath) {
+  const fs = require('fs');
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+    return false;
+  }
+
+  await dismissBlockingDialogs(page);
+  await scrollMainContentToTop(page);
+  await page.waitForTimeout(300);
+
+  await page.screenshot({
+    path: targetPath,
+    fullPage: false,
+    timeout: 8000,
+  });
+  return fs.existsSync(targetPath);
+}
+
+/**
  * 数据总览页截图：优先整页 dashboard-content（含 KPI / 图表头部）。
  */
 async function captureDashboardView(page, targetPath, options = {}) {
@@ -1196,9 +1222,15 @@ async function waitForPageBodyText(page, minLength = 80, timeoutMs = 15000) {
 /**
  * 按用例步骤号截图，自动使用 WHARTTEST_CASE_ID / SCREENSHOT_DIR，避免脚本里写引号路径。
  */
-async function screenshotCaseStep(page, stepNumber, caseId) {
+async function screenshotCaseStep(page, stepNumber, caseId, options) {
   const pathMod = require('path');
   const fs = require('fs');
+  // 兼容 screenshotCaseStep(page, N, { includeSidebar: true })：第 3 参传对象即视为选项
+  if (caseId && typeof caseId === 'object') {
+    options = caseId;
+    caseId = undefined;
+  }
+  const includeSidebar = !!(options && options.includeSidebar);
   const dir = process.env.SCREENSHOT_DIR || '.';
   const cid = caseId || process.env.WHARTTEST_CASE_ID || 'unknown';
   const step = Number(stepNumber);
@@ -1235,6 +1267,17 @@ async function screenshotCaseStep(page, stepNumber, caseId) {
       plain: true,
     });
     console.log('[CASE_SCREENSHOT]', target);
+    return target;
+  }
+
+  // 验收点在左侧导航栏的步骤（如「点击【工单中心】，菜单展开」）必须带上侧栏：
+  // 常规路径只截主内容面板（.layout-content / .el-main / .dashboard-content），
+  // 左侧导航会被裁掉（视口 1280 → 截图 1080），截图里根本看不到菜单状态，
+  // 看起来就像「截错了页面」。显式声明 includeSidebar 时改用整页视口截图。
+  if (includeSidebar) {
+    await captureViewportWithSidebar(page, target);
+    console.log('[CASE_SCREENSHOT]', target);
+    console.log(`RESULT=PASS: 步骤${step}已截取含左侧导航栏的整页 URL=${page.url()}`);
     return target;
   }
 
@@ -1306,7 +1349,11 @@ async function screenshotCaseStep(page, stepNumber, caseId) {
   if (useMainContentCapture) {
     await waitForPageBodyText(page, 80, 4000);
     if (onDashboard) {
-      await captureDashboardView(page, target);
+      // 「数据总览」专用用例由上面的 overviewCase / overviewSlaDetailCase 分支处理。
+      // 走到这里说明只是「路过」数据总览（典型场景：点了「工单中心」父菜单，系统跳到默认页
+      // /work-order/dashboard）。此时 captureDashboardView 只截 .dashboard-content 元素，
+      // 既不含左侧导航、又会截出几千像素高的长条，对验收毫无帮助 —— 改截整页视口。
+      await captureViewportWithSidebar(page, target);
     } else {
       const captured = await captureMainContentView(page, target);
       if (!captured) {
@@ -1328,6 +1375,214 @@ async function screenshotCaseStep(page, stepNumber, caseId) {
     });
   }
   console.log('[CASE_SCREENSHOT]', target);
+  return target;
+}
+
+/**
+ * 带左侧导航栏的步骤截图（screenshotCaseStep 的语义化封装）。
+ *
+ * 当步骤的预期结果落在左侧导航栏时用它 —— 例如「点击【工单中心】，菜单展开」「菜单高亮」。
+ * 普通 screenshotCaseStep 只截主内容区，侧栏会被裁掉，这类预期结果在截图里完全看不到。
+ */
+async function screenshotNavStep(page, stepNumber, caseId) {
+  return screenshotCaseStep(page, stepNumber, caseId, { includeSidebar: true });
+}
+
+// ===== 登录相关常量与新版统一身份认证（SSO）适配 =====
+
+// 工单系统测试环境账号（认证中心「权限中心」账号）
+// 2026-09 由 17670400361/000000 更换为 802714；802714 的密码仍是 000000
+const DEFAULT_LOGIN_USERNAME = '802714';
+const DEFAULT_LOGIN_PASSWORD = '000000';
+const DEFAULT_LOGIN_URL = 'https://test.bot.by56.com/work-order/login';
+
+// 认证中心 iframe（bot.by56.com/auth-admin/login?transaction_id=...）
+const AUTH_CENTER_FRAME_HINT = 'auth-admin';
+const AUTH_ACCOUNT_PLACEHOLDERS = ['请输入账号', '请输入用户名', '账号'];
+const AUTH_PASSWORD_PLACEHOLDERS = ['请输入密码', '密码'];
+
+/**
+ * 归一化登录地址。
+ * 认证中心会校验 Origin：用 http:// 访问会返回 400 {"code":100001,"message":"Frontend Origin is not allowed"}，
+ * 所以这里统一把 http 升级为 https，避免用例里写 http 时静默失败。
+ */
+function resolveLoginUrl(raw) {
+  let url = String(raw || '').trim();
+  if (!/^https?:\/\//i.test(url)) {
+    return DEFAULT_LOGIN_URL;
+  }
+  return url.replace(/^http:\/\//i, 'https://');
+}
+
+/** 是否为新版统一身份认证网关页（卡片式「自动登录 / 手动登录」） */
+async function isSsoGatewayPage(page) {
+  try {
+    const btn = page.getByRole('button', { name: '手动登录' });
+    if ((await btn.count()) === 0) return false;
+    return await btn.first().isVisible();
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * 在给定作用域内按多个候选 placeholder 找第一个存在的输入框。
+ * timeoutMs > 0 时轮询等待——认证中心是 SPA，输入框要等 JS 挂载后才出现。
+ */
+async function firstLocatorByPlaceholder(scope, placeholders, timeoutMs = 0) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    for (const ph of placeholders) {
+      try {
+        const loc = scope.getByPlaceholder(ph).first();
+        if ((await loc.count()) > 0) return loc;
+      } catch (_) {
+        // 继续尝试下一个
+      }
+    }
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+}
+
+/**
+ * 等待认证中心 iframe 内的账号密码表单「渲染完成」，返回 { frame, userBox, passBox }。
+ * 只等 frame 出现是不够的：百运权限中心是 Vue SPA，frame 的 HTML 一到 frame 就存在了，
+ * 但输入框要等 JS 挂载 + 接口返回才出现，只按 frame 判断会在 1s 内误判为「找不到输入框」。
+ */
+async function waitForAuthCenterForm(page, timeoutMs = 25000) {
+  const deadline = Date.now() + timeoutMs;
+  let frame = null;
+  let switchedTab = false;
+  while (Date.now() < deadline) {
+    if (!frame) {
+      frame = page.frames().find((f) => String(f.url()).includes(AUTH_CENTER_FRAME_HINT));
+    }
+    if (frame) {
+      const userBox = await firstLocatorByPlaceholder(frame, AUTH_ACCOUNT_PLACEHOLDERS);
+      const passBox = await firstLocatorByPlaceholder(frame, AUTH_PASSWORD_PLACEHOLDERS);
+      if (userBox && passBox) return { frame, userBox, passBox };
+      if (!switchedTab) {
+        switchedTab = true;
+        await switchAuthCenterToPasswordTab(frame);
+      }
+    }
+    await page.waitForTimeout(400);
+  }
+  return { frame, userBox: null, passBox: null };
+}
+
+/** 认证中心若是 tab 形式，切到「账号密码」面板（点不到不致命，返回是否点击成功） */
+async function switchAuthCenterToPasswordTab(frame) {
+  for (const name of ['账号密码', '账号登录']) {
+    try {
+      const tab = frame.getByRole('button', { name });
+      if ((await tab.count()) > 0 && (await tab.first().isVisible())) {
+        await tab.first().click({ timeout: 3000 });
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        return true;
+      }
+    } catch (_) {
+      // 已经是账号密码面板，忽略
+    }
+  }
+  return false;
+}
+
+/** 读取 iframe 正文（跨域 iframe 已由 Playwright 接管，失败时返回空串） */
+async function readFrameText(frame) {
+  try {
+    return await frame.innerText('body', { timeout: 1500 });
+  } catch (_) {
+    return '';
+  }
+}
+
+/**
+ * 新版登录：网关卡片页 →「手动登录」→ 认证中心 iframe 账号密码 →「登录并继续」。
+ * 返回 'success' | 'rate_limited' | 'failed' | null（null 表示当前不是新版页面，调用方应走旧版逻辑）。
+ */
+async function loginViaSsoGateway(page, { username, password, screenshotPath } = {}) {
+  if (!(await isSsoGatewayPage(page))) return null;
+
+  // 保证无论成功失败，步骤1图只截一次（避免同一路径被截两次）
+  let shot = false;
+  const capture = async () => {
+    if (!screenshotPath || shot) return;
+    shot = true;
+    await page
+      .screenshot({ path: screenshotPath, fullPage: false, timeout: 8000, plain: true })
+      .catch(() => {});
+    console.log('[CASE_SCREENSHOT]', screenshotPath);
+  };
+
+  await page.getByRole('button', { name: '手动登录' }).first().click({ timeout: 8000 });
+
+  // 等 frame 出现 + 等表单渲染完（SPA 挂载需要时间，只等 frame 会误判）
+  const form = await waitForAuthCenterForm(page, 25000);
+  if (!form.frame) {
+    await capture();
+    return { status: 'failed', reason: '点击「手动登录」后未加载认证中心登录框', shot };
+  }
+  if (!form.userBox || !form.passBox) {
+    await capture();
+    return { status: 'failed', reason: '认证中心登录框已打开，但 25s 内未出现账号/密码输入框', shot };
+  }
+  const { frame, userBox, passBox } = form;
+
+  await userBox.fill(username, { timeout: 8000 });
+  await passBox.fill(password, { timeout: 8000 });
+
+  // 步骤1图：已填账号的登录页（认证中心弹窗）
+  await capture();
+
+  try {
+    await frame
+      .getByRole('button', { name: '登录并继续' })
+      .first()
+      .click({ timeout: 8000, noWaitAfter: true });
+  } catch (_) {
+    return { status: 'failed', reason: '未找到或无法点击「登录并继续」按钮', shot };
+  }
+
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    if (!isLoginPageUrl(page.url())) return { status: 'success', shot };
+    const text = await readFrameText(frame);
+    if (/过于频繁|稍后再试|rate ?limit/i.test(text)) {
+      return { status: 'rate_limited', reason: '提示「登录尝试过于频繁」', shot };
+    }
+    // 只取错误提示附近的片段，不要把整个 iframe 正文塞进 RESULT 行
+    const errMatch = text.match(
+      /.{0,20}(?:用户名或密码错误|账号或密码错误|密码错误|账号不存在|账号已被?锁定).{0,20}/,
+    );
+    if (errMatch) {
+      return { status: 'failed', reason: errMatch[0].replace(/\s+/g, ' ').trim(), shot };
+    }
+    await page.waitForTimeout(300);
+  }
+  return { status: 'failed', reason: '提交后 20s 内未跳出登录页', shot };
+}
+
+/** 登录成功后的收尾：关遮挡弹窗、确认已离开登录页 */
+async function finishLoginStep1(page, target) {
+  for (let i = 0; i < 3; i += 1) {
+    const dismissed = await dismissBlockingDialogs(page);
+    if (!dismissed) break;
+    await page.waitForTimeout(200);
+  }
+  try {
+    await page.getByRole('menuitem').first().waitFor({ state: 'visible', timeout: 4000 });
+  } catch (_) {
+    // 部分产品侧栏不是 menuitem，忽略
+  }
+
+  if (!await waitForStableNonLoginPage(page, 800, 3000)) {
+    console.log(`RESULT=FAIL: 登录后又返回登录页，URL=${page.url()}`);
+    return target;
+  }
+
+  console.log(`RESULT=PASS: 步骤1登录成功 URL=${page.url()}`);
   return target;
 }
 
@@ -1363,15 +1618,12 @@ async function loginStep1(page, caseIdOrUsername, optionsOrPassword = {}, maybeU
   const dir = process.env.SCREENSHOT_DIR || '.';
   const cid = caseId || process.env.WHARTTEST_CASE_ID || 'unknown';
   const target = pathMod.join(dir, `case_${cid}_step1.png`);
-  const username = options.username || process.env.WHARTTEST_USERNAME || '17670400361';
-  const password = options.password || process.env.WHARTTEST_PASSWORD || '000000';
+  const username = options.username || process.env.WHARTTEST_USERNAME || DEFAULT_LOGIN_USERNAME;
+  const password = options.password || process.env.WHARTTEST_PASSWORD || DEFAULT_LOGIN_PASSWORD;
   const userPlaceholder = options.userPlaceholder || '请输入用户名';
   const passPlaceholder = options.passPlaceholder || '请输入密码';
   const submitName = options.submitName || '登 录';
-  const rawLoginUrl = options.loginUrl || process.env.WHARTTEST_LOGIN_URL || '';
-  const loginUrl = /^https?:\/\//i.test(String(rawLoginUrl))
-    ? String(rawLoginUrl)
-    : 'http://test.bot.by56.com/work-order/login';
+  const loginUrl = resolveLoginUrl(options.loginUrl || process.env.WHARTTEST_LOGIN_URL || '');
 
   page.setDefaultTimeout(15000);
   page.setDefaultNavigationTimeout(20000);
@@ -1382,6 +1634,37 @@ async function loginStep1(page, caseIdOrUsername, optionsOrPassword = {}, maybeU
   await page.waitForTimeout(400);
   await dismissBlockingDialogs(page);
 
+  // 新版：统一身份认证网关页 → 先点「手动登录」→ 认证中心 iframe 里填账号密码
+  const sso = await loginViaSsoGateway(page, {
+    username,
+    password,
+    screenshotPath: target,
+  });
+  if (sso) {
+    if (sso.status === 'rate_limited') {
+      console.log(
+        `RESULT=FAIL: 登录失败（认证中心限流/锁定）${sso.reason || ''}，请等待解除后再执行`,
+      );
+      return target;
+    }
+    if (sso.status === 'failed') {
+      if (!sso.shot) {
+        await page
+          .screenshot({ path: target, fullPage: false, timeout: 8000, plain: true })
+          .catch(() => {});
+        console.log('[CASE_SCREENSHOT]', target);
+      }
+      console.log(
+        `RESULT=FAIL: 认证中心登录未通过：${sso.reason || '原因未知'}，URL=${page.url()}`,
+      );
+      return target;
+    }
+    if (sso.status === 'success') {
+      return await finishLoginStep1(page, target);
+    }
+  }
+
+  // 旧版登录页：页面上直接有 用户名/密码 输入框
   await page.getByPlaceholder(userPlaceholder).fill(username, { timeout: 8000 });
   await page.getByPlaceholder(passPlaceholder).fill(password, { timeout: 8000 });
   await page.screenshot({ path: target, fullPage: false, timeout: 8000, plain: true });
@@ -1433,24 +1716,7 @@ async function loginStep1(page, caseIdOrUsername, optionsOrPassword = {}, maybeU
     return target;
   }
 
-  for (let i = 0; i < 3; i += 1) {
-    const dismissed = await dismissBlockingDialogs(page);
-    if (!dismissed) break;
-    await page.waitForTimeout(200);
-  }
-  try {
-    await page.getByRole('menuitem').first().waitFor({ state: 'visible', timeout: 4000 });
-  } catch (_) {
-    // 部分产品侧栏不是 menuitem，忽略
-  }
-
-  if (!await waitForStableNonLoginPage(page, 800, 3000)) {
-    console.log(`RESULT=FAIL: 登录后又返回登录页，URL=${page.url()}`);
-    return target;
-  }
-
-  console.log(`RESULT=PASS: 步骤1登录成功 URL=${page.url()}`);
-  return target;
+  return await finishLoginStep1(page, target);
 }
 
 async function loginWorkOrderStep1(page, caseId) {
@@ -1632,37 +1898,298 @@ async function selectFormDropdownOption(page, labelText, optionText) {
  * 弹窗多选：点字段旁「+」/触发器，在弹窗里搜选项并确定。
  * fieldLabel / optionName 由当前用例步骤传入，不写死产品字段。
  */
-async function selectDialogMultiSelect(page, fieldLabel, optionName, options = {}) {
-  const dialogTitle = options.dialogTitle || `选择${fieldLabel}`;
-  const confirmName = options.confirmName || /确定/;
-  await ensureFilterPanelVisible(page);
-
-  const escapedLabel = String(fieldLabel).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const labelRe = new RegExp(`^${escapedLabel}$`);
-
-  const filterField = page
+/**
+ * 定位筛选面板里的字段容器。被测系统（智链 AI 工单系统）真实 DOM：
+ *   <div class="filter-field">
+ *     <label class="filter-field-label">工单类型</label>
+ *     <div class="filter-field-control">…</div>
+ *   </div>
+ */
+function getFilterFieldLocator(page, fieldLabel) {
+  const escaped = String(fieldLabel).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const labelRe = new RegExp(`^\\s*${escaped}\\s*[：:*＊]?\\s*$`);
+  return page
     .locator('.filter-field')
     .filter({ has: page.locator('.filter-field-label', { hasText: labelRe }) })
     .first();
-  if ((await filterField.count()) > 0) {
-    const poolTrigger = filterField.locator('.type-pool-trigger, button, [role="button"]').first();
-    await poolTrigger.waitFor({ state: 'visible', timeout: 15000 });
-    await poolTrigger.click();
+}
 
-    const dialog = page.locator('.el-dialog').filter({ hasText: dialogTitle }).last();
-    await dialog.waitFor({ state: 'visible', timeout: 15000 });
+/**
+ * 弹窗多选字段右侧的「+」触发器。真实 DOM：
+ *   <div class="type-pool-trigger"><div class="type-pool-actions">
+ *     <i class="el-icon add-icon"><svg>…</svg></i></div></div>
+ * ⚠️ 它不是 <button>，没有 role / aria-label / 文本内容，
+ * 所以 getByRole('button', { name: '工单类型 +' }) 和 .filter({ hasText: '+' }) 永远匹配不到，
+ * 只会等到超时。要打开这个弹窗必须走 `.type-pool-trigger` / `.add-icon`。
+ */
+function getFilterDialogTrigger(field) {
+  return field.locator('.type-pool-trigger, .add-icon, .type-pool-actions').first();
+}
 
-    const search = dialog.locator('input[placeholder*="搜索"], input[placeholder*="名称"]').first();
-    if ((await search.count()) > 0) {
-      await search.fill(optionName);
-      await page.waitForTimeout(600);
+/** 按弹窗标题定位多选弹窗（默认标题「选择<字段名>」），找不到标题时退回最后一个 el-dialog */
+async function getFilterDialog(page, fieldLabel, dialogTitle) {
+  const escaped = String(dialogTitle || `选择${fieldLabel}`).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const titleRe = new RegExp(`^\\s*${escaped}\\s*$`);
+  // ⚠️ 同一会话里跑多个筛选步骤时，历史弹窗会以 display:none 留在 DOM 里。
+  // 若直接取 `.el-dialog.last()`，可能选中一个已关闭的隐藏弹窗，waitFor visible 必然超时。
+  // 因此优先在「可见」弹窗里按标题匹配，再退回到可见弹窗，最后才退回全部。
+  const visible = page.locator('.el-dialog').filter({ visible: true });
+  const byTitleVisible = page
+    .locator('.el-dialog')
+    .filter({ visible: true })
+    .filter({ has: page.locator('.el-dialog__title', { hasText: titleRe }) })
+    .last();
+  if ((await byTitleVisible.count()) > 0) return byTitleVisible;
+  const byTitle = page
+    .locator('.el-dialog')
+    .filter({ has: page.locator('.el-dialog__title', { hasText: titleRe }) })
+    .last();
+  if ((await byTitle.count()) > 0) return byTitle;
+  if ((await visible.count()) > 0) return visible.last();
+  return page.locator('.el-dialog').last();
+}
+
+/**
+ * 步骤：点开某筛选字段右侧的「+」按钮，弹出多选弹窗（只弹窗，不选项、不确认）。
+ * 用例步骤「点击"工单类型"字段右侧的"+"按钮」直接用这个，不要用 clickPageButton。
+ * 后续步骤：selectFilterDialogOption 勾选，confirmFilterDialog 点确定。
+ */
+async function openFilterDialogField(page, fieldLabel) {
+  await ensureFilterPanelVisible(page);
+  const field = getFilterFieldLocator(page, fieldLabel);
+  await field.waitFor({ state: 'visible', timeout: 15000 });
+  const trigger = getFilterDialogTrigger(field);
+  await trigger.waitFor({ state: 'visible', timeout: 15000 });
+  await trigger.scrollIntoViewIfNeeded().catch(() => {});
+
+  const dialog = await getFilterDialog(page, fieldLabel);
+  const dialogOpen = async () => {
+    if ((await dialog.count()) === 0) return false;
+    return await dialog.isVisible().catch(() => false);
+  };
+
+  // 同一会话里连续做多组筛选时，偶发「点了但弹窗没起来」（遮罩/布局未稳定）。
+  // 单次点击后干等 15s 只会得到 TimeoutError，这里改成最多重试 3 次点击。
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (await dialogOpen()) break;
+    if (attempt > 1) await page.waitForTimeout(400);
+    try {
+      await trigger.click({ timeout: 8000 });
+    } catch (_) {
+      await dismissBlockingDialogs(page);
+      await trigger.click({ timeout: 5000, force: true }).catch(() => {});
     }
-
-    await dialog.getByText(optionName, { exact: true }).first().click();
-    await dialog.getByRole('button', { name: confirmName }).click();
-    await page.waitForTimeout(400);
-    return;
+    await page.waitForTimeout(600);
   }
+
+  await dialog.waitFor({ state: 'visible', timeout: 15000 });
+  console.log(`[openFilterDialogField] 已打开「${fieldLabel}」多选弹窗，URL=${page.url()}`);
+  return true;
+}
+
+/**
+ * 辅助：把多选弹窗里当前渲染出来的选项名全部读出来（不做勾选）。
+ */
+async function readFilterDialogOptions(dialog) {
+  const dedupe = (arr) =>
+    [...new Set(arr.map((s) => String(s).replace(/\s+/g, ' ').trim()).filter(Boolean))];
+  const read = async (selector) => {
+    try {
+      return await dialog.locator(selector).evaluateAll((nodes) =>
+        nodes.map((n) => {
+          const inner = n.querySelector('.picker-item-name, .el-checkbox__label');
+          return ((inner && inner.textContent) || n.textContent || '').trim();
+        })
+      );
+    } catch (_) {
+      return [];
+    }
+  };
+  let names = dedupe(await read('.picker-item-name'));
+  if (names.length) return names;
+  names = dedupe(await read('.picker-item'));
+  if (names.length) return names;
+  return dedupe(await read('.el-table__row, .el-tree-node'));
+}
+
+/** 辅助：在候选名里挑一个和 target 最像的（包含关系优先，其次 2-gram 重合度） */
+function pickClosestOption(target, candidates) {
+  const grams = (s) => {
+    const out = [];
+    for (let i = 0; i < s.length - 1; i++) out.push(s.slice(i, i + 2));
+    return out;
+  };
+  const commonPrefixLen = (a, b) => {
+    let i = 0;
+    while (i < a.length && i < b.length && a[i] === b[i]) i++;
+    return i;
+  };
+  const score = (a, b) => {
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    if (a.includes(b) || b.includes(a)) {
+      return 0.8 + 0.2 * (Math.min(a.length, b.length) / Math.max(a.length, b.length));
+    }
+    const g1 = grams(a);
+    const g2 = grams(b);
+    const set2 = new Set(g2);
+    const hit = g1.length ? g1.filter((g) => set2.has(g)).length : 0;
+    let s = g1.length && g2.length ? (2 * hit) / (g1.length + g2.length) : 0;
+    // 中文业务名称常见「快递询价 → 快递派送」这类同前缀改名，给同前缀加权，
+    // 否则 2-gram 相似度刚好卡在阈值下方，会漏掉最有参考价值的候选。
+    if (commonPrefixLen(a, b) >= 2) s += 0.35;
+    return s;
+  };
+  let best = null;
+  let bestScore = 0;
+  for (const c of candidates) {
+    const s = score(String(target), String(c));
+    if (s > bestScore) {
+      bestScore = s;
+      best = c;
+    }
+  }
+  return bestScore >= 0.34 ? best : null;
+}
+
+/**
+ * 辅助：打开某字段的多选弹窗 → 列出全部可选项 → 取消关闭。
+ * ⚠️ 用例里的选项名拿不准时先调这个，不要凭猜测写名称然后等超时。
+ */
+async function listFilterDialogOptions(page, fieldLabel, options = {}) {
+  await openFilterDialogField(page, fieldLabel);
+  const dialog = await getFilterDialog(page, fieldLabel, options.dialogTitle);
+  const names = await readFilterDialogOptions(dialog);
+  const cancel = dialog
+    .locator('.picker-footer button, .el-dialog__footer button')
+    .filter({ hasText: options.cancelName || /取消/ })
+    .first();
+  if ((await cancel.count()) > 0) await cancel.click({ timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(300);
+  console.log(`[listFilterDialogOptions]「${fieldLabel}」共 ${names.length} 项：${names.join('、')}`);
+  return names;
+}
+
+/**
+ * 步骤：在已打开的字段多选弹窗里勾选 1 个选项（不点确定）。
+ * 选项行真实 DOM：
+ *   <li class="picker-item" role="option"><span class="picker-item-name">快递派送</span>…</li>
+ * ⚠️ optionName 必须是弹窗里真实存在的名称。写错时本函数**不会**抛出裸的 TimeoutError，
+ * 而是列出弹窗中全部可选项 + 最接近的一个，避免上层靠猜名字反复重试。
+ */
+async function selectFilterDialogOption(page, fieldLabel, optionName, options = {}) {
+  const dialog = options.dialog || (await getFilterDialog(page, fieldLabel, options.dialogTitle));
+  await dialog.waitFor({ state: 'visible', timeout: 15000 });
+
+  const search = dialog.locator('.picker-search input, input[placeholder*="搜索"]').first();
+  const hasSearch = !options.skipSearch && (await search.count()) > 0;
+  if (hasSearch) {
+    await search.fill(String(optionName));
+    await page.waitForTimeout(600);
+  }
+
+  const row = dialog
+    .locator('.picker-item, .el-table__row, li, .el-tree-node')
+    .filter({ hasText: String(optionName) })
+    .first();
+
+  try {
+    await row.waitFor({ state: 'visible', timeout: options.timeout || 8000 });
+  } catch (_) {
+    // 选项不存在：清掉搜索词，把弹窗里真实可选的名称全部列出来
+    if (hasSearch) {
+      await search.fill('').catch(() => {});
+      await page.waitForTimeout(500);
+    }
+    const all = await readFilterDialogOptions(dialog);
+    const hint = pickClosestOption(String(optionName), all);
+    const title = options.dialogTitle || `选择${fieldLabel}`;
+    throw new Error(
+      `[selectFilterDialogOption] 弹窗「${title}」中不存在选项「${optionName}」。\n` +
+        `  · 该弹窗共 ${all.length} 个可选项：${all.length ? all.join('、') : '（未渲染出任何选项）'}\n` +
+        (hint ? `  · 名称最接近的是「${hint}」，若用例写错了请改用真实名称。\n` : '') +
+        `  · 这是用例选项名与被测系统数据不一致，不是脚本 bug；用同一个错误名称重试不会成功。`
+    );
+  }
+
+  await row.scrollIntoViewIfNeeded().catch(() => {});
+  const checkbox = row.locator('.el-checkbox').first();
+  if ((await checkbox.count()) > 0) {
+    await checkbox.click();
+  } else {
+    await row.click();
+  }
+  await page.waitForTimeout(400);
+  console.log(`[selectFilterDialogOption] 已勾选「${optionName}」`);
+  return dialog;
+}
+
+/**
+ * 步骤：点字段多选弹窗的「确定」按钮。
+ * ⚠️ 未勾选时按钮文案是「确定（0）」且 disabled，这里会等它变为可点再点。
+ */
+async function confirmFilterDialog(page, fieldLabel, options = {}) {
+  const dialog = options.dialog || (await getFilterDialog(page, fieldLabel, options.dialogTitle));
+  const confirmName = options.confirmName || /确定/;
+  const btn = dialog
+    .locator('.picker-footer button, .el-dialog__footer button')
+    .filter({ hasText: confirmName })
+    .first();
+  await btn.waitFor({ state: 'visible', timeout: 12000 });
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    if (!(await btn.isDisabled().catch(() => false))) break;
+    await page.waitForTimeout(200);
+  }
+  try {
+    await btn.click({ timeout: 8000 });
+  } catch (_) {
+    await btn.click({ timeout: 5000, force: true });
+  }
+  await page.waitForTimeout(500);
+  console.log('[confirmFilterDialog] 已点击弹窗「确定」');
+  return true;
+}
+
+/**
+ * 弹窗式多选字段：打开弹窗 → 勾选 1~N 个选项 → 点确定（一体化）。
+ * optionName 支持字符串或字符串数组：
+ *   await helpers.selectDialogMultiSelect(page, '工单类型', '快递派送');
+ *   await helpers.selectDialogMultiSelect(page, '工单类型', ['快递派送', '快递UPS派送']);
+ * 选项名必须是弹窗里真实存在的名称（可用 helpers.listFilterDialogOptions 先核对）。
+ */
+async function selectDialogMultiSelect(page, fieldLabel, optionName, options = {}) {
+  const optionNames = (Array.isArray(optionName) ? optionName : [optionName])
+    .map((n) => String(n).trim())
+    .filter((n) => n.length > 0);
+  if (!optionNames.length) {
+    throw new Error(`[selectDialogMultiSelect] 未提供选项名（字段「${fieldLabel}」）`);
+  }
+
+  const confirmName = options.confirmName || /确定/;
+  await ensureFilterPanelVisible(page);
+
+  const filterField = getFilterFieldLocator(page, fieldLabel);
+  if ((await filterField.count()) > 0) {
+    // 带「+」触发器的弹窗多选字段（如「工单类型」）
+    if ((await getFilterDialogTrigger(filterField).count()) > 0) {
+      await openFilterDialogField(page, fieldLabel);
+      const dialog = await getFilterDialog(page, fieldLabel, options.dialogTitle);
+      for (const name of optionNames) {
+        await selectFilterDialogOption(page, fieldLabel, name, { ...options, dialog });
+      }
+      await confirmFilterDialog(page, fieldLabel, { ...options, confirmName, dialog });
+      return true;
+    }
+    // 该字段是普通下拉，不是弹窗多选（单选语义，多传的名字会被忽略）
+    if ((await filterField.locator('.el-select').count()) > 0) {
+      await selectFormDropdownOption(page, fieldLabel, optionNames[0]);
+      return true;
+    }
+  }
+
+  const escapedLabel = String(fieldLabel).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const labelRe = new RegExp(`^${escapedLabel}$`);
 
   let formItem = page
     .locator('.el-form-item')
@@ -1675,7 +2202,7 @@ async function selectDialogMultiSelect(page, fieldLabel, optionName, options = {
 
   const select = formItem.locator('.el-select');
   if ((await select.count()) > 0) {
-    await selectFormDropdownOption(page, fieldLabel, optionName);
+    await selectFormDropdownOption(page, fieldLabel, optionNames[0]);
     return;
   }
 
@@ -1694,20 +2221,23 @@ async function selectDialogMultiSelect(page, fieldLabel, optionName, options = {
   const search = dialog.locator(
     'input[placeholder*="搜索"], input[placeholder*="类型"], input[placeholder*="名称"]',
   ).first();
-  if ((await search.count()) > 0) {
-    await search.fill(optionName);
-    await page.waitForTimeout(600);
-  }
 
-  const row = dialog.locator('.el-table__row, .el-checkbox-group label, li, .el-tree-node').filter({
-    hasText: optionName,
-  }).first();
-  await row.waitFor({ state: 'visible', timeout: 10000 });
-  const checkbox = row.locator('.el-checkbox').first();
-  if ((await checkbox.count()) > 0) {
-    await checkbox.click();
-  } else {
-    await row.click();
+  for (const name of optionNames) {
+    if ((await search.count()) > 0) {
+      await search.fill(name);
+      await page.waitForTimeout(600);
+    }
+
+    const row = dialog.locator('.el-table__row, .el-checkbox-group label, li, .el-tree-node').filter({
+      hasText: name,
+    }).first();
+    await row.waitFor({ state: 'visible', timeout: 10000 });
+    const checkbox = row.locator('.el-checkbox').first();
+    if ((await checkbox.count()) > 0) {
+      await checkbox.click();
+    } else {
+      await row.click();
+    }
   }
 
   await dialog.getByRole('button', { name: confirmName }).click();
@@ -2718,6 +3248,21 @@ async function dismissBlockingDialogs(page) {
 async function clickPageButton(page, name) {
   await dismissBlockingDialogs(page);
   const raw = String(name || '').trim();
+
+  // 形如「工单类型 +」的写法，其实是筛选字段右侧的图标触发器，不是 <button>，走专用路径。
+  // 「+」是 <i class="el-icon add-icon"><svg></i>，没有 role/aria-label/文本，getByRole 永远等不到。
+  const plusMatch = raw.match(/^(.+?)\s*[+\uFF0B]$/) || raw.match(/^[+\uFF0B]\s*(.+)$/);
+  if (plusMatch) {
+    const fieldLabel = plusMatch[1].replace(/["'“”‘’「」【】\[\]()（）\s]/g, '').trim();
+    if (fieldLabel) {
+      const field = getFilterFieldLocator(page, fieldLabel);
+      if ((await field.count()) > 0 && (await getFilterDialogTrigger(field).count()) > 0) {
+        await openFilterDialogField(page, fieldLabel);
+        return;
+      }
+    }
+  }
+
   const stripped = raw.replace(/^[+\uFF0B]\s*/, '');
   const names = stripped && stripped !== raw ? [raw, stripped] : [raw];
   let lastErr;
@@ -3098,6 +3643,7 @@ module.exports = {
   authenticate,
   loginWorkOrderPortal,
   screenshotCaseStep,
+  screenshotNavStep,
   loginStep1,
   loginWorkOrderStep1,
   scrollPage,
@@ -3110,6 +3656,13 @@ module.exports = {
   selectFormDropdownOption,
   selectDialogMultiSelect,
   selectTicketTypeInFilter,
+  getFilterFieldLocator,
+  getFilterDialogTrigger,
+  getFilterDialog,
+  openFilterDialogField,
+  listFilterDialogOptions,
+  selectFilterDialogOption,
+  confirmFilterDialog,
   filterByFields,
   filterWorkOrdersByStatus,
   detectWorkOrderPage,

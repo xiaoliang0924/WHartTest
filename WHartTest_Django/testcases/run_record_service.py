@@ -43,6 +43,14 @@ _COMMAND_FAIL_RE = re.compile(r"命令执行失败[^\n]*")
 _TIMEOUT_RE = re.compile(r"(TimeoutError|Timeout \d+ms exceeded)[^\n]*", re.IGNORECASE)
 _STEP_RE = re.compile(r"(?:步骤|step)\s*(\d+)", re.IGNORECASE)
 _CASE_STEP_RE = re.compile(r"case_\d+_step(\d+)", re.IGNORECASE)
+# 报告正文之后模型额外贴出的内容（通常是「测试用例执行」提示词要求的 JSON 结果块）
+_REPORT_APPENDIX_FENCE_RE = re.compile(r"\n+```[^\n`]*\n[\s\S]*?```[ \t]*$")
+_REPORT_APPENDIX_JSON_RE = re.compile(r"\n+[ \t]*[\[{][\s\S]*$")
+# 全部通过时用于规范化的固定措辞（与 build_execution_result_report 保持一致）
+_PASS_ANALYSIS_BULLETS = "- 失败步骤：无\n- 失败原因：各步骤均满足预期，功能符合需求。\n- 建议：无需处理。"
+_PASS_TITLE_RE = re.compile(r"##\s*测试执行结果[:：]\s*通过")
+_PASS_ANALYSIS_SECTION_RE = re.compile(r"###\s*问题分析[^\n]*\n([\s\S]*?)(?=\n#{3}\s|\Z)")
+_PASS_CONCLUSION_SECTION_RE = re.compile(r"(###\s*结论[^\n]*\n)[\s\S]*\Z")
 
 
 def has_execution_result_report(text: str) -> bool:
@@ -262,6 +270,7 @@ def build_execution_result_report(
     level = getattr(testcase, "level", "") or ""
     rows = []
     failed_desc = ""
+    failed_number: Any = ""
     for item in step_results:
         number = item.get("step_number") or ""
         description = (item.get("description") or "").replace("|", "\\|").replace("\n", " ")
@@ -273,6 +282,8 @@ def build_execution_result_report(
             result = f"失败：{item.get('actual_result') or fail_reason}"
             status_col = "❌ 失败"
             failed_desc = description
+            if not failed_number:
+                failed_number = number
         else:
             result = "—"
             status_col = "⏭ 未执行"
@@ -287,9 +298,9 @@ def build_execution_result_report(
         else "无需处理。"
     )
     conclusion = (
-        "测试通过。"
+        f"本次测试执行全部 {len(step_results) or '-'} 个步骤均通过，测试通过。"
         if passed
-        else "测试不通过。未执行步骤已标为「未执行」，请处理后重新执行。"
+        else f"本次测试执行在步骤 {failed_number or '?'} 失败，未完成全部步骤，测试不通过。"
     )
     return (
         f"## 测试执行结果: {title}\n\n"
@@ -310,6 +321,56 @@ def build_execution_result_report(
     )
 
 
+def strip_execution_report_appendix(report: str) -> str:
+    """裁掉报告正文之后的内容，避免报告卡片里拖出一段原始 JSON。
+
+    对话内容里保留 JSON 是必要的（``_extract_test_result_json`` 依赖它填充
+    ``step_results``），但展示用的 summary 只应该有 markdown 报告本身。
+    """
+    text = (report or "").rstrip()
+    # 1) 结尾的围栏代码块：```json … ``` / ``` … ```
+    text = _REPORT_APPENDIX_FENCE_RE.sub("", text).rstrip()
+    # 2) 结尾的裸 JSON（模型偶尔忘记加围栏）
+    match = _REPORT_APPENDIX_JSON_RE.search(text)
+    if match and len(text) - match.start() > 20:
+        text = text[: match.start()].rstrip()
+    return text
+
+
+def normalize_passed_execution_report(report: str) -> str:
+    """全部通过时把「问题分析 / 结论」写成固定措辞。
+
+    模型自己写报告和后台兜底各有一套说法（「无失败步骤」vs「失败步骤：无」、
+    「所有测试步骤执行完成…」vs「测试通过。」），同一场景每次都不一样。
+    通过场景不需要自由发挥，统一按 ``build_execution_result_report`` 的措辞输出。
+    """
+    text = report or ""
+    if not _PASS_TITLE_RE.search(text):
+        return text
+
+    section = _PASS_ANALYSIS_SECTION_RE.search(text)
+    if section:
+        body = section.group(1)
+        # 用带冒号的标签判断（「无失败步骤」这种压缩写法不含冒号，需要补齐）
+        if not re.search(r"失败步骤\s*[:：]", body):
+            text = (
+                text[: section.start(1)]
+                + _PASS_ANALYSIS_BULLETS
+                + "\n"
+                + text[section.end(1) :]
+            )
+
+    conclusion = _PASS_CONCLUSION_SECTION_RE.search(text)
+    if conclusion:
+        step_count = len(re.findall(r"^\|\s*\d+\s*\|", text, re.MULTILINE))
+        text = (
+            text[: conclusion.start(1)]
+            + conclusion.group(1)
+            + f"本次测试执行全部 {step_count or '-'} 个步骤均通过，测试通过。"
+        )
+    return text.rstrip()
+
+
 def extract_first_execution_report(text: str) -> str:
     content = (text or "").strip()
     if not content:
@@ -322,8 +383,10 @@ def extract_first_execution_report(text: str) -> str:
     rest = tail[1:]
     next_match = re.search(r"##\s*测试执行结果[:：]\s*(通过|不通过)", rest)
     if next_match:
-        return tail[: next_match.start() + 1].strip()
-    return tail.strip()
+        report = tail[: next_match.start() + 1].strip()
+    else:
+        report = tail.strip()
+    return normalize_passed_execution_report(strip_execution_report_appendix(report))
 
 
 def ensure_execution_result_report(

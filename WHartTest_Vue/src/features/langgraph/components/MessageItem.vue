@@ -2018,6 +2018,9 @@ const formatToolMessage = (content: string) => {
   border: 1px solid var(--color-border-2);
   background: var(--color-bg-1);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  /* 必须显式左对齐：报告卡片不在 .message-bubble 内，无法继承其 text-align:left，
+     会继承到 #app 上的全局 text-align:center，导致报告正文、表格、JSON 代码块全部居中。 */
+  text-align: left;
 }
 
 .execution-report-pass .execution-report-header {
@@ -2041,6 +2044,8 @@ const formatToolMessage = (content: string) => {
 .execution-report-body {
   padding: 14px 16px 16px;
   line-height: 1.6;
+  /* 同上：防止外部全局 text-align 继承进来把报告内容居中 */
+  text-align: left;
 }
 
 .execution-report-body :deep(h3) {

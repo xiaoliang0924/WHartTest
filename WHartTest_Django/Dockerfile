@@ -261,6 +261,9 @@ COPY api_testcases/ /app/api_testcases/
 COPY api_testtasks/ /app/api_testtasks/
 COPY httprunner/ /app/httprunner/
 COPY file_management/ /app/file_management/
+# data_generation 是 INSTALLED_APPS 中的应用，orchestrator 的用例前置数据
+# （testcase_pre_data）依赖它；此前镜像漏拷，只能靠 docker cp 手工补进容器。
+COPY data_generation/ /app/data_generation/
 COPY knowledge/ /app/knowledge/
 COPY langgraph_integration/ /app/langgraph_integration/
 COPY mcp_tools/ /app/mcp_tools/

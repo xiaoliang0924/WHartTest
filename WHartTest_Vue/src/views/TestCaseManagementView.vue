@@ -255,11 +255,15 @@ const EXECUTION_RESULT_REPORT = `【结束报告（必须遵守）】
 | 1 | … | 符合预期 / 失败原因 | ✅ 通过 / ❌ 失败 / ⏭ 未执行 |
 
 ### 问题分析
-- 失败步骤：
-- 失败原因：
-- 建议：
+下面三行必须逐行写出，不能省略、不能压缩成一句「无失败步骤」：
+- 失败步骤：全部通过写「无」，否则写「步骤N」
+- 失败原因：全部通过写「各步骤均满足预期，功能符合需求。」，否则写清原因
+- 建议：全部通过写「无需处理。」，否则写具体建议
 
 ### 结论
+只写一句话，套用固定句式：
+- 全部通过：本次测试执行全部 N 个步骤均通过，测试通过。
+- 有失败：本次测试执行在步骤 N 失败，未完成全部步骤，测试不通过。
 未执行的步骤必须标「未执行」，不得标通过。`;
 
 const EXECUTION_STEP_DISCIPLINE = `【步骤执行纪律（必须遵守）】
@@ -491,19 +495,22 @@ const showExecutionProgressNotification = (
   footerLinkText: string,
   dualChatLinks = false,
 ) => {
-  Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
-
   if (dualChatLinks) {
+    // 用例执行场景下，「执行已开始」占位通知与这条进度通知讲的是同一件事
+    // （标题、内容、底部链接都相同）。这里复用占位通知的 id，让 arco 原地更新，
+    // 而不是「先 remove 旧的、再新建一条」，否则右上角会出现同标题通知弹出两次。
     let notificationReturn: { close?: () => void } | undefined;
     notificationReturn = Notification.info({
+      id: EXECUTION_PENDING_NOTIFICATION_ID,
       title: notificationTitle,
       content: notificationContent,
       duration: 0,
-      id: `${notificationIdPrefix}-${sessionId}`,
       footer: renderExecCaseNotificationFooter(() => notificationReturn?.close?.()),
     });
     return;
   }
+
+  Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
 
   const notificationReturn = Notification.info({
     title: notificationTitle,
