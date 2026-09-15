@@ -353,19 +353,48 @@ class IntentRouterStateTests(DjangoTestCase):
 
         self.assertEqual(
             infer_business_template_key('筛选工单状态为处理中'),
-            'biz_create_and_claim',
+            'biz_prepare_status_filter_data',
         )
         self.assertEqual(
             infer_business_template_key('筛选工单状态为待处理'),
-            'biz_create_and_assign',
+            'biz_prepare_status_filter_data',
         )
         self.assertEqual(
             infer_business_template_key('点击查询，等待列表刷新完成\n工单状态筛选为待处理'),
-            'biz_create_and_assign',
+            'biz_prepare_status_filter_data',
         )
         self.assertEqual(
             infer_business_template_key('完成工单并闭环'),
             'biz_create_assign_resolve',
+        )
+
+    def test_status_filter_template_prepares_matching_and_contrast_records(self):
+        from data_generation.templates import get_template_by_key
+
+        template = get_template_by_key('biz_prepare_status_filter_data')
+        self.assertIsNotNone(template)
+        names = [step['name'] for step in template['steps']]
+        self.assertIn('创建状态筛选样本：待分配', names)
+        self.assertIn('创建状态筛选样本：待处理', names)
+        self.assertIn('创建状态筛选样本：处理中', names)
+        self.assertIn('创建状态筛选样本：已完成', names)
+
+        created = [step for step in template['steps'] if step['name'].startswith('创建状态筛选样本')]
+        self.assertEqual(len(created), 4)
+        self.assertTrue(all(step['variables']['ticketType'] == 'TYPE_A' for step in created))
+
+    def test_unassigned_pending_case_does_not_route_to_assignment_or_resolve(self):
+        from data_generation.intent_router import infer_business_template_key
+
+        case_text = (
+            '待处理工单-列表点击处理进入详情页-正常流程\n'
+            '当前状态为待处理且处理人未分配给李亮/可领取\n'
+            '筛选待处理后，不得出现处理中、已完成或已关闭的工单\n'
+            '点击处理后可领取工单'
+        )
+        self.assertEqual(
+            infer_business_template_key(case_text),
+            'biz_create_type_a',
         )
 
     def test_approval_ticket_uses_approval_processing_template(self):

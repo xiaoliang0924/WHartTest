@@ -660,6 +660,8 @@ class TestCaseRunRecordSerializer(serializers.ModelSerializer):
             "summary",
             "step_results",
             "execution_log",
+            "data_generation_run",
+            "data_usage",
             "generate_playwright_script",
             "started_at",
             "completed_at",

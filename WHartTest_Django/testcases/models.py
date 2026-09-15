@@ -756,6 +756,12 @@ class TestCaseRunRecord(models.Model):
         related_name='testcase_run_records',
         verbose_name=_('造数执行记录'),
     )
+    data_usage = models.JSONField(
+        _("造数数据使用情况"),
+        default=dict,
+        blank=True,
+        help_text=_("记录本次执行是否实际使用了自动造数返回的数据及其证据"),
+    )
     started_at = models.DateTimeField(_("开始时间"), auto_now_add=True)
     completed_at = models.DateTimeField(_("完成时间"), null=True, blank=True)
 

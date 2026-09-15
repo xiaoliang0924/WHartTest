@@ -43,6 +43,11 @@ _COMMAND_FAIL_RE = re.compile(r"命令执行失败[^\n]*")
 _TIMEOUT_RE = re.compile(r"(TimeoutError|Timeout \d+ms exceeded)[^\n]*", re.IGNORECASE)
 _STEP_RE = re.compile(r"(?:步骤|step)\s*(\d+)", re.IGNORECASE)
 _CASE_STEP_RE = re.compile(r"case_\d+_step(\d+)", re.IGNORECASE)
+_DATA_USE_ACTION_RE = re.compile(
+    r"fillFilterField|clickRowAction|queryTicketInList|runTicketDetailCaseStep|"
+    r"工单号.*(?:查询|筛选)|(?:查询|筛选).*工单号|定位.*工单",
+    re.IGNORECASE,
+)
 # 报告正文之后模型额外贴出的内容（通常是「测试用例执行」提示词要求的 JSON 结果块）
 _REPORT_APPENDIX_FENCE_RE = re.compile(r"\n+```[^\n`]*\n[\s\S]*?```[ \t]*$")
 _REPORT_APPENDIX_JSON_RE = re.compile(r"\n+[ \t]*[\[{][\s\S]*$")
@@ -55,6 +60,64 @@ _PASS_CONCLUSION_SECTION_RE = re.compile(r"(###\s*结论[^\n]*\n)[\s\S]*\Z")
 
 def has_execution_result_report(text: str) -> bool:
     return is_filled_execution_result_report(text)
+
+
+def build_pre_data_usage(data_run, assistant_transcript: str) -> dict[str, Any]:
+    """Build auditable evidence that generated data was actually used by the agent.
+
+    The human prompt contains the generated snapshot, so it must never be used as
+    evidence.  Only the assistant/tool transcript is examined here.
+    """
+    if not data_run:
+        return {"status": "not_applicable", "message": "本次执行未自动造数"}
+
+    snapshot = getattr(data_run, "output_snapshot", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    identifiers = {
+        key: str(value).strip()
+        for key, value in snapshot.items()
+        if key in {"ticketNo", "ticketId", "work_order_id", "processingTicketId"}
+        and value not in (None, "")
+    }
+    if not identifiers:
+        return {
+            "status": "not_confirmed",
+            "message": "本次造数未返回可追踪的工单标识",
+            "identifiers": {},
+        }
+
+    text = assistant_transcript or ""
+    matched = [(key, value) for key, value in identifiers.items() if value in text]
+    if not matched:
+        return {
+            "status": "not_confirmed",
+            "message": "执行日志未发现本次造数的工单标识",
+            "identifiers": identifiers,
+        }
+
+    key, value = matched[0]
+    position = text.find(value)
+    evidence = text[max(0, position - 220): position + len(value) + 320].strip()
+    action_nearby = _DATA_USE_ACTION_RE.search(evidence)
+    if not action_nearby:
+        # A tool call and the identifier can be separated by formatting, but a
+        # transcript that only mentions the identifier remains an unverified reference.
+        action_nearby = _DATA_USE_ACTION_RE.search(text)
+    if action_nearby:
+        return {
+            "status": "verified_used",
+            "message": "已在执行脚本或工具日志中确认使用本次造数数据",
+            "identifiers": identifiers,
+            "matched_identifier": {"key": key, "value": value},
+            "evidence": evidence[:800],
+        }
+    return {
+        "status": "referenced",
+        "message": "执行日志引用了造数标识，但缺少查询、定位或行操作证据",
+        "identifiers": identifiers,
+        "matched_identifier": {"key": key, "value": value},
+        "evidence": evidence[:800],
+    }
 
 
 def is_filled_execution_result_report(text: str) -> bool:
@@ -550,7 +613,7 @@ def finalize_testcase_run_record(
     assistant_transcript: str = "",
 ) -> Optional[TestCaseRunRecord]:
     try:
-        record = TestCaseRunRecord.objects.select_related("testcase").prefetch_related(
+        record = TestCaseRunRecord.objects.select_related("testcase", "data_generation_run").prefetch_related(
             "testcase__steps"
         ).get(session_id=session_id)
     except TestCaseRunRecord.DoesNotExist:
@@ -575,6 +638,7 @@ def finalize_testcase_run_record(
     record.step_results = outcome["step_results"]
     record.execution_log = (combined or error_message or "")[:8000]
     record.injected_report = outcome["injected"]
+    record.data_usage = build_pre_data_usage(record.data_generation_run, assistant_text)
 
     record.completed_at = timezone.now()
     record.save(
@@ -583,6 +647,7 @@ def finalize_testcase_run_record(
             "summary",
             "step_results",
             "execution_log",
+            "data_usage",
             "completed_at",
         ]
     )

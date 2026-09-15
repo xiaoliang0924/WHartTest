@@ -101,6 +101,14 @@ export interface TestCaseRunRecord {
   summary: string;
   step_results: TestCaseRunStepResult[];
   execution_log?: string;
+  data_generation_run?: number | null;
+  data_usage?: {
+    status?: 'verified_used' | 'referenced' | 'not_confirmed' | 'not_applicable';
+    message?: string;
+    identifiers?: Record<string, string>;
+    matched_identifier?: { key: string; value: string };
+    evidence?: string;
+  };
   generate_playwright_script?: boolean;
   started_at: string;
   completed_at?: string | null;

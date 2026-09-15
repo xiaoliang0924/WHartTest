@@ -7,6 +7,7 @@ from projects.models import Project
 from testcases.models import TestCase as TestCaseModel, TestCaseModule, TestCaseStep
 from testcases.run_record_service import (
     build_execution_result_report,
+    build_pre_data_usage,
     ensure_execution_result_report,
     finalize_testcase_run_record,
     has_execution_result_report,
@@ -38,6 +39,21 @@ def _fake_case(**kwargs):
 
 
 class ExecutionResultReportTests(SimpleTestCase):
+    def test_confirms_generated_ticket_used_from_assistant_tool_trace(self):
+        data_run = SimpleNamespace(output_snapshot={"ticketNo": "2026091570663010"})
+        usage = build_pre_data_usage(
+            data_run,
+            "await helpers.fillFilterField(page, '工单号', '2026091570663010');\n"
+            "await helpers.clickRowAction(page, '2026091570663010', '处理');",
+        )
+        self.assertEqual(usage["status"], "verified_used")
+        self.assertEqual(usage["matched_identifier"]["value"], "2026091570663010")
+
+    def test_does_not_treat_prompt_injection_as_usage_without_agent_evidence(self):
+        data_run = SimpleNamespace(output_snapshot={"ticketNo": "2026091570663010"})
+        usage = build_pre_data_usage(data_run, "已进入工单列表，开始按状态筛选。")
+        self.assertEqual(usage["status"], "not_confirmed")
+
     def test_detects_existing_report(self):
         self.assertTrue(has_execution_result_report("## 测试执行结果: 不通过\n### 基本信息\n- 测试用例ID: 1520"))
         self.assertFalse(has_execution_result_report("【执行失败】\n- 失败步骤：第1步"))

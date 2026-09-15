@@ -16,18 +16,114 @@ REF_UPDATE_SUBJECT = 'update_subject'
 REF_TICKET_DETAIL = 'ticket_detail'
 
 
-def _create_ticket_step() -> Dict[str, Any]:
+def _create_ticket_step(
+    *,
+    name: str = '创建工单',
+    ticket_id_key: str = 'ticketId',
+    ticket_no_key: str = 'ticketNo',
+    summary: str = '{{summary}}',
+    ticket_type: str = '{{ticketType}}',
+) -> Dict[str, Any]:
     return {
         'type': 'api_call',
-        'name': '创建工单',
+        'name': name,
         'interface_ref': REF_CREATE_TICKET,
         'environment_ref': ENV_REF_DEFAULT,
         'variables': {
-            'summary': '{{summary}}',
-            'ticketType': '{{ticketType}}',
+            'summary': summary,
+            'ticketType': ticket_type,
         },
-        'extract': {'ticketId': 'ticketId', 'ticketNo': 'ticketNo'},
+        'extract': {ticket_id_key: 'ticketId', ticket_no_key: 'ticketNo'},
     }
+
+
+def _ticket_status_transition_step(
+    *,
+    name: str,
+    interface_ref: str,
+    ticket_id_key: str,
+    variables: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Call a transition API for the named fixture instead of the last ticket."""
+    step_variables = {'ticketId': '{{' + ticket_id_key + '}}'}
+    step_variables.update(variables or {})
+    return {
+        'type': 'api_call',
+        'name': name,
+        'interface_ref': interface_ref,
+        'environment_ref': ENV_REF_DEFAULT,
+        'variables': step_variables,
+    }
+
+
+def _status_filter_fixture_steps() -> List[Dict[str, Any]]:
+    """Create one record for each list status used by status-filter cases."""
+    assignee = {
+        'assigneeUserId': '{{assigneeUserId}}',
+        'assigneeName': '{{assigneeName}}',
+        'assigneeDepartment': '{{assigneeDepartment}}',
+        'assigneeRole': '{{assigneeRole}}',
+    }
+    fixtures = (
+        ('待分配', 'pendingAssign'),
+        ('待处理', 'pendingProcess'),
+        ('处理中', 'processing'),
+        ('已完成', 'resolved'),
+    )
+    steps: List[Dict[str, Any]] = []
+    for status_name, prefix in fixtures:
+        ticket_id = f'{prefix}TicketId'
+        ticket_no = f'{prefix}TicketNo'
+        steps.append(
+            _create_ticket_step(
+                name=f'创建状态筛选样本：{status_name}',
+                ticket_id_key=ticket_id,
+                ticket_no_key=ticket_no,
+                summary=f'自动化状态筛选-{status_name}-{{{{timestamp}}}}',
+                ticket_type='TYPE_A',
+            )
+        )
+        if prefix in ('pendingProcess', 'processing', 'resolved'):
+            steps.append(
+                _ticket_status_transition_step(
+                    name=f'分配状态筛选样本：{status_name}',
+                    interface_ref=REF_ASSIGN_TICKET,
+                    ticket_id_key=ticket_id,
+                    variables=assignee,
+                )
+            )
+        if prefix in ('processing', 'resolved'):
+            steps.append(
+                _ticket_status_transition_step(
+                    name=f'领取状态筛选样本：{status_name}',
+                    interface_ref=REF_CLAIM_TICKET,
+                    ticket_id_key=ticket_id,
+                )
+            )
+        if prefix == 'resolved':
+            steps.append(
+                _ticket_status_transition_step(
+                    name='完成状态筛选样本：已完成',
+                    interface_ref=REF_RESOLVE_TICKET,
+                    ticket_id_key=ticket_id,
+                )
+            )
+
+    steps.append(
+        {
+            'type': 'set_public_data',
+            'name': '写入状态筛选样本标识',
+            'items': [
+                {
+                    'key': f'statusFilter{prefix}TicketNo',
+                    'value': '{{' + prefix + 'TicketNo}}',
+                    'type': 0,
+                }
+                for _status_name, prefix in fixtures
+            ],
+        }
+    )
+    return steps
 
 
 def _write_env_vars_step(**extra: str) -> Dict[str, Any]:
@@ -113,12 +209,12 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
     {
         'template_key': 'biz_create_and_assign',
         'name': '创建并分配工单',
-        'description': '创建 TYPE_A 工单后调用「分配工单」接口，写入 processingTicketId 供处理中场景使用。',
+        'description': '创建 TYPE_A 工单后调用「分配工单」接口，写入 processingTicketId 供待处理场景使用。',
         'target_type': 'both',
         'icon': 'user-add',
         'params_schema': {
             'summary': {'type': 'string', 'label': '工单摘要', 'default': '分配测试工单'},
-            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_C'},
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_A'},
             'assigneeUserId': {'type': 'number', 'label': '分配用户 ID', 'default': 46},
             'assigneeName': {'type': 'string', 'label': '分配用户名', 'default': '李亮'},
             'assigneeDepartment': {'type': 'string', 'label': '分配部门', 'default': '客服部'},
@@ -141,6 +237,24 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
             _write_env_vars_step(ticketStatus='assigned'),
             _write_public_data_step(ticketStatus='assigned'),
         ],
+        'cleanup_steps': [],
+    },
+    {
+        'template_key': 'biz_prepare_status_filter_data',
+        'name': '准备工单状态筛选基准数据',
+        'description': (
+            '准备待分配、待处理、处理中和已完成四种状态的工单样本，'
+            '用于验证状态筛选同时包含命中与排除数据。'
+        ),
+        'target_type': 'both',
+        'icon': 'filter',
+        'params_schema': {
+            'assigneeUserId': {'type': 'number', 'label': '分配用户 ID', 'default': 46},
+            'assigneeName': {'type': 'string', 'label': '分配用户名', 'default': '李亮'},
+            'assigneeDepartment': {'type': 'string', 'label': '分配部门', 'default': '客服部'},
+            'assigneeRole': {'type': 'string', 'label': '分配角色', 'default': 'customer_service'},
+        },
+        'steps': _status_filter_fixture_steps(),
         'cleanup_steps': [],
     },
     {

@@ -41,7 +41,12 @@ def _strip_permission_assign_phrases(text: str) -> str:
 
 def _mentions_assign_action(text: str) -> bool:
     """True when user wants assign/指派, excluding 待分配 and 不要分配."""
-    if '待分配' in text or 'pending_assign' in text.lower():
+    if (
+        '待分配' in text
+        or '未分配' in text
+        or 'pending_assign' in text.lower()
+        or 'unassigned' in text.lower()
+    ):
         return False
     if _NEGATED_ASSIGN_PATTERN.search(text):
         return False
@@ -49,6 +54,34 @@ def _mentions_assign_action(text: str) -> bool:
     return any(
         keyword in cleaned or keyword in cleaned.lower()
         for keyword in ('分配', '指派', 'assign')
+    )
+
+
+def _is_ticket_status_filter(text: str) -> bool:
+    """Return whether the case verifies filtering a work-order list by status.
+
+    Status-filter cases need both matching and non-matching records.  They
+    cannot be prepared reliably by a single state-transition template.
+    """
+    lowered = (text or '').lower()
+    return (
+        '工单状态' in text
+        and any(keyword in text or keyword in lowered for keyword in ('筛选', '查询', '下拉'))
+        and not _mentions_assign_action(text)
+    )
+
+
+def _needs_unassigned_pending_ticket(text: str) -> bool:
+    """Return whether a case needs a pending ticket that can be claimed.
+
+    A phrase such as “不得出现已完成” is an assertion, not a request to
+    complete a ticket.  Likewise, “未分配” describes the required fixture;
+    routing either phrase to an assignment/resolve workflow is incorrect.
+    """
+    lowered = (text or '').lower()
+    return (
+        ('待处理' in text or 'pending_process' in lowered)
+        and any(keyword in text or keyword in lowered for keyword in ('未分配', '可领取', '领取工单'))
     )
 
 
@@ -93,6 +126,12 @@ def infer_business_template_key(description: str) -> Optional[str]:
     explicit = _EXPLICIT_TEMPLATE_KEY.search(text)
     if explicit:
         return explicit.group(1).lower()
+
+    if _needs_unassigned_pending_ticket(text):
+        return 'biz_create_type_a'
+
+    if _is_ticket_status_filter(text):
+        return 'biz_prepare_status_filter_data'
 
     if _wants_create_only(text):
         ticket_type = infer_ticket_type(text, fallback='TYPE_A')

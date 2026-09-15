@@ -55,6 +55,16 @@
         <div class="summary-text">{{ record.summary }}</div>
       </a-card>
 
+      <a-card v-if="record?.data_usage" :title="text.dataUsage" size="small" class="block">
+        <a-alert :type="dataUsageAlertType" :title="dataUsageMessage" show-icon />
+        <div v-if="record.data_usage.matched_identifier" class="usage-detail">
+          {{ text.dataIdentifier }}：{{ record.data_usage.matched_identifier.value }}
+        </div>
+        <div v-if="record.data_usage.evidence" class="usage-evidence">
+          {{ text.dataEvidence }}：{{ record.data_usage.evidence }}
+        </div>
+      </a-card>
+
       <a-card :title="text.stepResults" size="small" class="block">
         <a-table
           v-if="displaySteps.length > 0"
@@ -147,6 +157,9 @@ const text = computed(() => (
         runningHint: 'Execution in progress. Results will refresh automatically.',
         failedHint: 'Execution failed',
         summary: 'Summary',
+        dataUsage: 'Generated Data Usage',
+        dataIdentifier: 'Matched identifier',
+        dataEvidence: 'Evidence',
         stepResults: 'Step Results',
         waitingSteps: 'Waiting for execution results...',
         noSteps: 'No structured step results',
@@ -175,6 +188,9 @@ const text = computed(() => (
         runningHint: '用例正在执行中，结果将自动刷新。',
         failedHint: '用例执行失败',
         summary: '结果摘要',
+        dataUsage: '造数数据使用情况',
+        dataIdentifier: '匹配标识',
+        dataEvidence: '执行证据',
         stepResults: '步骤结果',
         waitingSteps: '等待执行结果...',
         noSteps: '暂无结构化步骤结果',
@@ -198,6 +214,14 @@ const text = computed(() => (
 ));
 
 const isRunning = computed(() => record.value?.status === 'running');
+
+const dataUsageMessage = computed(() => record.value?.data_usage?.message || '');
+const dataUsageAlertType = computed(() => {
+  const status = record.value?.data_usage?.status;
+  if (status === 'verified_used') return 'success';
+  if (status === 'referenced') return 'warning';
+  return 'info';
+});
 
 const resolveSessionId = (): string | null => {
   const candidates = [
@@ -386,6 +410,14 @@ defineExpose({
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.usage-detail,
+.usage-evidence {
+  margin-top: 8px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .status-bar {
