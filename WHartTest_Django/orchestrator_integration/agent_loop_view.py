@@ -531,13 +531,13 @@ def _build_testcase_execution_display_message(testcase_id: int, pre_data_run: An
             or ""
         ).strip()
         if identifier:
-            lines.append(f"已准备测试数据：{identifier}")
+            lines.append(f"测试数据已准备：{identifier}")
         elif pre_data_run is not None:
             lines.append("已完成测试数据准备。")
     elif pre_data_run is not None:
         lines.append("已完成测试数据准备。")
 
-    lines.append(f"将按 {testcase.steps.count()} 个步骤执行，执行结果和截图会自动保存。")
+    lines.append(f"共 {testcase.steps.count()} 个步骤，执行结果和截图会自动保存。")
     return "\n".join(lines)
 
 
