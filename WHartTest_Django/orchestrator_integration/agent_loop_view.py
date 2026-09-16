@@ -508,6 +508,39 @@ async def _prepare_agent_loop_human_message(
     return human_message_content, additional_kwargs, display_message
 
 
+def _build_testcase_execution_display_message(testcase_id: int, pre_data_run: Any = None) -> str:
+    """Build the short, user-facing status for a manual testcase execution.
+
+    The complete testcase, generated-data snapshot and helper instructions belong
+    to the agent's internal system context. Keeping the HumanMessage concise also
+    prevents those implementation details from appearing when history is reopened.
+    """
+    from testcases.models import TestCase
+
+    testcase = TestCase.objects.filter(id=testcase_id).first()
+    if not testcase:
+        return f"正在执行用例 {testcase_id}。执行结果和截图会自动保存。"
+
+    lines = [f"正在执行用例 {testcase.id}：{testcase.name}"]
+    snapshot = getattr(pre_data_run, "output_snapshot", None)
+    if isinstance(snapshot, dict):
+        identifier = str(
+            snapshot.get("ticketNo")
+            or snapshot.get("orderNo")
+            or snapshot.get("id")
+            or ""
+        ).strip()
+        if identifier:
+            lines.append(f"已准备测试数据：{identifier}")
+        elif pre_data_run is not None:
+            lines.append("已完成测试数据准备。")
+    elif pre_data_run is not None:
+        lines.append("已完成测试数据准备。")
+
+    lines.append(f"将按 {testcase.steps.count()} 个步骤执行，执行结果和截图会自动保存。")
+    return "\n".join(lines)
+
+
 def process_mcp_tool_output(content: Any) -> tuple:
     """
     处理 MCP 工具返回的内容，提取实际数据并生成摘要
@@ -1177,6 +1210,7 @@ class AgentLoopStreamAPIView(View):
 
             # 8.15 用例管理单条执行：自动造数准备前置数据
             pre_data_run_id = None
+            pre_data_run = None
             effective_user_message = user_message
             if test_case_id:
                 from data_generation.testcase_pre_data import run_testcase_pre_data_by_id
@@ -1203,6 +1237,7 @@ class AgentLoopStreamAPIView(View):
                     return
 
                 if pre_data_result.run is not None:
+                    pre_data_run = pre_data_result.run
                     pre_data_run_id = pre_data_result.run.id
                     yield create_sse_data(
                         {
@@ -1263,6 +1298,17 @@ class AgentLoopStreamAPIView(View):
             # 8.2 用例管理「执行」传入的 test_case_id 需明确 ID 命名空间
             if test_case_id:
                 effective_prompt = (effective_prompt or "") + MANUAL_TESTCASE_EXECUTION_HINT
+                internal_execution_context = effective_user_message
+                if llm_attachment_context:
+                    internal_execution_context += (
+                        "\n\n以下是用户附加文件内容，请作为本轮对话上下文使用:"
+                        + llm_attachment_context
+                    )
+                # 完整用例上下文只供 Agent 执行，避免 helper 指令和数据快照出现在聊天记录。
+                effective_prompt += (
+                    "\n\n## 本次用例执行的内部上下文\n"
+                    + internal_execution_context
+                )
                 logger.info(
                     f"AgentLoopStreamAPI: 已追加用例管理执行提示 test_case_id={test_case_id}"
                 )
@@ -1277,8 +1323,13 @@ class AgentLoopStreamAPIView(View):
                 )
 
             streamed_assistant_content = ""
-            user_message_for_llm = effective_user_message
-            if llm_attachment_context:
+            if test_case_id:
+                user_message_for_llm = await sync_to_async(
+                    _build_testcase_execution_display_message
+                )(int(test_case_id), pre_data_run)
+            else:
+                user_message_for_llm = effective_user_message
+            if llm_attachment_context and not test_case_id:
                 user_message_for_llm = user_message + "\n\n以下是用户附加文件内容，请作为本轮对话上下文使用:" + llm_attachment_context
             (
                 human_message_content,
