@@ -735,6 +735,21 @@ export async function sendChatMessageStream(
           if (parsed.type === 'tool_result' && streamSessionId && activeStreams.value[streamSessionId]) {
             // 优先使用 tool_output（完整内容），fallback 到 summary（截断摘要）
             const toolOutput = parsed.tool_output || parsed.content || parsed.summary;
+            // 用例管理的固定 helper 不经过普通 step_start 事件；从其截图/结果
+            // 文件名识别步骤，实时更新用户可见的执行进度。
+            const testcaseStepMatch = String(toolOutput || '').match(
+              /(?:case[_-]\d+_step|步骤\s*)(\d+)/i
+            );
+            if (testcaseStepMatch) {
+              const stream = activeStreams.value[streamSessionId];
+              const stepNumber = Number(testcaseStepMatch[1]);
+              const totalMatch = (stream.userMessage || '').match(/共\s*(\d+)\s*个步骤/);
+              const total = totalMatch ? Number(totalMatch[1]) : stream.maxSteps;
+              stream.currentStep = stepNumber;
+              stream.userMessage = total
+                ? `${(stream.userMessage || '').replace(/\n正在执行步骤 \d+(?:\/\d+)?$/, '')}\n正在执行步骤 ${stepNumber}/${total}`
+                : `${(stream.userMessage || '').replace(/\n正在执行步骤 \d+(?:\/\d+)?$/, '')}\n正在执行步骤 ${stepNumber}`;
+            }
             const toolPayload = parseToolResultDisplayPayload(toolOutput);
             if (toolPayload.content || toolPayload.imageDataUrl) {
               const time = formatStreamTime();
