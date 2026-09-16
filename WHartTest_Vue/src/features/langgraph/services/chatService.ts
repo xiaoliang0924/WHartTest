@@ -750,7 +750,10 @@ export async function sendChatMessageStream(
             const toolOutput = parsed.tool_output || parsed.content || parsed.summary;
             // 用例管理的固定 helper 不经过普通 step_start 事件；从其截图/结果
             // 文件名识别步骤，实时更新用户可见的执行进度。
-            const testcaseStepMatch = String(toolOutput || '').match(
+            const toolOutputText = typeof toolOutput === 'string'
+              ? toolOutput
+              : JSON.stringify(toolOutput || '');
+            const testcaseStepMatch = toolOutputText.match(
               /(?:case[_-]\d+_step|步骤\s*)(\d+)/i
             );
             if (testcaseStepMatch) {
