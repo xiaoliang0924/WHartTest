@@ -626,6 +626,10 @@ export async function sendChatMessageStream(
           const parsed = JSON.parse(jsonData);
 
           if (parsed.type === 'error') {
+            if (parsed.pre_data_status === 'failed' && streamSessionId && activeStreams.value[streamSessionId]) {
+              activeStreams.value[streamSessionId].userMessage = '测试数据准备失败，已中止执行';
+              activeStreams.value[streamSessionId].isComplete = true;
+            }
             handleError(new Error(parsed.message || '流式请求失败'), streamSessionId);
             return;
           }

@@ -501,7 +501,7 @@ const agentStepLabel = computed(() => {
   const maxStepsDisplay = max !== undefined ? max : 500;
   
   if (step !== undefined) {
-    return `${pageText.value.step} ${step}/${maxStepsDisplay}`;
+    return `正在执行步骤 ${step}/${maxStepsDisplay}`;
   }
   return pageText.value.step;
 });
