@@ -541,6 +541,23 @@ def _build_testcase_execution_display_message(testcase_id: int, pre_data_run: An
     return "\n".join(lines)
 
 
+def _get_testcase_step_count(testcase_id: int) -> int:
+    """Return the number of configured steps for a manual testcase."""
+    from testcases.models import TestCase
+
+    testcase = TestCase.objects.filter(id=testcase_id).first()
+    return testcase.steps.count() if testcase else 0
+
+
+def _extract_helper_testcase_progress(content: Any) -> tuple[Optional[int], Optional[int]]:
+    """Extract testcase and step ids from a fixed Playwright helper result."""
+    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    match = re.search(r"case[_-](\d+)_step(\d+)", text, flags=re.IGNORECASE)
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
 def process_mcp_tool_output(content: Any) -> tuple:
     """
     处理 MCP 工具返回的内容，提取实际数据并生成摘要
@@ -1621,19 +1638,23 @@ class AgentLoopStreamAPIView(View):
                                                 )
 
                                                 if test_case_id:
-                                                    helper_text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-                                                    testcase_step_match = re.search(
-                                                        r"(?:case[_-]\d+_step|步骤\s*)(\d+)",
-                                                        helper_text,
-                                                        flags=re.IGNORECASE,
-                                                    )
-                                                    if testcase_step_match:
+                                                    helper_case_id, helper_step = _extract_helper_testcase_progress(content)
+                                                    if helper_step is not None:
+                                                        total_steps = await sync_to_async(
+                                                            _get_testcase_step_count
+                                                        )(helper_case_id or int(test_case_id))
+                                                        progress_text = (
+                                                            f"正在执行步骤 {helper_step}/{total_steps}"
+                                                            if total_steps
+                                                            else f"正在执行步骤 {helper_step}"
+                                                        )
+                                                        content = f"[执行进度] {progress_text}\n{content}"
                                                         yield create_sse_data(
                                                             {
                                                                 "type": "testcase_progress",
                                                                 "session_id": session_id,
                                                                 "test_case_id": int(test_case_id),
-                                                                "step": int(testcase_step_match.group(1)),
+                                                                "step": helper_step,
                                                             }
                                                         )
 
@@ -2576,18 +2597,22 @@ class AgentLoopResumeAPIView(View):
                                                     process_mcp_tool_output(content)
                                                 )
 
-                                                helper_text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-                                                testcase_step_match = re.search(
-                                                    r"(?:case[_-]\d+_step|步骤\s*)(\d+)",
-                                                    helper_text,
-                                                    flags=re.IGNORECASE,
-                                                )
-                                                if testcase_step_match:
+                                                helper_case_id, helper_step = _extract_helper_testcase_progress(content)
+                                                if helper_step is not None:
+                                                    total_steps = await sync_to_async(
+                                                        _get_testcase_step_count
+                                                    )(helper_case_id)
+                                                    progress_text = (
+                                                        f"正在执行步骤 {helper_step}/{total_steps}"
+                                                        if total_steps
+                                                        else f"正在执行步骤 {helper_step}"
+                                                    )
+                                                    content = f"[执行进度] {progress_text}\n{content}"
                                                     yield create_sse_data(
                                                         {
                                                             "type": "testcase_progress",
                                                             "session_id": session_id,
-                                                            "step": int(testcase_step_match.group(1)),
+                                                            "step": helper_step,
                                                         }
                                                     )
 
