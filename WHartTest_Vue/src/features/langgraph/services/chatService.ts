@@ -1414,6 +1414,21 @@ export async function resumeAgentLoop(
             }
           }
 
+          if (parsed.type === 'testcase_progress' && activeStreams.value[sessionId]) {
+            const stream = activeStreams.value[sessionId];
+            const stepNumber = normalizeNumericField(parsed.step);
+            if (stepNumber !== undefined) {
+              const totalMatch = (stream.userMessage || '').match(/共\s*(\d+)\s*个步骤/);
+              const total = totalMatch ? Number(totalMatch[1]) : 4;
+              stream.currentStep = stepNumber;
+              stream.messages.push({
+                content: `正在执行步骤 ${stepNumber}/${total}`,
+                type: 'system',
+                time: formatStreamTime()
+              });
+            }
+          }
+
           // 处理工具结果事件
           if (parsed.type === 'tool_result' && activeStreams.value[sessionId]) {
             // 优先使用 tool_output（完整内容），fallback 到 summary（截断摘要）

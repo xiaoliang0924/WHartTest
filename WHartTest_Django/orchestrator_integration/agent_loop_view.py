@@ -2576,6 +2576,21 @@ class AgentLoopResumeAPIView(View):
                                                     process_mcp_tool_output(content)
                                                 )
 
+                                                helper_text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+                                                testcase_step_match = re.search(
+                                                    r"(?:case[_-]\d+_step|步骤\s*)(\d+)",
+                                                    helper_text,
+                                                    flags=re.IGNORECASE,
+                                                )
+                                                if testcase_step_match:
+                                                    yield create_sse_data(
+                                                        {
+                                                            "type": "testcase_progress",
+                                                            "session_id": session_id,
+                                                            "step": int(testcase_step_match.group(1)),
+                                                        }
+                                                    )
+
                                                 yield create_sse_data(
                                                     {
                                                         "type": "tool_result",
