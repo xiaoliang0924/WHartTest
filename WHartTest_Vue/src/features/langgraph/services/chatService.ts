@@ -702,6 +702,12 @@ export async function sendChatMessageStream(
             }
             if (stepNumber !== undefined) {
               activeStreams.value[streamSessionId].currentStep = stepNumber;
+              const stream = activeStreams.value[streamSessionId];
+              const baseStatus = (stream.userMessage || '').replace(/\n正在执行步骤 \d+\/\d+$/, '');
+              const total = maxSteps !== undefined ? maxSteps : stream.maxSteps;
+              stream.userMessage = total
+                ? `${baseStatus}\n正在执行步骤 ${stepNumber}/${total}`
+                : `${baseStatus}\n正在执行步骤 ${stepNumber}`;
             }
             activeStreams.value[streamSessionId].messages.push({
               content: '',
