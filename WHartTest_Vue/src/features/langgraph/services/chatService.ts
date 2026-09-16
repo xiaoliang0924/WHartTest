@@ -627,8 +627,14 @@ export async function sendChatMessageStream(
 
           if (parsed.type === 'error') {
             if (parsed.pre_data_status === 'failed' && streamSessionId && activeStreams.value[streamSessionId]) {
-              activeStreams.value[streamSessionId].userMessage = '测试数据准备失败，已中止执行';
-              activeStreams.value[streamSessionId].isComplete = true;
+              const stream = activeStreams.value[streamSessionId];
+              stream.userMessage = '测试数据准备失败，已中止执行';
+              stream.messages.push({
+                content: '测试数据准备失败，已中止执行',
+                type: 'system',
+                time: formatStreamTime()
+              });
+              stream.isComplete = true;
             }
             handleError(new Error(parsed.message || '流式请求失败'), streamSessionId);
             return;
@@ -708,6 +714,13 @@ export async function sendChatMessageStream(
               stream.userMessage = total
                 ? `${baseStatus}\n正在执行步骤 ${stepNumber}/${total}`
                 : `${baseStatus}\n正在执行步骤 ${stepNumber}`;
+              stream.messages.push({
+                content: total
+                  ? `正在执行步骤 ${stepNumber}/${total}`
+                  : `正在执行步骤 ${stepNumber}`,
+                type: 'system',
+                time: formatStreamTime()
+              });
             }
             activeStreams.value[streamSessionId].messages.push({
               content: '',
