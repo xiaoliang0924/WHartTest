@@ -79,7 +79,8 @@ def _status_filter_fixture_steps() -> List[Dict[str, Any]]:
                 name=f'创建状态筛选样本：{status_name}',
                 ticket_id_key=ticket_id,
                 ticket_no_key=ticket_no,
-                summary=f'自动化状态筛选-{status_name}-{{{{timestamp}}}}',
+                # 被测环境工单摘要上限 20 字，禁止再拼 timestamp。
+                summary=f'筛{status_name}',
                 ticket_type='TYPE_A',
             )
         )
@@ -175,7 +176,7 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
     {
         'template_key': 'biz_create_type_a',
         'name': '创建待分配工单 TYPE_A',
-        'description': 'POST /api/tickets 创建 TYPE_A 工单（状态 pending_process），写入 ticketId/ticketNo。',
+        'description': 'POST /api/tickets 创建 TYPE_A 工单（后端 pending_assign，列表待分配/待处理未分配池），写入 ticketId/ticketNo。',
         'target_type': 'both',
         'icon': 'file',
         'params_schema': {
@@ -679,6 +680,8 @@ LEGACY_TEMPLATE_KEYS = {
     'create_score_test_ticket_type_a': 'biz_create_type_a',
     'create_ticket_type_a': 'biz_create_type_a',
     'create_ticket_with_delay': 'biz_create_with_delay',
+    # 历史「分配→取消分配」模板；目标环境无法靠该链路得到可领取工单
+    'biz_create_claimable_pending': 'biz_create_type_a',
 }
 
 BUILTIN_TEMPLATES: List[Dict[str, Any]] = (

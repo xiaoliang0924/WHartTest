@@ -1171,6 +1171,7 @@ def get_skill_tools(
                             extract_login_credentials,
                             get_latest_pre_data_ticket_id,
                             get_latest_pre_data_ticket_no,
+                            is_claimable_ticket_detail_case,
                             is_overview_dashboard_case,
                             is_overview_sla_detail_case,
                             is_ticket_detail_boundary_case,
@@ -1193,10 +1194,21 @@ def get_skill_tools(
                             env["WHARTTEST_OVERVIEW_CASE"] = "1"
                         if "通知记录" in blob or "通知中心" in blob:
                             env["WHARTTEST_NOTIFICATION_CASE"] = "1"
-                        if is_ticket_detail_boundary_case(tc):
-                            env["WHARTTEST_TICKET_DETAIL_CASE"] = "1"
-                            ticket_no = get_latest_pre_data_ticket_no(tc)
-                            ticket_id = get_latest_pre_data_ticket_id(tc)
+                        # 详情类和“待处理且未分配→领取”类用例都必须使用本次造数的
+                        # 工单标识；后者此前漏掉了这段注入，导致 helper 无法绑定数据。
+                        if is_ticket_detail_boundary_case(tc) or is_claimable_ticket_detail_case(tc):
+                            if is_ticket_detail_boundary_case(tc):
+                                env["WHARTTEST_TICKET_DETAIL_CASE"] = "1"
+                            if is_claimable_ticket_detail_case(tc):
+                                env["WHARTTEST_CLAIMABLE_PENDING"] = "1"
+                            ticket_no = get_latest_pre_data_ticket_no(
+                                tc,
+                                chat_session_id=current_chat_session_id,
+                            )
+                            ticket_id = get_latest_pre_data_ticket_id(
+                                tc,
+                                chat_session_id=current_chat_session_id,
+                            )
                             if ticket_no:
                                 env["WHARTTEST_TICKET_NO"] = ticket_no
                             if ticket_id:
@@ -1265,6 +1277,57 @@ def get_skill_tools(
                     # session_key 包含 chat_session_id 以隔离不同对话的浏览器会话
                     chat_id_part = current_chat_session_id or "default"
                     session_key = f"{current_user_id}_{current_project_id}_{chat_id_part}_{session_id}"
+                    helper_code = "\n".join(str(item) for item in run_js_args)
+                    if current_test_case_id:
+                        try:
+                            from testcases.models import TestCase as _TC
+
+                            _tc = _TC.objects.filter(id=int(current_test_case_id)).first()
+                            if _tc:
+                                from data_generation.testcase_pre_data import (
+                                    build_testcase_navigation_hint_by_id,
+                                    is_claimable_ticket_detail_case,
+                                    is_ticket_message_send_case,
+                                )
+
+                                if is_claimable_ticket_detail_case(_tc) and not re.search(
+                                    r"runClaimableTicketCaseStep\s*\(\s*page\s*,\s*\d+\s*\)",
+                                    helper_code,
+                                    flags=re.IGNORECASE,
+                                ):
+                                    nav = build_testcase_navigation_hint_by_id(
+                                        int(current_test_case_id)
+                                    )
+                                    return (
+                                        "错误: 本用例为「待处理未分配→领取工单」专用流程，禁止手写筛选/点处理脚本。"
+                                        "每一步必须且只能调用 "
+                                        "`await helpers.runClaimableTicketCaseStep(page, <步骤号>);`。"
+                                        f"{nav}"
+                                    )
+                                if is_ticket_message_send_case(_tc) and re.search(
+                                    r"runTicketDetailCaseStep\s*\(",
+                                    helper_code,
+                                    flags=re.IGNORECASE,
+                                ):
+                                    return (
+                                        "错误: 本用例为「沟通消息发送」流程，禁止调用 "
+                                        "`runTicketDetailCaseStep`（那是沟通区只读边界用例）。"
+                                        "请在可发消息的详情页输入步骤文本并发送，再用 "
+                                        "`assertPageShows` 校验沟通记录出现该文本后截图。"
+                                    )
+                        except Exception as guard_exc:
+                            logger.debug(
+                                "[execute_skill_script] claimable guard skipped: %s",
+                                guard_exc,
+                            )
+                    exec_timeout_seconds = 60
+                    if re.search(
+                        r"runClaimableTicketCaseStep\s*\(\s*page\s*,\s*[34]\s*\)",
+                        helper_code,
+                        flags=re.IGNORECASE,
+                    ):
+                        env["PW_EXEC_TIMEOUT_MS"] = "120000"
+                        exec_timeout_seconds = 150
                     try:
                         manager = _get_playwright_session_manager()
                         output = manager.execute_run_js(
@@ -1272,7 +1335,7 @@ def get_skill_tools(
                             skill_dir=skill_dir,
                             run_js_args=run_js_args,
                             env=env,
-                            timeout_seconds=60,
+                            timeout_seconds=exec_timeout_seconds,
                         )
                         logger.info(
                             f"[execute_skill_script] 持久化会话执行完成, session_key={session_key}"
@@ -1282,6 +1345,26 @@ def get_skill_tools(
                         cleaned_output = _with_failure_reminder(
                             cleaned_output, skill_name=skill_name
                         )
+                        # 固定用例 helper 的每一步都只执行一行
+                        # runClaimableTicketCaseStep(page, N)。在此统一写入进度，
+                        # 让页面无需依赖 helper 内部 console 或额外 SSE 事件也能显示。
+                        progress_match = re.search(
+                            r"runClaimableTicketCaseStep\s*\(\s*page\s*,\s*(\d+)",
+                            helper_code,
+                            flags=re.IGNORECASE,
+                        )
+                        if progress_match and "[执行进度]" not in cleaned_output:
+                            step_number = progress_match.group(1)
+                            total_steps = env.get("WHARTTEST_CASE_STEP_COUNT") or "4"
+                            cleaned_output = (
+                                f"[执行进度] 正在执行步骤 {step_number}/{total_steps}\n"
+                                f"{cleaned_output}"
+                            )
+                        pre_ticket = (env.get("WHARTTEST_TICKET_NO") or "").strip()
+                        if pre_ticket and pre_ticket not in cleaned_output:
+                            cleaned_output = (
+                                f"[PRE_DATA] ticketNo={pre_ticket}\n{cleaned_output}"
+                            )
                         auto_upload_notes = _auto_upload_case_screenshots(
                             cleaned_output,
                             project_id=current_project_id,

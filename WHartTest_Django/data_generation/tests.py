@@ -396,6 +396,11 @@ class IntentRouterStateTests(DjangoTestCase):
         created = [step for step in template['steps'] if step['name'].startswith('创建状态筛选样本')]
         self.assertEqual(len(created), 4)
         self.assertTrue(all(step['variables']['ticketType'] == 'TYPE_A' for step in created))
+        for step in created:
+            summary = step['variables'].get('summary') or ''
+            # 模板字面量或渲染后都不应超过 20（无 timestamp）。
+            self.assertLessEqual(len(str(summary).replace('{{timestamp}}', '123456')), 20)
+            self.assertNotIn('timestamp', str(summary))
 
     def test_unassigned_pending_case_does_not_route_to_assignment_or_resolve(self):
         from data_generation.intent_router import build_input_params, infer_business_template_key
@@ -412,7 +417,8 @@ class IntentRouterStateTests(DjangoTestCase):
         )
         params = build_input_params(case_text, {'input_params': {}, 'steps': []})
         self.assertEqual(params['ticketType'], 'TYPE_A')
-        self.assertEqual(params['summary'], 'TYPE_A待处理未分配测试工单')
+        self.assertEqual(params['summary'], '可领取待处理测试工单')
+        self.assertLessEqual(len(params['summary']), 20)
 
     def test_approval_ticket_uses_approval_processing_template(self):
         from data_generation.intent_router import (
@@ -498,6 +504,32 @@ class TestcasePreDataResolverTests(DjangoTestCase):
         self.assertEqual(resolution.source, 'inferred')
         self.assertEqual(resolution.template_key, 'biz_create_approval_processing')
         self.assertEqual(resolution.input_params.get('ticketType'), 'approval')
+
+    def test_legacy_claimable_plan_migrates_to_type_a_create(self):
+        from data_generation.models import DataGenerationPlan
+        from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
+
+        legacy_plan = DataGenerationPlan.objects.create(
+            project=self.project,
+            name='旧待领取造数',
+            template_key='biz_create_claimable_pending',
+            steps=[
+                {'type': 'api_call', 'name': '创建工单', 'interface_id': 1},
+                {'type': 'api_call', 'name': '分配工单进入待处理', 'interface_id': 2},
+            ],
+            created_by=self.user,
+        )
+        testcase = ManualTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='待处理工单-列表点击处理进入详情页-正常流程',
+            precondition='存在待处理且处理人未分配的工单',
+            pre_data_plan=legacy_plan,
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.template_key, 'biz_create_type_a')
+        self.assertEqual(resolution.source, 'claimable-auto')
 
     def test_module_plan_overrides_inference(self):
         from data_generation.models import DataGenerationPlan

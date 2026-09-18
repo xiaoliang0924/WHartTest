@@ -63,6 +63,12 @@ def _is_ticket_status_filter(text: str) -> bool:
     Status-filter cases need both matching and non-matching records.  They
     cannot be prepared reliably by a single state-transition template.
     """
+    # 沟通/发送/领取类用例常会顺带筛「待处理」，不能整案走四状态造数模板。
+    if any(
+        keyword in (text or '')
+        for keyword in ('沟通记录', '发送消息', '点击发送', '按Enter', '领取成功', '完成领取')
+    ):
+        return False
     lowered = (text or '').lower()
     return (
         '工单状态' in text
@@ -79,9 +85,15 @@ def _needs_unassigned_pending_ticket(text: str) -> bool:
     routing either phrase to an assignment/resolve workflow is incorrect.
     """
     lowered = (text or '').lower()
+    # 明确领单文案，或「待处理+未分配+领取」组合（如详情领取后再发消息）。
+    has_claim_intent = any(
+        keyword in text or keyword in lowered
+        for keyword in ('可领取', '领取工单', 'claim', '完成领取', '领取成功')
+    )
     return (
         ('待处理' in text or 'pending_process' in lowered)
-        and any(keyword in text or keyword in lowered for keyword in ('未分配', '可领取', '领取工单'))
+        and has_claim_intent
+        and ('未分配' in text or '可领取' in text or '领取工单' in text)
     )
 
 
@@ -128,6 +140,7 @@ def infer_business_template_key(description: str) -> Optional[str]:
         return explicit.group(1).lower()
 
     if _needs_unassigned_pending_ticket(text):
+        # 自动造数：创建 TYPE_A；UI 侧在「待处理」筛选 + 专用 helper 点「处理」进领取详情。
         return 'biz_create_type_a'
 
     if _is_ticket_status_filter(text):
@@ -199,9 +212,14 @@ def build_input_params(description: str, llm_payload: Dict[str, Any]) -> Dict[st
 
     if claimable_pending:
         params['ticketType'] = 'TYPE_A'
-        params['summary'] = 'TYPE_A待处理未分配测试工单'
+        params['summary'] = '可领取待处理测试工单'
     elif '待处理' in description and 'summary' not in params:
         params.setdefault('summary', f'{ticket_type}待处理测试工单')
+
+    # 被测环境 summary 上限 20 字（创建工单校验）。
+    summary = params.get('summary')
+    if isinstance(summary, str) and len(summary) > 20:
+        params['summary'] = summary[:20]
 
     return _apply_param_aliases(params)
 

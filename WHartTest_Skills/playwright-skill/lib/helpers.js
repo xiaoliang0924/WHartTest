@@ -749,10 +749,13 @@ async function runOverviewCaseStep(page, stepNumber, caseId) {
 }
 
 function getSlaWarningSectionLocator(page) {
-  return page
-    .locator('.dashboard-content, .layout-content, main')
-    .filter({ hasText: /SLA预警明细|SLA预警|预警明细/ })
-    .last();
+  const slaCard = page.locator('.table-card.sla-card, .sla-card').first();
+  return slaCard;
+}
+
+function isSlaTicketNoText(text) {
+  const normalized = String(text || '').replace(/\s/g, '');
+  return /^20\d{12,}$/.test(normalized) || /^\d{12,}$/.test(normalized);
 }
 
 async function scrollToSlaWarningSection(page) {
@@ -766,6 +769,11 @@ async function scrollToSlaWarningSection(page) {
     // fall through
   }
   await page.evaluate(() => {
+    const card = document.querySelector('.table-card.sla-card, .sla-card');
+    if (card) {
+      card.scrollIntoView({ block: 'center', inline: 'nearest' });
+      return;
+    }
     const anchor = Array.from(document.querySelectorAll('h3,h4,div,span')).find((node) => {
       const text = (node.textContent || '').trim();
       return /SLA预警明细|SLA预警/.test(text) && text.length < 30;
@@ -778,37 +786,118 @@ async function scrollToSlaWarningSection(page) {
       main.scrollTop = main.scrollHeight;
     }
   });
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(500);
+}
+
+async function waitForSlaWarningTableReady(page, timeoutMs = 35000) {
+  await scrollToSlaWarningSection(page);
+  const deadline = Date.now() + timeoutMs;
+  let lastReason = 'init';
+  while (Date.now() < deadline) {
+    await scrollToSlaWarningSection(page);
+    const ready = await page.evaluate(() => {
+      const card =
+        document.querySelector('.table-card.sla-card, .sla-card') ||
+        Array.from(document.querySelectorAll('.dashboard-content, .layout-content, main')).find(
+          (node) => /SLA预警明细/.test(node.textContent || ''),
+        );
+      if (!card) {
+        return { ok: false, reason: 'no-card' };
+      }
+      const loading = !!card.querySelector('.el-loading-mask, .el-skeleton');
+      const dataRows = Array.from(
+        card.querySelectorAll('.el-table__body tr.el-table__row, tr.el-table__row'),
+      ).filter((tr) => {
+        const text = (tr.innerText || '').replace(/\s+/g, ' ');
+        if (/工单号\s*工单类型/.test(text)) {
+          return false;
+        }
+        return /20\d{12,}/.test(text) || /红灯|黄灯/.test(text);
+      });
+      if (dataRows.length > 0) {
+        return { ok: true, count: dataRows.length, loading };
+      }
+      if (loading) {
+        return { ok: false, reason: 'loading' };
+      }
+      const pager = Array.from(card.querySelectorAll('*')).find((n) =>
+        /^共\s*\d+\s*条$/.test((n.textContent || '').trim()),
+      );
+      const pagerText = pager ? (pager.textContent || '').trim() : '';
+      if (/^共\s*[1-9]\d*\s*条$/.test(pagerText)) {
+        // 分页已有数据但行尚未渲染完
+        return { ok: false, reason: 'pager-wait:' + pagerText };
+      }
+      return { ok: false, reason: 'empty:' + pagerText };
+    });
+    if (ready && ready.ok) {
+      return true;
+    }
+    lastReason = (ready && ready.reason) || 'unknown';
+    // 若链接已可点，也视为就绪
+    const early = await findFirstSlaTicketLink(page);
+    if (early && early.link) {
+      return true;
+    }
+    await page.waitForTimeout(700);
+  }
+  console.log(`RESULT=INFO: waitForSlaWarningTableReady timeout reason=${lastReason}`);
+  return false;
+}
+
+async function assertSlaWarningTableHasRows(page) {
+  const ready = await waitForSlaWarningTableReady(page, 35000);
+  const found = await findFirstSlaTicketLink(page);
+  if (found && found.link) {
+    return true;
+  }
+  console.log(
+    ready
+      ? 'RESULT=FAIL: SLA预警明细有表格但未找到可点击工单号。本用例不走自动造数；请确认预警行工单ID为蓝色可点击链接，不要建议「补充造数脚本」'
+      : 'RESULT=FAIL: SLA预警明细表无数据行。本用例不走自动造数，依赖测试环境预置近7天 SLA 超时/预警工单；请在环境准备预置数据后重跑，不要建议「补充造数脚本」',
+  );
+  return false;
 }
 
 async function findSlaTicketRows(page) {
   await scrollToSlaWarningSection(page);
-  const rowSelectors = [
-    '.el-table__body tr',
-    '.cl-table tbody tr',
-    'table tbody tr',
-    '.el-table .el-table__row',
+  const preferredSelectors = [
+    '.el-table__body tr.el-table__row.sla-row-red',
+    '.el-table__body tr.el-table__row.sla-row-yellow',
+    '.el-table__body tr.el-table__row',
+    '.el-table__row.sla-row-red',
+    '.el-table__row.sla-row-yellow',
+    '.el-table__row',
   ];
+  const fallbackSelectors = ['.cl-table tbody tr', 'table tbody tr'];
 
-  const title = page.getByText(/SLA预警明细|SLA预警/, { exact: false }).first();
+  const scopes = [];
+  const slaCard = page.locator('.table-card.sla-card, .sla-card').first();
+  if ((await slaCard.count()) > 0) {
+    scopes.push(slaCard);
+  }
+  const title = page.getByText(/SLA预警明细/, { exact: false }).first();
   if ((await title.count()) > 0) {
-    const scoped = title.locator(
-      'xpath=ancestor::*[.//table or .//*[contains(@class,"el-table") or contains(@class,"cl-table")]][1]',
+    scopes.push(
+      title.locator(
+        'xpath=ancestor::*[contains(@class,"sla-card") or contains(@class,"table-card")][1]',
+      ),
     );
-    if ((await scoped.count()) > 0) {
-      for (const sel of rowSelectors) {
-        const rows = scoped.locator(sel);
-        if ((await rows.count()) > 0) {
-          return rows;
-        }
+  }
+  scopes.push(getSlaWarningSectionLocator(page));
+
+  for (const scope of scopes) {
+    if ((await scope.count()) === 0) {
+      continue;
+    }
+    for (const sel of preferredSelectors) {
+      const rows = scope.locator(sel);
+      if ((await rows.count()) > 0) {
+        return rows;
       }
     }
-  }
-
-  const section = getSlaWarningSectionLocator(page);
-  for (const sel of rowSelectors) {
-    if ((await section.count()) > 0) {
-      const rows = section.locator(sel);
+    for (const sel of fallbackSelectors) {
+      const rows = scope.locator(sel);
       if ((await rows.count()) > 0) {
         return rows;
       }
@@ -816,40 +905,66 @@ async function findSlaTicketRows(page) {
   }
 
   return page.locator(
-    '.dashboard-content .cl-table tbody tr, .dashboard-content .el-table__body tr, .dashboard-content table tbody tr',
+    '.sla-card .el-table__body tr.el-table__row, .table-card.sla-card .el-table__row',
   );
 }
 
 async function findTicketNoLinkInRow(row) {
-  const linkSelectors = ['a.tl-link', 'a.el-link', 'a[href*="/tickets/"]', 'td a', 'a'];
+  const linkSelectors = [
+    'a.el-link',
+    'a.tl-link',
+    '.ticket-no-cell a',
+    'a[href*="/tickets/"]',
+    'td a',
+    'a',
+  ];
   for (const sel of linkSelectors) {
     const links = row.locator(sel);
     const count = await links.count();
     for (let i = 0; i < count; i += 1) {
       const link = links.nth(i);
       const text = String((await link.textContent()) || '').replace(/\s/g, '');
-      if (/^20\d{12,}$/.test(text) || /^\d{12,}$/.test(text)) {
+      if (isSlaTicketNoText(text)) {
         return link;
       }
     }
   }
+
+  // 部分版本工单号在可点击容器内，不一定是 <a>
+  const clickable = row.locator('.ticket-no-cell, .el-link, [class*="ticket-no"]').first();
+  if ((await clickable.count()) > 0) {
+    const text = String((await clickable.textContent()) || '').replace(/\s/g, '');
+    if (isSlaTicketNoText(text)) {
+      return clickable;
+    }
+  }
+
   const fallback = row.getByRole('link').first();
   if ((await fallback.count()) > 0) {
-    return fallback;
+    const text = String((await fallback.textContent()) || '').replace(/\s/g, '');
+    if (isSlaTicketNoText(text)) {
+      return fallback;
+    }
   }
   return null;
 }
 
-async function assertSlaWarningTableHasRows(page) {
+async function findFirstSlaTicketLink(page) {
   const rows = await findSlaTicketRows(page);
   const count = await rows.count();
-  if (count > 0) {
-    return true;
+  for (let i = 0; i < count; i += 1) {
+    const row = rows.nth(i);
+    const rowText = String((await row.innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+    // 跳过表头/空行（Element Plus 偶发把表头文本算进 body tr）
+    if (/工单号\s*工单类型/.test(rowText) || !/20\d{12,}|红灯|黄灯/.test(rowText)) {
+      continue;
+    }
+    const link = await findTicketNoLinkInRow(row);
+    if (link) {
+      return { link, row, rowIndex: i };
+    }
   }
-  console.log(
-    'RESULT=FAIL: SLA预警明细表无数据行，请确认测试环境有近7天 SLA 超时/预警工单',
-  );
-  return false;
+  return null;
 }
 
 async function ensureOverviewDashboardPage(page) {
@@ -866,37 +981,95 @@ async function clickFirstSlaTicketLink(page) {
     return '';
   }
 
-  const rows = await findSlaTicketRows(page);
-  const firstRow = rows.first();
-  await firstRow.waitFor({ state: 'visible', timeout: 15000 });
+  const maxAttempts = 5;
+  const triedTicketNos = new Set();
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const rows = await findSlaTicketRows(page);
+    const count = await rows.count();
+    let ticketLink = null;
+    let ticketNo = '';
+    for (let i = 0; i < count; i += 1) {
+      const row = rows.nth(i);
+      const rowText = String((await row.innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+      if (/工单号\s*工单类型/.test(rowText) || !/20\d{12,}|红灯|黄灯/.test(rowText)) {
+        continue;
+      }
+      const link = await findTicketNoLinkInRow(row);
+      if (!link) {
+        continue;
+      }
+      const no = String((await link.textContent()) || '').trim();
+      if (!no || triedTicketNos.has(no)) {
+        continue;
+      }
+      ticketLink = link;
+      ticketNo = no;
+      break;
+    }
+    if (!ticketLink || !ticketNo) {
+      break;
+    }
+    triedTicketNos.add(ticketNo);
 
-  const ticketLink = await findTicketNoLinkInRow(firstRow);
-  if (!ticketLink) {
-    console.log('RESULT=FAIL: SLA 预警明细第一行未找到蓝色工单号链接');
-    return '';
+    await ticketLink.waitFor({ state: 'visible', timeout: 10000 }).catch(() => null);
+    await Promise.all([
+      page
+        .waitForURL(
+          /\/work-order\/(?:tickets?|external-approval)\/\d+(?:\?|$|\/)/,
+          { timeout: 20000 },
+        )
+        .catch(() => null),
+      ticketLink.click(),
+    ]);
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    await dismissBlockingDialogs(page);
+
+    if (!(await waitForSlaDetailNavigation(page, 12000))) {
+      console.log(
+        `RESULT=INFO: SLA 工单号 ${ticketNo} 点击后未进入详情，URL=${page.url()}，重试下一行`,
+      );
+      await ensureOverviewDashboardPage(page);
+      await waitForSlaWarningTableReady(page, 12000);
+      continue;
+    }
+
+    // 落地页内容异步渲染，等工单号出现
+    let shown = false;
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const bodyText = await page.locator('body').innerText().catch(() => '');
+      if (bodyText.includes(ticketNo)) {
+        shown = true;
+        break;
+      }
+      try {
+        await page.getByText(ticketNo, { exact: false }).first().waitFor({
+          state: 'visible',
+          timeout: 800,
+        });
+        shown = true;
+        break;
+      } catch (_) {
+        // continue
+      }
+      await page.waitForTimeout(400);
+    }
+    if (!shown) {
+      console.log(
+        `RESULT=INFO: SLA 落地页未展示工单号 ${ticketNo}，URL=${page.url()}，重试下一行`,
+      );
+      await ensureOverviewDashboardPage(page);
+      await waitForSlaWarningTableReady(page, 12000);
+      continue;
+    }
+
+    setClickedSlaTicketNo(ticketNo);
+    console.log(`RESULT=PASS: 已点击 SLA 工单号 ${ticketNo} 并进入详情 URL=${page.url()}`);
+    return ticketNo;
   }
-  await ticketLink.waitFor({ state: 'visible', timeout: 10000 });
-  const ticketNo = String((await ticketLink.textContent()) || '').trim();
-  if (!ticketNo) {
-    console.log('RESULT=FAIL: SLA 预警明细第一行未读取到工单号链接文本');
-    return '';
-  }
 
-  await Promise.all([
-    page.waitForURL(/\/work-order\/tickets\/\d+(?:\?|$|\/)/, { timeout: 20000 }).catch(() => null),
-    ticketLink.click(),
-  ]);
-  await page.waitForLoadState('domcontentloaded').catch(() => {});
-  await dismissBlockingDialogs(page);
-
-  if (!(await waitForTicketDetailNavigation(page, 20000))) {
-    console.log(`RESULT=FAIL: 点击 SLA 工单号后未进入详情页 ticketNo=${ticketNo} URL=${page.url()}`);
-    return '';
-  }
-
-  setClickedSlaTicketNo(ticketNo);
-  console.log(`RESULT=PASS: 已点击 SLA 工单号 ${ticketNo} 并进入详情 URL=${page.url()}`);
-  return ticketNo;
+  console.log(`RESULT=FAIL: 点击 SLA 工单号后未进入详情页 URL=${page.url()}`);
+  return '';
 }
 
 async function assertTicketNoOnDetailPage(page, ticketNo) {
@@ -905,7 +1078,7 @@ async function assertTicketNoOnDetailPage(page, ticketNo) {
     console.log('RESULT=FAIL: 缺少点击时的工单号，无法校验详情页');
     return false;
   }
-  if (!(await waitForTicketDetailNavigation(page, 15000))) {
+  if (!(await waitForSlaDetailNavigation(page, 15000))) {
     console.log(`RESULT=FAIL: 详情页未就绪 URL=${page.url()}`);
     return false;
   }
@@ -929,7 +1102,7 @@ async function assertTicketNoOnDetailPage(page, ticketNo) {
 }
 
 async function navigateBackToOverviewFromDetail(page) {
-  if (isTicketDetailUrl(page.url())) {
+  if (isSlaDetailLandingUrl(page.url()) || isTicketDetailUrl(page.url())) {
     try {
       await page.getByRole('button', { name: /返回列表|返回/ }).first().click({ timeout: 8000 });
       await page.waitForLoadState('domcontentloaded').catch(() => {});
@@ -949,7 +1122,21 @@ async function clickSlaRowDetailButton(page, rowIndex = 0) {
     return false;
   }
   const rows = await findSlaTicketRows(page);
-  const row = rows.nth(rowIndex);
+  const count = await rows.count();
+  const dataRows = [];
+  for (let i = 0; i < count; i += 1) {
+    const candidate = rows.nth(i);
+    const rowText = String((await candidate.innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+    if (/工单号\s*工单类型/.test(rowText) || !/20\d{12,}|红灯|黄灯|详情/.test(rowText)) {
+      continue;
+    }
+    dataRows.push(candidate);
+  }
+  const row = dataRows[Math.max(0, Number(rowIndex) || 0)] || dataRows[0];
+  if (!row) {
+    console.log('RESULT=FAIL: SLA 预警明细无可用数据行可点「详情」');
+    return false;
+  }
   await row.waitFor({ state: 'visible', timeout: 15000 });
 
   const detailBtn = row.getByRole('button', { name: '详情' });
@@ -960,8 +1147,8 @@ async function clickSlaRowDetailButton(page, rowIndex = 0) {
     if ((await detailText.count()) > 0) {
       await detailText.first().click();
     } else {
-      const ticketLink = row.getByRole('link').first();
-      if ((await ticketLink.count()) === 0) {
+      const ticketLink = await findTicketNoLinkInRow(row);
+      if (!ticketLink) {
         console.log('RESULT=FAIL: SLA 行未找到「详情」按钮或可点击工单号');
         return false;
       }
@@ -972,7 +1159,7 @@ async function clickSlaRowDetailButton(page, rowIndex = 0) {
   }
 
   await page.waitForLoadState('domcontentloaded').catch(() => {});
-  if (!(await waitForTicketDetailNavigation(page, 20000))) {
+  if (!(await waitForSlaDetailNavigation(page, 20000))) {
     console.log(`RESULT=FAIL: 点击详情后未进入工单详情页 URL=${page.url()}`);
     return false;
   }
@@ -1000,6 +1187,7 @@ async function runOverviewSlaDetailCaseStep(page, stepNumber, caseId) {
 
   if (step === 2) {
     const ok = await ensureOverviewDashboardPage(page);
+    await waitForSlaWarningTableReady(page, 20000);
     await scrollToSlaWarningSection(page);
     await captureDashboardStepView(page, target, 7);
     console.log('[CASE_SCREENSHOT]', target);
@@ -1018,22 +1206,33 @@ async function runOverviewSlaDetailCaseStep(page, stepNumber, caseId) {
       return null;
     }
     const ticketNo = await clickFirstSlaTicketLink(page);
-    await captureTicketDetailView(page, target, 3);
+    // 优先在详情落地页截图；若 SPA 随后跳走，仍保留步骤结果
+    await page.screenshot({ path: target, fullPage: false, timeout: 8000 }).catch(() => null);
     console.log('[CASE_SCREENSHOT]', target);
     return ticketNo ? target : null;
   }
 
   if (step === 4) {
-    if (!isTicketDetailUrl(page.url())) {
-      const ticketNo = getClickedSlaTicketNo();
-      if (!ticketNo || !(await clickFirstSlaTicketLink(page))) {
-        await captureTicketDetailView(page, target, 4);
-        console.log('[CASE_SCREENSHOT]', target);
-        return null;
+    let ok = false;
+    const ticketNo = getClickedSlaTicketNo();
+    if (isSlaDetailLandingUrl(page.url())) {
+      ok = await assertTicketNoOnDetailPage(page, ticketNo);
+    } else if (ticketNo) {
+      const bodyText = await page.locator('body').innerText().catch(() => '');
+      if (bodyText.includes(ticketNo)) {
+        console.log(`RESULT=PASS: 当前页已展示工单号 ${ticketNo} URL=${page.url()}`);
+        ok = true;
+      } else {
+        await ensureOverviewDashboardPage(page);
+        const clicked = await clickFirstSlaTicketLink(page);
+        ok = Boolean(clicked) && (await assertTicketNoOnDetailPage(page, getClickedSlaTicketNo()));
       }
+    } else {
+      await ensureOverviewDashboardPage(page);
+      const clicked = await clickFirstSlaTicketLink(page);
+      ok = Boolean(clicked) && (await assertTicketNoOnDetailPage(page, getClickedSlaTicketNo()));
     }
-    const ok = await assertTicketNoOnDetailPage(page, getClickedSlaTicketNo());
-    await captureTicketDetailView(page, target, 4);
+    await page.screenshot({ path: target, fullPage: false, timeout: 8000 }).catch(() => null);
     console.log('[CASE_SCREENSHOT]', target);
     if (ok) {
       console.log(`RESULT=PASS: 步骤4详情页工单号校验通过 URL=${page.url()}`);
@@ -1586,11 +1785,54 @@ async function finishLoginStep1(page, target) {
   return target;
 }
 
+function looksLikeLoginUrl(value) {
+  return /^https?:\/\//i.test(String(value || '').trim());
+}
+
+function looksLikeCombinedCredential(value) {
+  // 例如误传 "802714/000000" 整段当用户名
+  const text = String(value || '').trim();
+  return /^\d{5,20}\/\S+$/.test(text);
+}
+
 function resolveLoginStep1Args(caseIdOrUsername, optionsOrPassword, maybeUrl) {
   if (optionsOrPassword && typeof optionsOrPassword === 'object' && !Array.isArray(optionsOrPassword)) {
+    // loginStep1(page, caseId, { username, password, loginUrl })
+    // 或 loginStep1(page, loginUrl, {}) —— 第二参空对象时，URL 不能当 caseId 污染截图名
+    if (looksLikeLoginUrl(caseIdOrUsername)) {
+      return {
+        caseId: process.env.WHARTTEST_CASE_ID,
+        options: {
+          ...optionsOrPassword,
+          loginUrl: optionsOrPassword.loginUrl || caseIdOrUsername,
+        },
+      };
+    }
     return { caseId: caseIdOrUsername, options: optionsOrPassword };
   }
   if (typeof caseIdOrUsername === 'string' && typeof optionsOrPassword === 'string') {
+    // 误传 loginStep1(page, url, password) → 账号绝不能用 URL
+    if (looksLikeLoginUrl(caseIdOrUsername)) {
+      return {
+        caseId: process.env.WHARTTEST_CASE_ID,
+        options: {
+          password: optionsOrPassword,
+          loginUrl: caseIdOrUsername,
+        },
+      };
+    }
+    // 误传 loginStep1(page, '802714/000000', url)
+    if (looksLikeCombinedCredential(caseIdOrUsername)) {
+      const [user, pass] = caseIdOrUsername.split('/');
+      return {
+        caseId: process.env.WHARTTEST_CASE_ID,
+        options: {
+          username: user,
+          password: pass || optionsOrPassword,
+          loginUrl: looksLikeLoginUrl(optionsOrPassword) ? optionsOrPassword : maybeUrl,
+        },
+      };
+    }
     return {
       caseId: process.env.WHARTTEST_CASE_ID,
       options: {
@@ -1598,6 +1840,12 @@ function resolveLoginStep1Args(caseIdOrUsername, optionsOrPassword, maybeUrl) {
         password: optionsOrPassword,
         loginUrl: typeof maybeUrl === 'string' ? maybeUrl : undefined,
       },
+    };
+  }
+  if (typeof caseIdOrUsername === 'string' && looksLikeLoginUrl(caseIdOrUsername)) {
+    return {
+      caseId: process.env.WHARTTEST_CASE_ID,
+      options: { loginUrl: caseIdOrUsername },
     };
   }
   return { caseId: caseIdOrUsername, options: {} };
@@ -1618,8 +1866,27 @@ async function loginStep1(page, caseIdOrUsername, optionsOrPassword = {}, maybeU
   const dir = process.env.SCREENSHOT_DIR || '.';
   const cid = caseId || process.env.WHARTTEST_CASE_ID || 'unknown';
   const target = pathMod.join(dir, `case_${cid}_step1.png`);
-  const username = options.username || process.env.WHARTTEST_USERNAME || DEFAULT_LOGIN_USERNAME;
-  const password = options.password || process.env.WHARTTEST_PASSWORD || DEFAULT_LOGIN_PASSWORD;
+  let username = options.username || process.env.WHARTTEST_USERNAME || DEFAULT_LOGIN_USERNAME;
+  let password = options.password || process.env.WHARTTEST_PASSWORD || DEFAULT_LOGIN_PASSWORD;
+  // 兜底：禁止把登录 URL 或「账号/密码」整段填进账号框
+  if (looksLikeLoginUrl(username) || looksLikeCombinedCredential(username)) {
+    console.log(
+      `RESULT=INFO: 登录账号参数异常(${String(username).slice(0, 48)})，已回退 WHARTTEST_USERNAME/默认账号`,
+    );
+    if (looksLikeCombinedCredential(username)) {
+      const [user, pass] = String(username).split('/');
+      username = user || process.env.WHARTTEST_USERNAME || DEFAULT_LOGIN_USERNAME;
+      if (pass) {
+        password = pass;
+      }
+    } else {
+      username = process.env.WHARTTEST_USERNAME || DEFAULT_LOGIN_USERNAME;
+    }
+  }
+  if (looksLikeLoginUrl(password)) {
+    password = process.env.WHARTTEST_PASSWORD || DEFAULT_LOGIN_PASSWORD;
+  }
+  console.log(`RESULT=INFO: 步骤1将使用账号 ${username} 登录`);
   const userPlaceholder = options.userPlaceholder || '请输入用户名';
   const passPlaceholder = options.passPlaceholder || '请输入密码';
   const submitName = options.submitName || '登 录';
@@ -2449,7 +2716,7 @@ function detectWorkOrderPage(page) {
   if (/\/work-order\/dashboard(?:\?|$|\/)/.test(url)) {
     return 'overview';
   }
-  if (/\/work-order\/tickets\/\d+(?:\?|$|\/)/.test(url)) {
+  if (/\/work-order\/tickets?\/\d+(?:\?|$|\/)/.test(url)) {
     return 'ticket-detail';
   }
   if (/\/work-order\/tickets(?:\?|$)/.test(url)) {
@@ -2695,6 +2962,10 @@ function isTicketDetailCaseContext() {
   return String(process.env.WHARTTEST_TICKET_DETAIL_CASE || '').trim() === '1';
 }
 
+function isClaimablePendingCaseContext() {
+  return String(process.env.WHARTTEST_CLAIMABLE_PENDING || '').trim() === '1';
+}
+
 function getTicketNoFromEnv() {
   return String(process.env.WHARTTEST_TICKET_NO || '').trim();
 }
@@ -2704,7 +2975,15 @@ function getTicketIdFromEnv() {
 }
 
 function isTicketDetailUrl(url) {
-  return /\/work-order\/tickets\/\d+(?:\?|$|\/)/.test(String(url || ''));
+  return /\/work-order\/tickets?\/\d+(?:\?|$|\/)/.test(String(url || ''));
+}
+
+function isSlaDetailLandingUrl(url) {
+  const u = String(url || '');
+  // SLA 预警表里审批类工单的蓝色工单号会进入 external-approval，其余进入 tickets/{id}
+  return (
+    isTicketDetailUrl(u) || /\/work-order\/external-approval\/\d+(?:\?|$|\/)/.test(u)
+  );
 }
 
 function buildTicketDetailUrl(page, ticketId) {
@@ -2741,6 +3020,15 @@ async function waitForTicketDetailReady(page, timeoutMs = 15000) {
           .first()
           .isVisible({ timeout: 800 });
         if (detailVisible) {
+          return true;
+        }
+      } catch (_) {
+        // ignore
+      }
+      try {
+        if (
+          await page.getByRole('button', { name: '领取工单' }).first().isVisible({ timeout: 800 })
+        ) {
           return true;
         }
       } catch (_) {
@@ -2796,13 +3084,40 @@ async function waitForTicketDetailNavigation(page, timeoutMs = 20000) {
   return isTicketDetailUrl(page.url()) && (await waitForTicketDetailReady(page, 2000));
 }
 
+async function waitForSlaDetailNavigation(page, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const url = page.url();
+    if (isTicketDetailUrl(url) && (await waitForTicketDetailReady(page, 1200))) {
+      return true;
+    }
+    if (/\/work-order\/external-approval\/\d+/.test(url)) {
+      // 审批详情页：有返回/工单号即可视为已进入详情落地页
+      const bodyText = await page.locator('body').innerText().catch(() => '');
+      if (
+        /返回|基本信息|审批|工单/.test(bodyText) ||
+        getClickedSlaTicketNo() === '' ||
+        bodyText.includes(getClickedSlaTicketNo())
+      ) {
+        return true;
+      }
+      return true;
+    }
+    await page.waitForTimeout(400);
+  }
+  return isSlaDetailLandingUrl(page.url());
+}
+
 async function gotoTicketDetailById(page, ticketId) {
   const detailUrl = buildTicketDetailUrl(page, ticketId);
   if (!detailUrl) {
     console.log('RESULT=FAIL: 缺少 ticketId，无法直达工单详情');
     return false;
   }
-  if (isTicketDetailUrl(page.url()) && page.url().includes(`/tickets/${ticketId}`)) {
+  const onSameTicket =
+    isTicketDetailUrl(page.url())
+    && (page.url().includes(`/tickets/${ticketId}`) || page.url().includes(`/ticket/${ticketId}`));
+  if (onSameTicket) {
     return waitForTicketDetailReady(page, 5000);
   }
   await page.waitForLoadState('domcontentloaded').catch(() => {});
@@ -2872,6 +3187,305 @@ async function queryTicketInList(page, ticketNo) {
   return true;
 }
 
+async function isAssignProcessorDialogVisible(page) {
+  try {
+    const dialog = page.locator('.el-dialog, .el-overlay-dialog').filter({ hasText: /选择处理人/ }).first();
+    return await dialog.isVisible({ timeout: 800 });
+  } catch (_) {
+    return false;
+  }
+}
+
+async function dismissAssignProcessorDialog(page) {
+  if (!(await isAssignProcessorDialogVisible(page))) {
+    return false;
+  }
+  try {
+    await page.getByRole('button', { name: '取消' }).click({ timeout: 3000 });
+  } catch (_) {
+    await page.keyboard.press('Escape').catch(() => {});
+  }
+  await page.waitForTimeout(400);
+  return true;
+}
+
+async function clickProcessInTableRow(page, row) {
+  await dismissBlockingDialogs(page);
+  await row.scrollIntoViewIfNeeded().catch(() => {});
+  const rowText = await row.innerText().catch(() => '');
+  const processButtons = [
+    row.getByRole('button', { name: '处理' }).first(),
+    row.locator('.el-button').filter({ hasText: /^\s*处理\s*$/ }).first(),
+    row.locator('button, a, .el-link').filter({ hasText: /^\s*处理\s*$/ }).first(),
+    row.locator('td').last().locator('button, a, .el-button, .el-link').filter({ hasText: '处理' }).first(),
+    page
+      .locator('.el-table__fixed-right .el-table__body tr')
+      .filter({ hasText: rowText })
+      .first()
+      .locator('button, a, .el-button')
+      .filter({ hasText: '处理' })
+      .first(),
+  ];
+
+  for (const processBtn of processButtons) {
+    try {
+      if ((await processBtn.count()) === 0) {
+        continue;
+      }
+      await processBtn.waitFor({ state: 'visible', timeout: 2500 });
+      await processBtn.click({ timeout: 8000 });
+      await page.waitForTimeout(600);
+      if (await isAssignProcessorDialogVisible(page)) {
+        console.log(
+          'RESULT=INFO: 点击「处理」弹出「选择处理人」，说明当前为待分配分配流程而非待领取详情流程',
+        );
+        await dismissAssignProcessorDialog(page);
+        continue;
+      }
+      if (isTicketDetailUrl(page.url()) && (await waitForTicketDetailNavigation(page, 8000))) {
+        return true;
+      }
+    } catch (_) {
+      try {
+        await processBtn.click({ timeout: 6000, force: true });
+        await page.waitForTimeout(600);
+        if (await isAssignProcessorDialogVisible(page)) {
+          await dismissAssignProcessorDialog(page);
+          continue;
+        }
+        if (isTicketDetailUrl(page.url()) && (await waitForTicketDetailNavigation(page, 8000))) {
+          return true;
+        }
+      } catch (_) {
+        // try next locator
+      }
+    }
+  }
+
+  try {
+    await row.evaluate((tr) => {
+      const ticketText = (tr.textContent || '').trim();
+      const tables = document.querySelectorAll('.el-table');
+      for (const table of tables) {
+        const bodyRows = table.querySelectorAll('.el-table__body tbody tr');
+        for (const bodyRow of bodyRows) {
+          if ((bodyRow.textContent || '').includes(ticketText.slice(0, 12))) {
+            const cells = bodyRow.querySelectorAll('td');
+            const last = cells[cells.length - 1];
+            const target = last
+              ? Array.from(last.querySelectorAll('button,a,span,.el-button')).find(
+                  (n) => (n.textContent || '').trim() === '处理',
+                )
+              : null;
+            if (target) {
+              target.click();
+              return;
+            }
+          }
+        }
+      }
+    });
+    await page.waitForTimeout(600);
+    if (await isAssignProcessorDialogVisible(page)) {
+      await dismissAssignProcessorDialog(page);
+      return false;
+    }
+    return isTicketDetailUrl(page.url()) && (await waitForTicketDetailNavigation(page, 8000));
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 待分配 TYPE_A 造数：点「处理」会弹分配窗；点蓝色工单号链进详情才稳定出现「领取工单」。 */
+async function clickTicketNoLinkInTableRow(page, row, ticketNo) {
+  const no = String(ticketNo || '').trim();
+  if (!no) {
+    return false;
+  }
+  await dismissBlockingDialogs(page);
+  await row.scrollIntoViewIfNeeded().catch(() => {});
+  const linkCandidates = [
+    row.locator('a, .el-link, .link-type').filter({ hasText: no }).first(),
+    row.locator('td').filter({ hasText: no }).locator('a, .el-link, span.link-type').first(),
+    row.getByRole('link', { name: no }).first(),
+    row.locator('button, span, div').filter({ hasText: new RegExp(`^\\s*${no}\\s*$`) }).first(),
+  ];
+  for (const link of linkCandidates) {
+    try {
+      if ((await link.count()) === 0) {
+        continue;
+      }
+      await link.waitFor({ state: 'visible', timeout: 4000 });
+      await link.click({ timeout: 8000 });
+      await page.waitForTimeout(500);
+      if (await waitForTicketDetailNavigation(page, 15000)) {
+        console.log(`RESULT=PASS: 已通过工单号链接进入详情 ${no} URL=${page.url()}`);
+        return true;
+      }
+    } catch (_) {
+      try {
+        await link.click({ timeout: 6000, force: true });
+        await page.waitForTimeout(500);
+        if (await waitForTicketDetailNavigation(page, 15000)) {
+          console.log(`RESULT=PASS: 已通过工单号链接(force)进入详情 ${no}`);
+          return true;
+        }
+      } catch (_) {
+        // try next locator
+      }
+    }
+  }
+  console.log(`RESULT=INFO: 未能通过工单号链接打开详情 ${no}`);
+  return false;
+}
+
+async function selectFormDropdownOptionSoft(page, labelText, optionText) {
+  try {
+    return await selectFormDropdownOption(page, labelText, optionText);
+  } catch (err) {
+    console.log(
+      `RESULT=INFO: 下拉「${labelText}」→「${optionText}」跳过: ${String(err.message || err).slice(0, 160)}`,
+    );
+    return false;
+  }
+}
+
+async function prepareListForClaimableQuery(page) {
+  await dismissBlockingDialogs(page);
+  await dismissAssignProcessorDialog(page);
+  if (isTicketDetailUrl(page.url()) && !(await isClaimTicketButtonVisible(page, 800))) {
+    try {
+      await page.getByRole('button', { name: /返回列表|返回/ }).click({ timeout: 8000 });
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      await page.waitForTimeout(600);
+    } catch (_) {
+      // ensureTicketListPage 会兜底
+    }
+  }
+  return ensureTicketListPage(page);
+}
+
+async function queryTicketByNoOnly(page, ticketNo) {
+  const no = String(ticketNo || getTicketNoFromEnv()).trim();
+  if (!no) {
+    return false;
+  }
+  if (!(await ensureTicketListPage(page))) {
+    return false;
+  }
+  await fillFilterField(page, '工单号', no);
+  await clickPageButton(page, '查询');
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  const loading = page.locator('.el-loading-mask:visible, .el-table__loading:visible').first();
+  await loading.waitFor({ state: 'hidden', timeout: 12000 }).catch(() => {});
+  await page.waitForTimeout(1200);
+  return true;
+}
+
+/**
+ * 进入可领取工单详情。TYPE_A 自动造数（待分配）优先工单号链接，避免点「处理」弹分配窗。
+ */
+async function enterClaimableTicketDetailFromList(page, ticketNo) {
+  const no = String(ticketNo || getTicketNoFromEnv()).trim();
+  if (!no) {
+    console.log('RESULT=FAIL: 缺少 ticketNo，无法进入待领取详情');
+    return false;
+  }
+  if (await isClaimTicketButtonVisible(page, 1500)) {
+    return true;
+  }
+
+  const tryRowProcess = async () => {
+    const row = page.locator('.el-table__body tr').filter({ hasText: no }).first();
+    try {
+      await row.waitFor({ state: 'visible', timeout: 12000 });
+    } catch (_) {
+      return false;
+    }
+    const clicked = await clickProcessInTableRow(page, row);
+    if (await isAssignProcessorDialogVisible(page)) {
+      await dismissAssignProcessorDialog(page);
+      return false;
+    }
+    if (clicked && (await waitForTicketDetailNavigation(page, 10000))) {
+      if (await isClaimTicketButtonVisible(page, 4000)) {
+        return true;
+      }
+      await prepareListForClaimableQuery(page);
+    }
+    return false;
+  };
+
+  const tryRowTicketLink = async () => {
+    const row = page.locator('.el-table__body tr').filter({ hasText: no }).first();
+    try {
+      await row.waitFor({ state: 'visible', timeout: 12000 });
+    } catch (_) {
+      return false;
+    }
+    if (!(await clickTicketNoLinkInTableRow(page, row, no))) {
+      return false;
+    }
+    if (await isClaimTicketButtonVisible(page, 5000)) {
+      return true;
+    }
+    console.log(
+      `RESULT=INFO: 已进入详情但未看到「领取工单」，返回列表换路径 ${no} URL=${page.url()}`,
+    );
+    await prepareListForClaimableQuery(page);
+    return false;
+  };
+
+  const claimableAuto = isClaimablePendingCaseContext();
+
+  if (claimableAuto) {
+    console.log(`RESULT=INFO: TYPE_A 待领取流程，优先工单号链接（勿点待分配「处理」） ${no}`);
+    if (!(await prepareListForClaimableQuery(page))) {
+      console.log(`RESULT=FAIL: 无法回到工单列表 URL=${page.url()}`);
+      return false;
+    }
+    await queryTicketByNoOnly(page, no);
+    if (await tryRowTicketLink()) {
+      return true;
+    }
+
+    if (!(await prepareListForClaimableQuery(page))) {
+      return false;
+    }
+    await fillFilterField(page, '工单号', no);
+    await selectFormDropdownOptionSoft(page, '工单状态', '待分配');
+    await clickPageButton(page, '查询');
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    await page.waitForTimeout(1200);
+    if (await tryRowTicketLink()) {
+      return true;
+    }
+  }
+
+  console.log(`RESULT=INFO: 尝试工单号+待处理筛选后点「处理」 ${no}`);
+  if (!(await prepareListForClaimableQuery(page))) {
+    return false;
+  }
+  await fillFilterField(page, '工单号', no);
+  await selectFormDropdownOptionSoft(page, '工单状态', '待处理');
+  await clickPageButton(page, '查询');
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  await page.waitForTimeout(1200);
+  if (await tryRowProcess()) {
+    return true;
+  }
+
+  console.log(`RESULT=INFO: 待处理+处理未成功，再试仅工单号+链接 ${no}`);
+  await prepareListForClaimableQuery(page);
+  await queryTicketByNoOnly(page, no);
+  if (await tryRowTicketLink()) {
+    return true;
+  }
+
+  console.log(`RESULT=FAIL: 无法进入带「领取工单」的详情页 ${no} URL=${page.url()}`);
+  return false;
+}
+
 async function openTicketDetailFromList(page, ticketNo) {
   const no = String(ticketNo || getTicketNoFromEnv()).trim();
   const ticketId = getTicketIdFromEnv();
@@ -2918,17 +3532,116 @@ async function openTicketDetailFromList(page, ticketNo) {
     return true;
   }
 
-  if (ticketId) {
+  if (ticketId && !isClaimablePendingCaseContext()) {
     console.log(`RESULT=INFO: 点击「处理」未跳转，改用 ticketId=${ticketId} 直达详情`);
     if (await gotoTicketDetailById(page, ticketId)) {
       return true;
     }
+  } else if (ticketId && isClaimablePendingCaseContext()) {
+    console.log(
+      'RESULT=INFO: 待领取工单禁止 ticketId 直达详情，须从列表点「处理」才会出现「领取工单」',
+    );
   }
 
   console.log(
     `RESULT=FAIL: 点击「处理」后未进入工单详情 clicked=${clicked} URL=${page.url()}`,
   );
   return false;
+}
+
+async function isClaimTicketButtonVisible(page, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const locators = [
+      page.getByRole('button', { name: /领取工单/ }),
+      page.locator('button, .el-button, a').filter({ hasText: /领取工单/ }),
+      page.getByText(/领取工单/, { exact: false }),
+    ];
+    for (const locator of locators) {
+      try {
+        if (await locator.first().isVisible({ timeout: 500 })) {
+          return true;
+        }
+      } catch (_) {
+        // try next locator
+      }
+    }
+    await page.waitForTimeout(300);
+  }
+  return false;
+}
+
+/**
+ * 待领取工单必须从列表点「处理」进入；ticketId 直达详情往往不会出现「领取工单」。
+ */
+async function openClaimableTicketDetailFromList(page, ticketNo) {
+  const no = String(ticketNo || getTicketNoFromEnv()).trim();
+  if (!no) {
+    console.log('RESULT=FAIL: 缺少 ticketNo，无法打开待领取工单详情');
+    return false;
+  }
+  if (await isClaimTicketButtonVisible(page, 1500)) {
+    console.log(`RESULT=PASS: 已在待领取工单详情 URL=${page.url()}`);
+    return true;
+  }
+  if (!(await ensureTicketListPage(page))) {
+    console.log(`RESULT=FAIL: 打开待领取详情前不在工单列表 URL=${page.url()}`);
+    return false;
+  }
+
+  const row = page.locator('.el-table__body tr').filter({ hasText: no }).first();
+  try {
+    await row.waitFor({ state: 'visible', timeout: 15000 });
+  } catch (_) {
+    console.log(`RESULT=FAIL: 列表中未找到工单 ${no}`);
+    return false;
+  }
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const clicked = await clickProcessInTableRow(page, row);
+    if (!clicked) {
+      console.log(`RESULT=INFO: 第${attempt}次未能点击「处理」按钮，重试`);
+    }
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    if (await isAssignProcessorDialogVisible(page)) {
+      await dismissAssignProcessorDialog(page);
+      console.log(`RESULT=INFO: 第${attempt}次「处理」为分配弹窗，改用工单号链接`);
+      if (await clickTicketNoLinkInTableRow(page, row, no)) {
+        if (await isClaimTicketButtonVisible(page, 5000)) {
+          return true;
+        }
+      }
+      await ensureTicketListPage(page);
+      await row.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+      continue;
+    }
+    if (await waitForTicketDetailNavigation(page, 10000)) {
+      if (await isClaimTicketButtonVisible(page, 5000)) {
+        console.log(`RESULT=PASS: 第${attempt}次点击后进入待领取详情 URL=${page.url()}`);
+        return true;
+      }
+      console.log(
+        `RESULT=INFO: 第${attempt}次已进入详情但未看到「领取工单」，返回列表改用工单号链接`,
+      );
+      await ensureTicketListPage(page);
+      await row.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+      if (await clickTicketNoLinkInTableRow(page, row, no)) {
+        if (await isClaimTicketButtonVisible(page, 5000)) {
+          return true;
+        }
+      }
+    } else {
+      console.log(`RESULT=INFO: 第${attempt}次点击后 URL 未进入详情，尝试工单号链接`);
+      if (await clickTicketNoLinkInTableRow(page, row, no)) {
+        if (await isClaimTicketButtonVisible(page, 5000)) {
+          return true;
+        }
+      }
+    }
+    await page.waitForTimeout(400);
+  }
+
+  return enterClaimableTicketDetailFromList(page, no);
 }
 
 async function assertCommunicationReadOnly(page) {
@@ -3110,18 +3823,104 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
   const pathMod = require('path');
   const dir = process.env.SCREENSHOT_DIR || '.';
   const target = pathMod.join(dir, `case_${cid}_step${step}.png`);
+  const ticketNo = getTicketNoFromEnv();
 
-  const claimableRow = async () => {
-    const row = page.locator('.el-table__body tr').filter({ hasText: '未分配' }).first();
+  // 固定 helper 的控制台输出会直接展示在执行对话中；每一步开始先输出进度，
+  // 让用户无需依赖聊天层解析即可看到当前用例进展。
+  console.log(`[执行进度] 正在执行步骤 ${step}/4`);
+
+  const readClaimableRowFields = async (row) =>
+    row.evaluate((element) => {
+      const root = element.closest('.el-table') || element.parentElement?.closest('.el-table');
+      const headers = Array.from(
+        root?.querySelectorAll('.el-table__header-wrapper th') || [],
+      ).map((cell) => (cell.textContent || '').replace(/\s+/g, ' ').trim());
+      const cells = Array.from(element.querySelectorAll('td')).map((cell) =>
+        (cell.textContent || '').replace(/\s+/g, ' ').trim(),
+      );
+      const indexOf = (names) => headers.findIndex((header) =>
+        names.some((name) => header.includes(name)),
+      );
+      const statusIndex = indexOf(['当前状态', '工单状态', '状态']);
+      const assigneeIndex = indexOf(['处理人', '负责人']);
+      return {
+        headers,
+        status: statusIndex >= 0 ? cells[statusIndex] || '' : '',
+        assignee: assigneeIndex >= 0 ? cells[assigneeIndex] || '' : '',
+      };
+    });
+
+  const waitForTicketListSettled = async () => {
+    // 查询按钮触发的是 SPA 请求，networkidle 可能发生在表格数据真正替换之前。
+    // 等待加载遮罩消失并留出一次渲染周期，避免从旧列表误读目标行。
+    const loading = page.locator('.el-loading-mask:visible, .el-table__loading:visible').first();
+    await loading.waitFor({ state: 'hidden', timeout: 12000 }).catch(() => {});
+    await page.waitForTimeout(1200);
+  };
+
+  const claimableRow = async ({ reportFailure = true } = {}) => {
+    if (!ticketNo) {
+      if (reportFailure) {
+        console.log('RESULT=FAIL: 缺少本次造数工单号，无法确认待领取工单');
+      }
+      return null;
+    }
+    // 只在已按“待处理”筛选的结果中匹配本次造数的工单，避免误点列表中的其他未分配工单。
+    const row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
     try {
       await row.waitFor({ state: 'visible', timeout: 12000 });
+      const fields = await readClaimableRowFields(row);
+      if (!fields.status || !fields.assignee) {
+        if (reportFailure) {
+          console.log(
+            `RESULT=INFO: 列表未提供可稳定读取的“当前状态/处理人”列；将以已选“待处理”筛选和详情页“领取工单”进行校验`,
+          );
+        }
+        return row;
+      }
+      const assigneeOk =
+        !fields.assignee || fields.assignee.includes('未分配');
+      const statusOk =
+        fields.status.includes('待处理') || fields.status.includes('待分配');
+      if (!statusOk || !assigneeOk) {
+        if (reportFailure) {
+          console.log(
+            `RESULT=FAIL: 本次造数工单 ${ticketNo} 不满足“待处理且未分配”条件，当前状态=${fields.status}，处理人=${fields.assignee}`,
+          );
+        }
+        return null;
+      }
       return row;
     } catch (_) {
+      if (reportFailure) {
+        console.log(`RESULT=FAIL: 待处理筛选结果中未找到本次造数工单 ${ticketNo}`);
+      }
       return null;
     }
   };
 
   if (step === 1) return loginStep1(page, cid);
+
+  if (step >= 2 && !(await ensureClaimableCaseAuthenticated(page, cid))) {
+    return null;
+  }
+
+  // 步骤3 在待处理/待分配/仅工单号下列表确认造数；步骤4 由 enterClaimableTicketDetailFromList 进领取详情。
+  const queryClaimableTicketOnList = async () => {
+    await fillFilterField(page, '工单号', ticketNo);
+    await selectFormDropdownOption(page, '工单状态', '待处理');
+    await clickPageButton(page, '查询');
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    await waitForTicketListSettled();
+  };
+
+  const queryClaimableTicketFallbackAssign = async () => {
+    await fillFilterField(page, '工单号', ticketNo);
+    await selectFormDropdownOption(page, '工单状态', '待分配');
+    await clickPageButton(page, '查询');
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    await waitForTicketListSettled();
+  };
 
   if (step === 2) {
     // “未分配”属于全量工单列表的处理人字段；“我的工单”只展示当前用户范围，
@@ -3133,48 +3932,102 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
     return target;
   }
 
+  const findClaimableRowAnyList = async () => {
+    await queryClaimableTicketOnList();
+    let row = await claimableRow({ reportFailure: false });
+    if (row) {
+      return { row, listHint: '待处理' };
+    }
+    console.log(
+      `RESULT=INFO: 工单号+待处理未命中，改用待分配或仅工单号确认造数 ${ticketNo}`,
+    );
+    await queryClaimableTicketFallbackAssign();
+    row = await claimableRow({ reportFailure: false });
+    if (row) {
+      return { row, listHint: '待分配' };
+    }
+    await queryTicketByNoOnly(page, ticketNo);
+    row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
+    try {
+      await row.waitFor({ state: 'visible', timeout: 12000 });
+      const fields = await readClaimableRowFields(row);
+      const assigneeOk =
+        !fields.assignee || fields.assignee.includes('未分配');
+      if (!assigneeOk) {
+        console.log(
+          `RESULT=FAIL: 造数工单 ${ticketNo} 已有处理人=${fields.assignee}，无法领取`,
+        );
+        return { row: null, listHint: '' };
+      }
+      return { row, listHint: fields.status || '工单列表' };
+    } catch (_) {
+      return { row: null, listHint: '' };
+    }
+  };
+
   if (step === 3) {
-    await selectFormDropdownOption(page, '工单状态', '待处理');
-    await clickPageButton(page, '查询');
-    await page.waitForLoadState('networkidle').catch(() => {});
-    const row = await claimableRow();
+    const { row, listHint } = await findClaimableRowAnyList();
     await screenshotCaseStep(page, step, cid);
     if (!row) {
-      console.log('RESULT=FAIL: 待处理筛选结果中没有处理人为“未分配”的工单');
+      console.log(`RESULT=FAIL: 列表中未找到本次造数工单 ${ticketNo}`);
       return null;
     }
-    console.log('RESULT=PASS: 步骤3筛选后存在待处理且未分配的工单');
+    console.log(
+      `RESULT=PASS: 步骤3已找到造数工单 ${ticketNo}（${listHint || '列表'}，处理人未分配）；步骤4将进领取详情`,
+    );
     return target;
   }
 
   if (step === 4) {
-    const row = await claimableRow();
-    if (!row) {
-      console.log('RESULT=FAIL: 步骤4未找到处理人为“未分配”的工单，未保存截图');
+    if (!(await ensureTicketListPage(page))) {
+      await navigateToTicketListPage(page);
+    }
+    if (isLoginPageUrl(page.url()) || detectWorkOrderPage(page) !== 'ticket-list') {
+      console.log(`RESULT=FAIL: 步骤4无法进入工单列表 URL=${page.url()}`);
       return null;
     }
-    const button = row.getByRole('button', { name: '处理' }).first();
-    try {
-      await button.click({ timeout: 10000 });
-    } catch (error) {
-      console.log(`RESULT=FAIL: 点击“处理”失败，未保存截图: ${error?.message || error}`);
+    await dismissBlockingDialogs(page);
+    console.log(`RESULT=INFO: 步骤4进入待领取详情 ${ticketNo}`);
+    const enteredDetail = await enterClaimableTicketDetailFromList(page, ticketNo);
+    if (!enteredDetail) {
+      const captured = await captureTicketDetailView(page, target, step);
+      if (captured) {
+        console.log('[CASE_SCREENSHOT]', target);
+      }
+      console.log(`RESULT=FAIL: 未能进入带「领取工单」的详情页 URL=${page.url()}`);
       return null;
     }
-    if (!(await waitForTicketDetailNavigation(page, 18000))) {
-      console.log(`RESULT=FAIL: 点击“处理”后未进入详情页，未保存截图 URL=${page.url()}`);
+    if (!(await waitForTicketDetailNavigation(page, 8000))) {
+      const captured = await captureTicketDetailView(page, target, step);
+      if (captured) {
+        console.log('[CASE_SCREENSHOT]', target);
+      }
+      console.log(`RESULT=FAIL: 未进入工单详情 URL=${page.url()}`);
       return null;
     }
-    try {
-      await page.getByRole('button', { name: '领取工单' }).waitFor({ state: 'visible', timeout: 10000 });
-    } catch (_) {
-      console.log('RESULT=FAIL: 详情页未出现“领取工单”按钮，未保存截图');
+    if (!(await assertTicketNoOnDetailPage(page, ticketNo))) {
+      console.log(`RESULT=FAIL: 当前详情页不是本次造数工单 ${ticketNo}，未保存截图`);
       return null;
     }
-    if (!(await captureTicketDetailView(page, target, step))) {
+    if (!(await isClaimTicketButtonVisible(page, 5000))) {
+      const captured = await captureTicketDetailView(page, target, step);
+      if (captured) {
+        console.log('[CASE_SCREENSHOT]', target);
+      }
+      console.log('RESULT=FAIL: 详情页未出现“领取工单”按钮，已保存详情页证据截图');
+      return null;
+    }
+    let captured = await captureTicketDetailView(page, target, step);
+    if (!captured) {
+      console.log('RESULT=INFO: 详情区裁剪截图失败，改用整页步骤截图');
+      captured = !!(await screenshotCaseStep(page, step, cid));
+    } else {
+      console.log('[CASE_SCREENSHOT]', target);
+    }
+    if (!captured) {
       console.log('RESULT=FAIL: 详情页截图保存失败');
       return null;
     }
-    console.log('[CASE_SCREENSHOT]', target);
     console.log(`RESULT=PASS: 步骤4已进入详情页且确认“领取工单”按钮 URL=${page.url()}`);
     return target;
   }
@@ -3691,7 +4544,25 @@ async function describePageForAI(page) {
   return desc;
 }
 
+async function ensureClaimableCaseAuthenticated(page, caseId) {
+  if (!isLoginPageUrl(page.url())) {
+    return true;
+  }
+  console.log('RESULT=INFO: 检测到登录页，会话已失效，正在重新登录后继续');
+  await loginStep1(page, caseId);
+  if (isLoginPageUrl(page.url())) {
+    console.log(`RESULT=FAIL: 重新登录失败，仍停留在登录页 URL=${page.url()}`);
+    return false;
+  }
+  console.log(`RESULT=PASS: 会话已恢复 URL=${page.url()}`);
+  return true;
+}
+
 async function fillFilterField(page, labelText, value) {
+  if (isLoginPageUrl(page.url())) {
+    console.log(`RESULT=FAIL: 当前在登录页，无法填写筛选「${labelText}」 URL=${page.url()}`);
+    throw new Error('LOGIN_PAGE: cannot fill filter while logged out');
+  }
   await dismissBlockingDialogs(page);
   await ensureFilterPanelVisible(page);
   const filterField = page

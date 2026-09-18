@@ -78,7 +78,7 @@
             <a-tag :color="stepStatusColor(step.status)">{{ stepStatusLabel(step.status) }}</a-tag>
           </template>
         </a-table>
-        <a-empty v-else :description="isRunning ? text.waitingSteps : text.noSteps" />
+        <a-empty v-else :description="isRunning ? text.waitingSteps : isPreDataBlocked ? text.preDataNoSteps : text.noSteps" />
       </a-card>
 
       <a-card v-if="screenshots.length > 0" :title="text.screenshots" size="small" class="block">
@@ -126,6 +126,7 @@ const props = defineProps<{
   projectId: number | null;
   testCase: TestCase | null;
   sessionId?: string | null;
+  preparing?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -163,6 +164,9 @@ const text = computed(() => (
         stepResults: 'Step Results',
         waitingSteps: 'Waiting for execution results...',
         noSteps: 'No structured step results',
+        preDataNoSteps: 'Prerequisite data failed; no test steps ran',
+        preparing: 'Preparing test data',
+        preDataFailed: 'Prerequisite data failed',
         screenshots: 'Screenshots',
         openChat: 'Open in LLM Chat',
         openChatCurrentPage: 'Open on this page',
@@ -194,6 +198,9 @@ const text = computed(() => (
         stepResults: '步骤结果',
         waitingSteps: '等待执行结果...',
         noSteps: '暂无结构化步骤结果',
+        preDataNoSteps: '前置数据准备失败，尚未执行任何测试步骤',
+        preparing: '正在准备前置数据',
+        preDataFailed: '前置数据准备失败',
         screenshots: '执行截图',
         openChat: '在 LLM 对话中查看',
         openChatCurrentPage: '当前页打开',
@@ -213,7 +220,8 @@ const text = computed(() => (
       }
 ));
 
-const isRunning = computed(() => record.value?.status === 'running');
+const isRunning = computed(() => record.value?.status === 'running' || (props.preparing && !record.value));
+const isPreDataBlocked = computed(() => record.value?.summary?.startsWith('测试数据准备失败') || false);
 
 const dataUsageMessage = computed(() => record.value?.data_usage?.message || '');
 const dataUsageAlertType = computed(() => {
@@ -224,6 +232,7 @@ const dataUsageAlertType = computed(() => {
 });
 
 const resolveSessionId = (): string | null => {
+  if (props.preparing) return props.sessionId?.trim() || null;
   const candidates = [
     props.sessionId,
     record.value?.session_id,
@@ -247,6 +256,8 @@ const failReasonText = computed(() => {
 });
 
 const statusLabel = computed(() => {
+  if (isPreDataBlocked.value) return text.value.preDataFailed;
+  if (props.preparing && !record.value) return text.value.preparing;
   const status = record.value?.status;
   if (!status) return text.value.unknown;
   const map: Record<string, string> = {
@@ -260,6 +271,8 @@ const statusLabel = computed(() => {
 });
 
 const statusColor = computed(() => {
+  if (isPreDataBlocked.value) return 'orangered';
+  if (props.preparing && !record.value) return 'arcoblue';
   const status = record.value?.status;
   return ({ running: 'arcoblue', pass: 'green', fail: 'red', error: 'orangered', stopped: 'gray' } as Record<string, string>)[status || ''] || 'gray';
 });
@@ -322,6 +335,7 @@ const loadScreenshots = async () => {
 
 const refreshRecord = async () => {
   if (!props.projectId || !props.testCase) return;
+  if (props.preparing && !props.sessionId) return;
   loading.value = true;
   try {
     const preferredSessionId = resolveSessionId() || undefined;
@@ -330,7 +344,7 @@ const refreshRecord = async () => {
       props.testCase.id,
       preferredSessionId,
     );
-    if (!response.success && preferredSessionId) {
+    if (!response.success && preferredSessionId && !props.preparing) {
       response = await getLatestTestCaseRunRecord(
         props.projectId,
         props.testCase.id,
@@ -343,7 +357,7 @@ const refreshRecord = async () => {
         emit('finished');
       }
     }
-    await loadScreenshots();
+    if (!props.preparing || record.value?.status !== 'running') await loadScreenshots();
   } finally {
     loading.value = false;
   }
@@ -361,16 +375,19 @@ const startPolling = () => {
 };
 
 watch(
-  () => [props.visible, props.projectId, props.testCase?.id, props.sessionId] as const,
+  () => [props.visible, props.projectId, props.testCase?.id, props.sessionId, props.preparing] as const,
   async ([visible, , testCaseId]) => {
     if (!visible) {
       stopPolling();
       return;
     }
     streamError.value = '';
-    const shouldResetRecord = !record.value || record.value.testcase !== testCaseId;
+    const shouldResetRecord = props.preparing
+      ? !props.sessionId || record.value?.session_id !== props.sessionId
+      : !record.value || record.value.testcase !== testCaseId;
     if (shouldResetRecord) {
-      record.value = props.testCase?.latest_run || null;
+      record.value = props.preparing ? null : props.testCase?.latest_run || null;
+      if (props.preparing) screenshots.value = [];
     }
     await refreshRecord();
     if (isRunning.value) {

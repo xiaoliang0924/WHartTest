@@ -53,6 +53,9 @@ interface StreamState {
   contextLimit?: number; // 上下文Token限制
   currentStep?: number;  // Agent Loop 当前步骤
   maxSteps?: number;     // Agent Loop 最大步骤数
+  testcaseStep?: number; // 手工测试用例当前步骤
+  testcaseTotal?: number;
+  testcaseStartedAt?: number;
   userMessage?: string;  // 用户发送的消息内容
   userMessageTime?: string;  // 用户消息时间（会话创建时间）
   taskId?: number;       // Agent Task ID
@@ -642,6 +645,23 @@ export async function sendChatMessageStream(
 
           if (parsed.type === 'pre_data_start' && parsed.session_id) {
             streamSessionId = parsed.session_id;
+            // 前置造数可能在正常的 start 事件之前失败。此时先建立流状态，
+            // 才能把失败原因显示在当前会话，而不是留下一个永久加载的空白页面。
+            if (!activeStreams.value[streamSessionId]) {
+              activeStreams.value[streamSessionId] = {
+                content: '',
+                isComplete: false,
+                messages: [],
+                contextTokenCount: 0,
+                contextLimit: 128000,
+                currentStep: 0,
+                maxSteps: 0,
+                testcaseStep: 0,
+                testcaseStartedAt: Date.now(),
+                userMessage: data.message,
+                userMessageTime: formatStreamTime()
+              };
+            }
             invokeOnStart(parsed.session_id);
           }
 
@@ -663,6 +683,9 @@ export async function sendChatMessageStream(
                 contextLimit: contextLimit,
                 currentStep: 0,
                 maxSteps: initialMaxSteps,
+                testcaseStep: 0,
+                testcaseTotal: Number((typeof parsed.display_message === 'string' && parsed.display_message.match(/共\s*(\d+)\s*个步骤/))?.[1]) || undefined,
+                testcaseStartedAt: Date.now(),
                 userMessage: typeof parsed.display_message === 'string' && parsed.display_message.trim()
                   ? parsed.display_message
                   : data.message, // 优先使用后端规范化后的展示文本
@@ -752,6 +775,8 @@ export async function sendChatMessageStream(
               const total = totalMatch ? Number(totalMatch[1]) : 4;
               const status = `正在执行步骤 ${stepNumber}/${total}`;
               stream.currentStep = stepNumber;
+              stream.testcaseStep = stepNumber;
+              stream.testcaseTotal = total;
               stream.messages.push({ content: status, type: 'system', time: formatStreamTime() });
             }
           }
@@ -761,8 +786,32 @@ export async function sendChatMessageStream(
             // 优先使用 tool_output（完整内容），fallback 到 summary（截断摘要）
             const toolOutput = parsed.tool_output || parsed.content || parsed.summary;
             const toolPayload = parseToolResultDisplayPayload(toolOutput);
+            // 固定 Playwright helper 会在每个步骤完成后写入
+            // case_<用例ID>_step<步骤号>.png。这个标记已经用于截图上传，
+            // 因此直接以它更新用例进度，避免进度显示依赖后端额外 SSE 事件。
+            const rawToolOutput = typeof toolOutput === 'string'
+              ? toolOutput
+              : JSON.stringify(toolOutput || '');
+            const testcaseStepMatch = rawToolOutput.match(/case_(\d+)_step(\d+)\.png/i);
+            if (testcaseStepMatch) {
+              const stream = activeStreams.value[streamSessionId];
+              const stepNumber = Number(testcaseStepMatch[2]);
+              const totalMatch = (stream.userMessage || '').match(/共\s*(\d+)\s*个步骤/);
+              const total = totalMatch ? Number(totalMatch[1]) : 4;
+              const status = `正在执行步骤 ${stepNumber}/${total}`;
+              stream.currentStep = stepNumber;
+              stream.testcaseStep = stepNumber;
+              stream.testcaseTotal = total;
+              const previous = stream.messages[stream.messages.length - 1];
+              if (!previous || previous.type !== 'system' || previous.content !== status) {
+                stream.messages.push({ content: status, type: 'system', time: formatStreamTime() });
+              }
+            }
             if (toolPayload.content || toolPayload.imageDataUrl) {
               const time = formatStreamTime();
+              const displayContent = toolPayload.content
+                .replace(/^\[执行进度\][^\n]*\n?/m, '')
+                .trim();
               // 如果当前有AI流式内容,先将其固化为独立消息
               if (activeStreams.value[streamSessionId].content && activeStreams.value[streamSessionId].content.trim()) {
                 activeStreams.value[streamSessionId].messages.push({
@@ -774,7 +823,7 @@ export async function sendChatMessageStream(
                 activeStreams.value[streamSessionId].content = '';
               }
               activeStreams.value[streamSessionId].messages.push({
-                content: toolPayload.content || '[工具返回了图片]',
+                content: displayContent || '[工具返回了图片]',
                 type: 'tool',
                 time: time,
                 toolName: typeof parsed.tool_name === 'string' ? parsed.tool_name : undefined,

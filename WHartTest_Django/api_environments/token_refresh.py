@@ -184,8 +184,9 @@ def refresh_environment_tokens(
         username, password = credentials
         cache_key = (username, password)
         if cache_key not in login_cache:
+            token: Optional[str] = None
             try:
-                login_cache[cache_key] = _login_for_token(
+                token = _login_for_token(
                     base_url,
                     username,
                     password,
@@ -202,7 +203,41 @@ def refresh_environment_tokens(
                     username,
                     exc,
                 )
-                continue
+                # admin/admin123 常失效；工单测试环境可用 wecom 账号刷新 accessToken/adminToken
+                if group.get('token_vars') == ('accessToken', 'adminToken'):
+                    fallback_user = _first_present(
+                        merged,
+                        ('wecomUserId', 'noCommonUsername', 'assigneeUsername'),
+                    )
+                    fallback_pass = _first_present(
+                        merged,
+                        ('noCommonPassword', 'assigneePassword'),
+                    ) or group.get('default_password')
+                    if fallback_user and fallback_pass:
+                        fb_key = (fallback_user, str(fallback_pass))
+                        if fb_key not in login_cache:
+                            try:
+                                login_cache[fb_key] = _login_for_token(
+                                    base_url,
+                                    fallback_user,
+                                    str(fallback_pass),
+                                    verify_ssl=verify_ssl,
+                                )
+                                logger.info(
+                                    'Refreshed auth token via fallback username=%s (group=%s)',
+                                    fallback_user,
+                                    ','.join(group.get('token_vars', ())),
+                                )
+                            except Exception as fb_exc:
+                                logger.warning(
+                                    'Fallback auth token refresh failed for username=%s: %s',
+                                    fallback_user,
+                                    fb_exc,
+                                )
+                        token = login_cache.get(fb_key)
+                if not token:
+                    continue
+            login_cache[cache_key] = token
 
         token = login_cache[cache_key]
         for token_var in group.get('token_vars', ()):

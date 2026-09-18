@@ -16,6 +16,7 @@ from .exceptions import DataGenerationError
 INTERFACE_REF_HINTS: Dict[str, tuple[str, ...]] = {
     'create_ticket': ('创建工单', 'create ticket', '/tickets'),
     'assign_ticket': ('分配工单', 'assign'),
+    'unassign_ticket': ('取消分配工单', 'unassign'),
     'transfer_ticket': ('转派工单', 'transfer'),
     'claim_ticket': ('领取工单', 'claim'),
     'resolve_ticket': ('完成工单', 'resolve', 'close'),

@@ -114,6 +114,7 @@
       :project-id="currentProjectId"
       :test-case="executionResultTestCase"
       :session-id="executionSessionId"
+      :preparing="executionPreparing"
       ref="executionResultDrawerRef"
       @finished="handleExecutionFinished"
     />
@@ -357,6 +358,7 @@ const isExecuteModalVisible = ref(false);
 const isExecutionResultDrawerVisible = ref(false);
 const executionResultTestCase = ref<TestCase | null>(null);
 const executionSessionId = ref<string | null>(null);
+const executionPreparing = ref(false);
 const executionResultDrawerRef = ref<InstanceType<typeof TestCaseExecutionResultDrawer> | null>(null);
 const isOptimizationModalVisible = ref(false);
 const pendingExecuteTestCase = ref<TestCase | null>(null);
@@ -381,30 +383,38 @@ const extractExecutionFailReason = (summary?: string) => {
   return text.slice(0, 180) || (isEnglish.value ? 'The case did not pass.' : '用例未通过，请查看执行结果。');
 };
 
-const notifyExecutionOutcome = async (caseId: number, sessionId: string) => {
-  if (!currentProjectId.value) {
-    Message.info(isEnglish.value ? 'Execution finished. See result drawer.' : '用例执行已结束，请查看右侧执行结果。');
-    return;
-  }
-
-  let status = '';
-  let summary = '';
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const response = await getLatestTestCaseRunRecord(currentProjectId.value, caseId, sessionId);
-    if (response.success && response.data?.status && response.data.status !== 'running') {
-      status = response.data.status;
-      summary = response.data.summary || '';
-      break;
+const notifyExecutionOutcome = async (
+  caseId: number,
+  sessionId: string,
+  payload?: Record<string, unknown>,
+) => {
+  const eventRun = payload?.test_case_run;
+  const eventResult = eventRun && typeof eventRun === 'object'
+    ? eventRun as Record<string, unknown>
+    : null;
+  let status = typeof eventResult?.status === 'string' ? eventResult.status : '';
+  let summary = typeof eventResult?.summary === 'string' ? eventResult.summary : '';
+  if (currentProjectId.value && !status) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await getLatestTestCaseRunRecord(currentProjectId.value, caseId, sessionId);
+      if (response.success && response.data?.status && response.data.status !== 'running') {
+        status = response.data.status;
+        summary = response.data.summary || '';
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 800));
     }
-    await new Promise((resolve) => setTimeout(resolve, 800));
   }
 
   if (status === 'fail' || status === 'error') {
+    const preDataFailed = summary.startsWith('测试数据准备失败');
     Notification.error({
-      title: isEnglish.value ? 'Case execution failed' : '用例执行失败',
+      title: preDataFailed
+        ? (isEnglish.value ? 'Test data preparation failed' : '测试数据准备失败，未执行用例步骤')
+        : (isEnglish.value ? 'Case execution failed' : '用例执行失败'),
       content: extractExecutionFailReason(summary),
       duration: 12000,
-      id: `exec-case-fail-${sessionId}`,
+      id: `exec-case-fail-${caseId}`,
     });
     return;
   }
@@ -550,7 +560,7 @@ const startAutomationTask = (
   footerLinkText: string,
   streamHooks?: {
     onStarted?: (sessionId: string) => void;
-    onComplete?: (sessionId: string) => void;
+    onComplete?: (sessionId: string, payload?: Record<string, unknown>) => void;
     onError?: (sessionId: string, message: string) => void;
   }
 ) => {
@@ -583,8 +593,8 @@ const startAutomationTask = (
     },
     undefined,
     {
-      onComplete: (sessionId) => {
-        streamHooks?.onComplete?.(sessionId);
+      onComplete: (sessionId, payload) => {
+        streamHooks?.onComplete?.(sessionId, payload);
       },
       onError: (sessionId, message) => {
         streamHooks?.onError?.(sessionId, message);
@@ -967,8 +977,10 @@ const handleExecuteConfirm = async (options: { generatePlaywrightScript: boolean
 
   executionResultTestCase.value = testCase;
   executionSessionId.value = null;
+  executionPreparing.value = true;
   isExecutionResultDrawerVisible.value = true;
 
+  Notification.remove(`exec-case-fail-${testCase.id}`);
   showExecCaseStartedNotification(notificationContent);
 
   startAutomationTask(
@@ -988,13 +1000,17 @@ const handleExecuteConfirm = async (options: { generatePlaywrightScript: boolean
           projectId: currentProjectId.value,
         });
       },
-      onComplete: async (sessionId) => {
+      onComplete: async (sessionId, payload) => {
         executionSessionId.value = sessionId;
         await executionResultDrawerRef.value?.markCompleted();
-        await notifyExecutionOutcome(testCase.id, sessionId);
+        executionPreparing.value = false;
+        Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
+        await notifyExecutionOutcome(testCase.id, sessionId, payload);
       },
       onError: (sessionId, message) => {
         executionSessionId.value = sessionId;
+        executionPreparing.value = false;
+        Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
         executionResultDrawerRef.value?.setStreamError(message);
       },
     }
@@ -1004,6 +1020,7 @@ const handleExecuteConfirm = async (options: { generatePlaywrightScript: boolean
 };
 
 const handleViewExecutionReport = async (testCase: TestCase) => {
+  executionPreparing.value = false;
   executionResultTestCase.value = testCase;
   executionSessionId.value = testCase.latest_run?.session_id || null;
 

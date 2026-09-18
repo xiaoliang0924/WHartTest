@@ -44,7 +44,9 @@ export function parseExecutionReportStatus(content: string): 'pass' | 'fail' | n
 
 /** 从用例管理「执行」用户消息中解析用例 ID */
 export function parseTestCaseIdFromExecuteMessage(text: string): number | null {
-  const match = (text || '').match(/执行ID为\s*(\d+)/);
+  const match = (text || '').match(
+    /(?:执行\s*ID\s*为|测试用例\s*(?:ID|id)\s*[：:=])\s*(\d+)/
+  );
   if (!match) return null;
   const id = parseInt(match[1], 10);
   return Number.isFinite(id) ? id : null;

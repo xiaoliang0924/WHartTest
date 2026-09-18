@@ -278,6 +278,7 @@ COPY ui_automation/ /app/ui_automation/
 COPY weixin_integration/ /app/weixin_integration/
 COPY testcase_templates/ /app/testcase_templates/
 COPY testcases/ /app/testcases/
+COPY scripts/ /app/scripts/
 COPY wharttest_django/ /app/wharttest_django/
 
 # 清理不必要的文件

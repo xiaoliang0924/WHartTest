@@ -21,31 +21,61 @@ from data_generation.template_resolver import resolve_template_steps
 PROJECT_ID = 1
 ENV_TEST = 4
 
-TEMPLATE_BINDINGS = {
-    'default_environment_id': ENV_TEST,
-    'interfaces': {
-        'create_ticket': 445,
-        'assign_ticket': 484,
-        'transfer_ticket': 491,
-        'claim_ticket': 490,
-        'resolve_ticket': 520,
-        'update_subject': 479,
-        'ticket_detail': 509,
-    },
-    'database_configs': {
-        'default': 1,
-    },
-    'functions': {
-        'default': 12,
-    },
-}
+TEMPLATE_BINDINGS: dict = {}
+
+
+def _apply_env_config() -> None:
+    """Read project / API env / admin login from environment (override in compose)."""
+    global PROJECT_ID, ENV_TEST, TEMPLATE_BINDINGS
+    PROJECT_ID = int(os.environ.get("WHARTTEST_TICKET_PROJECT_ID", "1"))
+    ENV_TEST = int(os.environ.get("WHARTTEST_TICKET_API_ENV_ID", "4"))
+    TEMPLATE_BINDINGS = {
+        'default_environment_id': ENV_TEST,
+        'interfaces': {
+            'create_ticket': 445,
+            'assign_ticket': 484,
+            'unassign_ticket': 483,
+            'transfer_ticket': 491,
+            'claim_ticket': 490,
+            'resolve_ticket': 520,
+            'update_subject': 479,
+            'ticket_detail': 509,
+        },
+        'database_configs': {
+            'default': 1,
+        },
+        'functions': {
+            'default': 12,
+        },
+    }
+
+
+_apply_env_config()
 
 # 旧版自动创建的模板计划，与内置 biz_* 重复，停用以免快速造数列表混乱
 LEGACY_TEMPLATE_PLAN_KEYS = set(LEGACY_TEMPLATE_KEYS.keys()) | {
     "create_ticket_type_a",
     "create_ticket_with_delay",
     "create_score_test_ticket_type_a",
+    "biz_create_claimable_pending",
 }
+
+
+def _fix_test_environment_admin_credentials() -> None:
+    """创建工单等接口使用 accessToken；admin/admin123 在测试环境已不可用。"""
+    from api_environments.models import ApiEnvironmentVariable
+
+    updates = {
+        "adminUsername": os.environ.get("WHARTTEST_API_ADMIN_USERNAME", "18275072446"),
+        "adminPassword": os.environ.get("WHARTTEST_API_ADMIN_PASSWORD", "000000"),
+    }
+    for name, value in updates.items():
+        ApiEnvironmentVariable.objects.update_or_create(
+            environment_id=ENV_TEST,
+            name=name,
+            defaults={"value": value, "type": "string", "is_sensitive": True},
+        )
+    print(f"Updated env {ENV_TEST} admin credentials for API token refresh")
 
 
 def _update_create_ticket_interface() -> None:
@@ -257,6 +287,10 @@ def _sync_step_test_template_plans() -> None:
 
 
 def main() -> None:
+    _apply_env_config()
+    print("=== Fix test environment API login credentials ===")
+    _fix_test_environment_admin_credentials()
+
     print("=== Sync business template interfaces ===")
     _update_create_ticket_interface()
     _update_update_subject_interface()

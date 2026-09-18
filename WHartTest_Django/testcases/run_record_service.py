@@ -45,6 +45,8 @@ _STEP_RE = re.compile(r"(?:步骤|step)\s*(\d+)", re.IGNORECASE)
 _CASE_STEP_RE = re.compile(r"case_\d+_step(\d+)", re.IGNORECASE)
 _DATA_USE_ACTION_RE = re.compile(
     r"fillFilterField|clickRowAction|queryTicketInList|runTicketDetailCaseStep|"
+    r"runClaimableTicketCaseStep|WHARTTEST_TICKET_NO|\[PRE_DATA\]\s*ticketNo=|"
+    r"enterClaimableTicketDetailFromList|ticketId\s*直达|已通过 ticketId 进入工单详情|"
     r"工单号.*(?:查询|筛选)|(?:查询|筛选).*工单号|定位.*工单",
     re.IGNORECASE,
 )
@@ -62,7 +64,12 @@ def has_execution_result_report(text: str) -> bool:
     return is_filled_execution_result_report(text)
 
 
-def build_pre_data_usage(data_run, assistant_transcript: str) -> dict[str, Any]:
+def build_pre_data_usage(
+    data_run,
+    assistant_transcript: str,
+    *,
+    execution_transcript: str = "",
+) -> dict[str, Any]:
     """Build auditable evidence that generated data was actually used by the agent.
 
     The human prompt contains the generated snapshot, so it must never be used as
@@ -86,7 +93,9 @@ def build_pre_data_usage(data_run, assistant_transcript: str) -> dict[str, Any]:
             "identifiers": {},
         }
 
-    text = assistant_transcript or ""
+    text = "\n".join(
+        part for part in (assistant_transcript or "", execution_transcript or "") if part
+    )
     matched = [(key, value) for key, value in identifiers.items() if value in text]
     if not matched:
         return {
@@ -527,6 +536,66 @@ def ensure_execution_result_report(
     }
 
 
+def _append_missing_message_note(summary: str, missing_texts: list[str]) -> str:
+    if not missing_texts:
+        return summary
+    joined = "、".join(f"「{t}」" for t in missing_texts)
+    note = (
+        f"\n\n### 消息内容校验\n"
+        f"- 执行日志未出现用例要求发送的文本 {joined}。"
+        f"通常表示未真正发送消息，或误用了沟通区只读 helper；"
+        f"对话中的「通过」不可信。\n"
+    )
+    if "测试执行结果: 通过" in summary or "测试执行结果：通过" in summary:
+        summary = re.sub(
+            r"测试执行结果[:：]\s*通过",
+            "测试执行结果: 不通过",
+            summary,
+            count=1,
+        )
+    return (summary + note).strip()
+
+
+def list_missing_step_screenshots(testcase: TestCase) -> list[int]:
+    """Steps that have no uploaded screenshot on the testcase detail page."""
+    step_count = testcase.steps.count()
+    if step_count <= 0:
+        return []
+    from testcases.models import TestCaseScreenshot
+
+    present = set(
+        TestCaseScreenshot.objects.filter(test_case_id=testcase.id).values_list(
+            "step_number", flat=True
+        )
+    )
+    return [n for n in range(1, step_count + 1) if n not in present]
+
+
+def _append_screenshot_gap_note(summary: str, missing_steps: list[int]) -> str:
+    if not missing_steps:
+        return summary
+    labels = "、".join(f"步骤{n}" for n in missing_steps)
+    note = (
+        f"\n\n### 截图校验\n"
+        f"- 用例详情缺少 {labels} 的自动上传截图。"
+        f"通常表示该步未执行 `runClaimableTicketCaseStep` / 未产生 `[CASE_SCREENSHOT]`，"
+        f"对话中的「通过」不可信，请重新逐步执行。\n"
+    )
+    if "测试执行结果: 通过" in summary or "测试执行结果：通过" in summary:
+        summary = re.sub(
+            r"测试执行结果[:：]\s*通过",
+            "测试执行结果: 不通过",
+            summary,
+            count=1,
+        )
+        summary = summary.replace(
+            "本次测试执行全部",
+            "缺少步骤截图，本次测试执行未完整取证，",
+            1,
+        )
+    return (summary + note).strip()
+
+
 def _cleanup_testcase_screenshots(testcase_id: int) -> None:
     """Delete previous screenshots so each run starts with a clean set."""
     try:
@@ -603,6 +672,22 @@ def start_testcase_run_record(
     return record
 
 
+def block_testcase_run_record(*, session_id: str, reason: str) -> Optional[TestCaseRunRecord]:
+    """Record a prerequisite failure without attributing it to a test step."""
+    try:
+        record = TestCaseRunRecord.objects.get(session_id=session_id)
+    except TestCaseRunRecord.DoesNotExist:
+        return None
+
+    record.status = "error"
+    record.summary = f"测试数据准备失败，已中止执行。\n失败原因：{reason}\n尚未执行任何测试步骤。"
+    record.step_results = []
+    record.execution_log = record.summary
+    record.completed_at = timezone.now()
+    record.save(update_fields=["status", "summary", "step_results", "execution_log", "completed_at"])
+    return record
+
+
 def finalize_testcase_run_record(
     *,
     session_id: str,
@@ -633,12 +718,76 @@ def finalize_testcase_run_record(
         stopped=stopped,
         error_message=error_message,
     )
+    missing_shots = list_missing_step_screenshots(record.testcase)
+    if missing_shots and outcome.get("status") == "pass":
+        outcome["status"] = "fail"
+        outcome["summary"] = _append_screenshot_gap_note(
+            outcome.get("summary") or "",
+            missing_shots,
+        )
+
+    try:
+        from data_generation.testcase_pre_data import (
+            extract_expected_send_message_texts,
+            is_ticket_message_send_case,
+        )
+
+        if is_ticket_message_send_case(record.testcase) and outcome.get("status") == "pass":
+            expected_msgs = extract_expected_send_message_texts(record.testcase)
+            missing_msgs: list[str] = []
+            used_wrong_helper = bool(
+                re.search(r"runTicketDetailCaseStep\s*\(", combined, flags=re.IGNORECASE)
+            )
+            for text in expected_msgs:
+                asserted = bool(
+                    re.search(
+                        rf"assertPageShows\s*\([^)]*{re.escape(text)}",
+                        combined,
+                        flags=re.IGNORECASE,
+                    )
+                ) or bool(
+                    re.search(
+                        rf"RESULT=PASS:[^\n]*{re.escape(text)}",
+                        combined,
+                        flags=re.IGNORECASE,
+                    )
+                )
+                if not asserted:
+                    missing_msgs.append(text)
+            # 步骤结果写成「进详情」而未写出发送内容，也视为虚报通过。
+            for item in outcome.get("step_results") or []:
+                if not isinstance(item, dict):
+                    continue
+                desc = str(item.get("description") or "")
+                actual = str(item.get("actual_result") or "")
+                if "发送" not in desc or item.get("status") != "pass":
+                    continue
+                if any(token in actual for token in ("进入工单详情", "沟通区检查", "只读")):
+                    for text in expected_msgs:
+                        if text not in actual and text not in missing_msgs:
+                            missing_msgs.append(text)
+            if used_wrong_helper or missing_msgs:
+                outcome["status"] = "fail"
+                note_msgs = missing_msgs or expected_msgs[:1] or ["步骤要求的发送文本"]
+                if used_wrong_helper:
+                    note_msgs = list(note_msgs) + ["(误用 runTicketDetailCaseStep)"]
+                outcome["summary"] = _append_missing_message_note(
+                    outcome.get("summary") or "",
+                    note_msgs,
+                )
+    except Exception as exc:
+        logger.debug("message send content check skipped: %s", exc)
+
     record.status = outcome["status"]
     record.summary = extract_first_execution_report(outcome["summary"])[:8000]
     record.step_results = outcome["step_results"]
     record.execution_log = (combined or error_message or "")[:8000]
     record.injected_report = outcome["injected"]
-    record.data_usage = build_pre_data_usage(record.data_generation_run, assistant_text)
+    record.data_usage = build_pre_data_usage(
+        record.data_generation_run,
+        assistant_text,
+        execution_transcript=combined,
+    )
 
     record.completed_at = timezone.now()
     record.save(

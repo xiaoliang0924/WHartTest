@@ -95,9 +95,24 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
 3. **禁止 `#el-id-*`**：Element Plus 动态 ID 每次刷新都变。用 `getByRole('button', { name: '...' })`、`getByPlaceholder(...)`、`getByText(...)`。
 4. **容器内必须无头**：不要 `headless: false`。
 5. **产品不符合预期不要杀进程**：断言失败时 `console.log('RESULT=FAIL: ...')` + 截图上传，禁止 `throw` / `process.exit(1)`。通过则 `RESULT=PASS`。定位超时才允许脚本失败。
-6. **步骤1登录**：该步只调用 `await helpers.loginStep1(page);`（已含步骤1截图，禁止再调用 `screenshotCaseStep(page, 1)`）。只有 stdout 出现 `RESULT=PASS` 才算成功；出现 `RESULT=FAIL` 必须停止。步骤 N 截图：`await helpers.screenshotCaseStep(page, N);`。禁止手写路径、禁止 Python 风格 goto/fill/click。
+6. **步骤1登录**：该步只调用 `await helpers.loginStep1(page);`（已含步骤1截图，禁止再调用 `screenshotCaseStep(page, 1)`）。**禁止**把登录 URL、`802714/000000` 整段、或密码作为 `loginStep1` 的位置参数传入（账号密码已由环境变量注入）。只有 stdout 出现 `RESULT=PASS` 才算成功；出现 `RESULT=FAIL` 必须停止。步骤 N 截图：`await helpers.screenshotCaseStep(page, N);`。禁止手写路径、禁止 Python 风格 goto/fill/click。
 7. **下拉筛选**：`selectFormDropdownOption(page, 字段标签, 选项)`。禁止 `getByText('某状态').click()`。
 8. **菜单页不要走错**：步骤写哪个菜单就进哪个页。优先用 `navigateByMenu(page, 菜单名)`；明确知道目标路由时才传唯一 URL 片段，禁止传 `/work-order` 这类父级公共前缀。
+"""
+
+CLAIMABLE_PENDING_EXECUTION_HINT = """
+
+## 【待处理未分配→领取工单 — 强制专用 helper】
+
+当用例含「待处理、未分配、领取工单、列表点处理进详情」时：
+
+1. **每一步只允许一行脚本**：`await helpers.runClaimableTicketCaseStep(page, <步骤号>);`
+2. **禁止**手写 `fillFilterField` / `selectFormDropdownOption` / `clickRowAction` / `getByRole('button', { name: '处理' })` 等组合去筛状态或点「处理」。
+3. **禁止**因 TYPE_A 造数工单只在「待分配」列表就判用例不适用或步骤3/4失败；helper 已兼容：待分配时用工单号链接进详情并校验「领取工单」。
+4. **禁止** `ticketId` / URL 直达详情（不会出现「领取工单」）。
+5. 步骤4 只有 stdout 出现 `RESULT=PASS` 且含「领取工单」才算通过；`RESULT=FAIL` 必须停止，禁止改报通过。
+6. **截图纪律**：步骤 1～N 每一步都必须单独执行 `runClaimableTicketCaseStep` 一次；工具输出须含 `[CASE_SCREENSHOT]` 且用例详情已出现「步骤N」截图。缺任一步截图 **不得** 在报告中写通过。
+
 """
 
 OVERVIEW_SLA_DETAIL_EXECUTION_HINT = """
@@ -110,6 +125,7 @@ OVERVIEW_SLA_DETAIL_EXECUTION_HINT = """
 2. **禁止**手写 `.cl-table` / `.el-table` / `a.tl-link` / `getByText('基本信息')` 等定位去点 SLA 表或验详情。
 3. **禁止**使用 `runOverviewCaseStep`（那是 KPI/图表类总览用例，不含 SLA 点链进详情）。
 4. helper 会自动：滚到 SLA 预警明细 → 点第一行蓝色工单号 → 等详情页 → 校验工单号。
-5. 若 stdout 出现 `SLA预警明细表无数据行`，说明环境缺 SLA 预警数据，停止并如实报告，不要改 selector 重试。
+5. **本用例故意不走自动造数**，依赖环境「工单总览 → SLA预警明细」已有可点击工单号。
+6. 若 stdout 出现 `SLA预警明细表无数据行` / `未找到蓝色工单号链接`：停止并如实报告「环境缺少 SLA 预警预置数据」；**禁止**在建议里写「补充造数 / 造数脚本」。
 
 """

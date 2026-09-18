@@ -21,6 +21,11 @@ from .templates import get_template_by_key
 
 logger = logging.getLogger(__name__)
 
+# 兼容早期保存的模板。待领取类用例默认自动创建 TYPE_A，由 helper 在「待处理」列表完成领单流程。
+_LEGACY_CLAIMABLE_TEMPLATE_KEY = 'biz_create_claimable_pending'
+_CLAIMABLE_AUTO_SOURCE = 'claimable-auto'
+_CLAIMABLE_MANUAL_SOURCE = 'manual-fixture'
+
 _TICKET_CONTEXT_KEYWORDS = (
     '工单',
     'ticket',
@@ -294,6 +299,9 @@ def ensure_project_template_plan(
     created_by=None,
     default_environment_id: Optional[int] = None,
 ) -> Optional[DataGenerationPlan]:
+    if template_key == _LEGACY_CLAIMABLE_TEMPLATE_KEY:
+        template_key = 'biz_create_type_a'
+
     plan = DataGenerationPlan.objects.filter(
         project_id=project_id,
         template_key=template_key,
@@ -339,6 +347,196 @@ def ensure_project_template_plan(
     )
 
 
+def extract_manual_ticket_fixture(params: Any) -> Dict[str, Any]:
+    if not isinstance(params, dict):
+        return {}
+    snapshot: Dict[str, Any] = {}
+    for key in ('ticketNo', 'ticketId', 'ticketType', 'work_order_id', 'processingTicketId'):
+        value = params.get(key)
+        if value not in (None, ''):
+            snapshot[key] = value
+    ticket_no = str(snapshot.get('ticketNo') or '').strip()
+    if not ticket_no:
+        return {}
+    if 'ticketId' not in snapshot and snapshot.get('work_order_id') not in (None, ''):
+        snapshot['ticketId'] = snapshot['work_order_id']
+    return snapshot
+
+
+def _list_tickets_from_api(
+    *,
+    project_id: int,
+    environment_id: int,
+    query_path: str,
+) -> list[dict[str, Any]]:
+    """Best-effort ticket list for pool picking (ignores strict interface validators)."""
+    try:
+        from api_environments.models import ApiEnvironment
+        from api_environments.token_refresh import refresh_environment_tokens
+        from api_interfaces.models import ApiInterface
+        from api_interfaces.runner import InterfaceRunner
+        from data_generation.services import (
+            _collect_force_refresh_token_vars,
+            _parse_response_body,
+        )
+
+        iface = ApiInterface.objects.filter(
+            project_id=project_id,
+            name='工单列表查询',
+        ).first()
+        if iface is None:
+            return []
+        env = ApiEnvironment.objects.filter(id=environment_id).first()
+        if env is None:
+            return []
+
+        data = iface.get_interface_data()
+        data['project_id'] = project_id
+        data['base_url'] = env.base_url or ''
+        data['verify'] = env.verify_ssl
+        data['method'] = 'GET'
+        data['url'] = query_path
+
+        runner = InterfaceRunner(data)
+        runner.variables = refresh_environment_tokens(
+            base_url=env.base_url,
+            variables=env.get_all_variables(),
+            verify_ssl=env.verify_ssl,
+            environment_id=env.id,
+            persist=True,
+            force_token_vars=_collect_force_refresh_token_vars(data),
+        )
+        runner.run_interface({})
+        response = runner.get_response()
+        body = _parse_response_body((response.get('response') or {}).get('content'))
+        if isinstance(body, dict):
+            block = body.get('data')
+            if isinstance(block, list):
+                return [row for row in block if isinstance(row, dict)]
+        if isinstance(body, list):
+            return [row for row in body if isinstance(row, dict)]
+    except Exception as exc:
+        logger.debug('list tickets for claimable pool skipped: %s', exc)
+    return []
+
+
+def _ticket_row_supports_claim(row: dict[str, Any]) -> bool:
+    actions = row.get('availableActions') or []
+    if isinstance(actions, list) and 'claim' in actions:
+        return True
+    status = str(row.get('status') or '')
+    assignee = row.get('assigneeUserId')
+    unassigned = assignee in (None, '', 0)
+    return unassigned and status == 'pending_process'
+
+
+def try_pick_claimable_ticket_from_pool(
+    testcase: TestCase,
+    *,
+    environment_id: Optional[int],
+) -> dict[str, Any]:
+    env_id = environment_id or getattr(testcase, 'pre_data_environment_id', None)
+    if not env_id:
+        return {}
+    queries = (
+        '/api/tickets?currentStatus=pending_process&page=1&pageSize=50',
+        '/api/tickets?currentStatus=pending_assign&page=1&pageSize=50',
+    )
+    for query in queries:
+        for row in _list_tickets_from_api(
+            project_id=testcase.project_id,
+            environment_id=int(env_id),
+            query_path=query,
+        ):
+            if not _ticket_row_supports_claim(row):
+                continue
+            ticket_id = row.get('id') or row.get('ticketId')
+            ticket_no = row.get('ticketNo')
+            if ticket_id in (None, '') or not ticket_no:
+                continue
+            return {
+                'ticketId': ticket_id,
+                'ticketNo': str(ticket_no),
+                'work_order_id': ticket_id,
+                'ticketStatus': row.get('status') or 'pending_process',
+                'source': 'claimable-pool',
+            }
+    return {}
+
+
+def validate_claimable_ticket_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    project_id: int,
+    environment_id: Optional[int],
+) -> Optional[str]:
+    """Return warning text when auto data likely cannot show 领取工单 on UI."""
+    ticket_id = snapshot.get('ticketId') or snapshot.get('work_order_id')
+    if not ticket_id or not environment_id:
+        return None
+    rows = _list_tickets_from_api(
+        project_id=project_id,
+        environment_id=int(environment_id),
+        query_path=f'/api/tickets?ticketNo={snapshot.get("ticketNo")}&page=1&pageSize=5',
+    )
+    row = next(
+        (
+            item
+            for item in rows
+            if str(item.get('ticketNo') or '') == str(snapshot.get('ticketNo') or '')
+        ),
+        None,
+    )
+    if row is None:
+        row = next((item for item in rows if str(item.get('id')) == str(ticket_id)), None)
+    if row is None:
+        return None
+    if _ticket_row_supports_claim(row):
+        return None
+    status = row.get('status') or 'unknown'
+    actions = row.get('availableActions') or []
+    return (
+        f'造数工单 {snapshot.get("ticketNo")} 在环境中为 status={status}，'
+        f'availableActions={actions}，不具备 claim/领取 能力。'
+        'TYPE_A 新建多为 pending_assign（仅 assign）；取消分配接口当前 500，无法转为可领取态。'
+        '请后端修复 unassign 或提供可领取种子工单，或在 pre_data_params 配置手工 ticketNo。'
+    )
+
+
+def resolve_claimable_ticket_pre_data(testcase: TestCase) -> PreDataResolution:
+    """待领取类：默认自动 TYPE_A 造数；若用例配置了 pre_data_params 则优先手工工单。"""
+    params = testcase.pre_data_params if isinstance(testcase.pre_data_params, dict) else {}
+    manual = extract_manual_ticket_fixture(params)
+    env_id = getattr(testcase, 'pre_data_environment_id', None)
+    if manual.get('ticketNo'):
+        return PreDataResolution(
+            plan=None,
+            template_key=None,
+            input_params=manual,
+            default_environment_id=env_id,
+            source=_CLAIMABLE_MANUAL_SOURCE,
+            fail_fast=False,
+            skip_reason='',
+        )
+
+    text = collect_testcase_text(testcase)
+    input_params = build_input_params(text, {'input_params': dict(params), 'steps': []})
+    plan = DataGenerationPlan.objects.filter(
+        project_id=testcase.project_id,
+        template_key='biz_create_type_a',
+        is_template=True,
+        is_active=True,
+    ).first()
+    return PreDataResolution(
+        plan=plan,
+        template_key='biz_create_type_a',
+        input_params=input_params,
+        default_environment_id=env_id or (plan.default_environment_id if plan else None),
+        source=_CLAIMABLE_AUTO_SOURCE,
+        fail_fast=getattr(testcase, 'pre_data_fail_fast', True),
+    )
+
+
 def resolve_pre_data_for_testcase(testcase: TestCase) -> PreDataResolution:
     if getattr(testcase, 'skip_pre_data', False):
         return PreDataResolution(
@@ -351,13 +549,19 @@ def resolve_pre_data_for_testcase(testcase: TestCase) -> PreDataResolution:
             skip_reason='用例已关闭自动造数',
         )
 
+    if is_claimable_ticket_detail_case(testcase):
+        return resolve_claimable_ticket_pre_data(testcase)
+
     if testcase.pre_data_plan_id:
         plan = testcase.pre_data_plan
+        if plan.template_key == _LEGACY_CLAIMABLE_TEMPLATE_KEY:
+            return resolve_claimable_ticket_pre_data(testcase)
+        template_key = plan.template_key
         params = testcase.pre_data_params if isinstance(testcase.pre_data_params, dict) else {}
-        env_id = testcase.pre_data_environment_id or plan.default_environment_id
+        env_id = testcase.pre_data_environment_id or (plan.default_environment_id if plan else None)
         return PreDataResolution(
             plan=plan,
-            template_key=plan.template_key,
+            template_key=template_key,
             input_params=params,
             default_environment_id=env_id,
             source='testcase',
@@ -366,14 +570,17 @@ def resolve_pre_data_for_testcase(testcase: TestCase) -> PreDataResolution:
 
     module_plan, module = resolve_module_pre_data_plan(testcase.module)
     if module_plan is not None and module is not None:
+        if module_plan.template_key == _LEGACY_CLAIMABLE_TEMPLATE_KEY:
+            return resolve_claimable_ticket_pre_data(testcase)
+        template_key = module_plan.template_key
         params = module.pre_data_params if isinstance(module.pre_data_params, dict) else {}
-        env_id = module.pre_data_environment_id or module_plan.default_environment_id
+        env_id = module.pre_data_environment_id or (module_plan.default_environment_id if module_plan else None)
         return PreDataResolution(
             plan=module_plan,
-            template_key=module_plan.template_key,
+            template_key=template_key,
             input_params=params,
             default_environment_id=env_id,
-            source='module',
+            source='module' if module_plan is not None else 'legacy-template-migrated',
             fail_fast=getattr(module, 'pre_data_fail_fast', True),
         )
 
@@ -386,7 +593,7 @@ def resolve_pre_data_for_testcase(testcase: TestCase) -> PreDataResolution:
             default_environment_id=None,
             source='none',
             fail_fast=False,
-            skip_reason='工单总览/数据总览类用例依赖环境已有统计数据，跳过自动推断造数',
+            skip_reason='工单总览/SLA 类用例故意不走自动造数，依赖环境预置总览/预警数据',
         )
 
     if not needs_ticket_pre_data(text):
@@ -412,6 +619,11 @@ def resolve_pre_data_for_testcase(testcase: TestCase) -> PreDataResolution:
             skip_reason='无法推断造数模板',
         )
 
+    # 文本中可能仍保留了旧模板键；将它当作 TYPE_A 创建的别名处理，
+    # 不能让显式指定旧键绕过上面对历史计划的兼容保护。
+    if template_key == _LEGACY_CLAIMABLE_TEMPLATE_KEY:
+        return resolve_claimable_ticket_pre_data(testcase)
+
     input_params = build_input_params(text, {'input_params': {}, 'steps': []})
     plan = DataGenerationPlan.objects.filter(
         project_id=testcase.project_id,
@@ -430,12 +642,36 @@ def resolve_pre_data_for_testcase(testcase: TestCase) -> PreDataResolution:
     )
 
 
-def is_ticket_detail_boundary_case(testcase: TestCase) -> bool:
+def is_ticket_message_send_case(testcase: TestCase) -> bool:
+    """Cases that must type and send a message, then assert it in 沟通记录."""
     blob = collect_testcase_text(testcase)
+    return any(
+        keyword in blob
+        for keyword in (
+            '发送消息',
+            '点击发送',
+            '按Enter',
+            '按 Enter',
+            '沟通记录出现',
+            '输入文本点击发送',
+            '输入文本按Enter',
+        )
+    )
+
+
+def is_ticket_detail_boundary_case(testcase: TestCase) -> bool:
+    """沟通区只读/空态边界用例；发送消息类不得匹配。"""
+    blob = collect_testcase_text(testcase)
+    if is_ticket_message_send_case(testcase):
+        return False
     return (
         '沟通记录' in blob
         and '处理' in blob
         and ('详情' in blob or '工单详情' in blob)
+        and any(
+            keyword in blob
+            for keyword in ('只读', '不可发送', '无发送', '暂无沟通', '边界')
+        )
     )
 
 
@@ -451,6 +687,11 @@ def is_claimable_ticket_detail_case(testcase: TestCase) -> bool:
 
 
 def _latest_pre_data_snapshot(testcase: TestCase) -> dict:
+    manual = extract_manual_ticket_fixture(
+        testcase.pre_data_params if isinstance(testcase.pre_data_params, dict) else {},
+    )
+    if manual.get('ticketNo'):
+        return manual
     plan_id = getattr(testcase, 'pre_data_plan_id', None)
     queryset = DataGenerationRun.objects.filter(
         project_id=testcase.project_id,
@@ -463,13 +704,48 @@ def _latest_pre_data_snapshot(testcase: TestCase) -> dict:
     return run.output_snapshot if run and isinstance(run.output_snapshot, dict) else {}
 
 
-def get_latest_pre_data_ticket_no(testcase: TestCase) -> str:
-    snapshot = _latest_pre_data_snapshot(testcase)
+def get_pre_data_snapshot_for_execution(
+    testcase: TestCase,
+    *,
+    chat_session_id: Optional[str] = None,
+) -> dict:
+    """Prefer the data run tied to the current case-management execution."""
+    if chat_session_id:
+        from testcases.models import TestCaseRunRecord
+
+        record = (
+            TestCaseRunRecord.objects.select_related('data_generation_run')
+            .filter(session_id=str(chat_session_id).strip(), testcase_id=testcase.id)
+            .order_by('-id')
+            .first()
+        )
+        run = getattr(record, 'data_generation_run', None) if record else None
+        if run and isinstance(run.output_snapshot, dict) and run.output_snapshot.get('ticketNo'):
+            return run.output_snapshot
+    return _latest_pre_data_snapshot(testcase)
+
+
+def get_latest_pre_data_ticket_no(
+    testcase: TestCase,
+    *,
+    chat_session_id: Optional[str] = None,
+) -> str:
+    snapshot = get_pre_data_snapshot_for_execution(
+        testcase,
+        chat_session_id=chat_session_id,
+    )
     return str(snapshot.get('ticketNo') or '').strip()
 
 
-def get_latest_pre_data_ticket_id(testcase: TestCase) -> str:
-    snapshot = _latest_pre_data_snapshot(testcase)
+def get_latest_pre_data_ticket_id(
+    testcase: TestCase,
+    *,
+    chat_session_id: Optional[str] = None,
+) -> str:
+    snapshot = get_pre_data_snapshot_for_execution(
+        testcase,
+        chat_session_id=chat_session_id,
+    )
     for key in ('ticketId', 'work_order_id', 'processingTicketId'):
         value = snapshot.get(key)
         if value not in (None, ''):
@@ -552,7 +828,43 @@ def build_testcase_step_script_hints(testcase: TestCase) -> str:
     ]
     lines.extend(build_row_action_evidence_hints(testcase.steps.order_by('step_number')).splitlines())
     lines.extend(build_ticket_detail_case_hints(testcase).splitlines())
+    lines.extend(build_message_send_case_hints(testcase).splitlines())
     lines.extend(build_overview_sla_detail_case_hints(testcase).splitlines())
+    return '\n'.join(lines)
+
+
+def extract_expected_send_message_texts(testcase: TestCase) -> list[str]:
+    """Quoted message texts that send-message steps must assert on page."""
+    found: list[str] = []
+    for step in testcase.steps.order_by('step_number'):
+        blob = f"{getattr(step, 'description', '') or ''}\n{getattr(step, 'expected_result', '') or ''}"
+        if not any(k in blob for k in ('发送', '沟通记录', 'Enter')):
+            continue
+        for match in re.findall(r'[「『“\"]([^」』”\"]+)[」』”\"]', blob):
+            text = (match or '').strip()
+            if len(text) < 4:
+                continue
+            if text in ('发送', '查询', '处理', '待处理', '未分配', '领取工单'):
+                continue
+            if text not in found:
+                found.append(text)
+    return found
+
+
+def build_message_send_case_hints(testcase: TestCase) -> str:
+    if not is_ticket_message_send_case(testcase):
+        return ''
+    messages = extract_expected_send_message_texts(testcase)
+    sample = messages[0] if messages else '步骤中的测试文本'
+    lines = [
+        '',
+        '【沟通消息发送用例 — 强制校验，禁止只进详情】',
+        '- 禁止调用 `runTicketDetailCaseStep`（那是沟通区只读边界用例，不是发消息）。',
+        '- 必须先进入可发消息的工单详情（已领取/处理中），再在输入框填入步骤要求的文本并点击「发送」或按 Enter。',
+        f"- 发送后必须执行 `await helpers.assertPageShows(page, ['{sample}']);`，"
+        '确认沟通记录出现该文本；否则 RESULT=FAIL，禁止报通过。',
+        '- 截图必须包含沟通记录中刚发送的文本；仅详情页/空沟通区不能作为步骤通过证据。',
+    ]
     return '\n'.join(lines)
 
 
@@ -566,6 +878,7 @@ def build_overview_sla_detail_case_hints(testcase: TestCase) -> str:
             '- 每步只调用 `await helpers.runOverviewSlaDetailCaseStep(page, <步骤号>);`',
             '- 步骤3会点击 SLA 预警明细第一行蓝色工单号并等待详情页加载',
             '- 步骤4会校验详情页工单号与点击链接一致',
+            '- 本用例故意不走自动造数；失败时报告写「环境缺少 SLA 预警预置数据」，禁止建议补充造数脚本',
             '- 禁止混用 runOverviewCaseStep / screenshotCaseStep 自行组合',
         ]
     )
@@ -610,7 +923,7 @@ def build_testcase_navigation_hint(testcase: TestCase) -> str:
                 f'- 步骤{step.step_number}: `await helpers.runClaimableTicketCaseStep(page, {step.step_number});`'
             )
         lines.extend([
-            '- 步骤4只有点击“未分配”行的“处理”并确认详情页“领取工单”按钮后才会截图。',
+            '- 步骤4须进入详情并确认「领取工单」后才会截图；TYPE_A 自动造数多为待分配，helper 会优先待处理+「处理」，否则用工单号链接进详情。',
             '- helper 返回 null 或输出 RESULT=FAIL 时立即判不通过，禁止自行补截图或改报通过。',
         ])
         return '\n'.join(lines)
@@ -716,8 +1029,8 @@ def _build_message_suffix(
     if ticket_no and needs_ticket_row_action(case_text):
         if fixed_claimable_flow:
             lines.append(
-                f'- 本次造数工单号: {ticket_no}。该用例使用专用 helper 验证待处理、未分配工单；'
-                '不要手工按工单号筛选或自行拼接行操作。'
+                f'- 本次造数工单号: {ticket_no}。专用 helper 会按工单号定位行并进入领取详情：'
+                '优先「待处理」+「处理」，若为 TYPE_A 待分配则改点工单号链接（勿用 ticketId 直达）。'
             )
             return '\n'.join(lines)
         lines.append(
@@ -739,12 +1052,35 @@ def _build_message_suffix(
     return '\n'.join(lines)
 
 
+def _build_manual_claimable_suffix(snapshot: Dict[str, Any]) -> str:
+    lines = [
+        '',
+        '【手工/fixture 前置数据 — 待处理未分配领单用例】',
+        '- 来源: 用例 pre_data_params（非 TYPE_A 自动造数）',
+        '- 数据快照:',
+        json.dumps(snapshot, ensure_ascii=False, indent=2),
+        '- 执行时 helper 会在「工单列表 + 待处理」筛选下使用该工单号。',
+    ]
+    ticket_no = snapshot.get('ticketNo')
+    if ticket_no:
+        lines.append(f'- 本次工单号: {ticket_no}')
+    return '\n'.join(lines)
+
+
 def run_testcase_pre_data(
     testcase: TestCase,
     *,
     triggered_by=None,
 ) -> TestcasePreDataResult:
     resolution = resolve_pre_data_for_testcase(testcase)
+
+    if resolution.source == _CLAIMABLE_MANUAL_SOURCE:
+        snapshot = dict(resolution.input_params or {})
+        return TestcasePreDataResult(
+            run=None,
+            resolution=resolution,
+            message_suffix=_build_manual_claimable_suffix(snapshot),
+        )
 
     plan = resolution.plan
     if plan is None and resolution.template_key:
@@ -802,14 +1138,40 @@ def run_testcase_pre_data(
         )
         return TestcasePreDataResult(run=run, resolution=resolution)
 
+    env_id = resolution.default_environment_id or plan.default_environment_id
+    claimable_warn = ''
+    if resolution.source == _CLAIMABLE_AUTO_SOURCE and isinstance(run.output_snapshot, dict):
+        pool = try_pick_claimable_ticket_from_pool(testcase, environment_id=env_id)
+        if pool.get('ticketNo'):
+            run.output_snapshot = {**run.output_snapshot, **pool}
+            run.save(update_fields=['output_snapshot'])
+        else:
+            # 暂不阻断：TYPE_A 常无 claim 能力，仍继续跑 UI；步骤4可能因无「领取工单」失败。
+            warn = validate_claimable_ticket_snapshot(
+                run.output_snapshot,
+                project_id=testcase.project_id,
+                environment_id=env_id,
+            )
+            if warn:
+                claimable_warn = f'\n- 造数能力警告（不阻断执行）: {warn}'
+                logger.warning(
+                    'Claimable pre-data warning (continue): testcase_id=%s %s',
+                    testcase.id,
+                    warn,
+                )
+
+    suffix = _build_message_suffix(
+        run,
+        resolution,
+        case_text=collect_testcase_text(testcase),
+    )
+    if claimable_warn:
+        suffix = (suffix or '') + claimable_warn
+
     return TestcasePreDataResult(
         run=run,
         resolution=resolution,
-        message_suffix=_build_message_suffix(
-            run,
-            resolution,
-            case_text=collect_testcase_text(testcase),
-        ),
+        message_suffix=suffix,
     )
 
 

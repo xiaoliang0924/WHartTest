@@ -73,6 +73,13 @@
         @decision="handleToolDecision"
       />
 
+      <TestCaseProgressCard
+        v-if="testcaseProgress"
+        :current-step="testcaseProgress.currentStep"
+        :total-steps="testcaseProgress.totalSteps"
+        :started-at="testcaseProgress.startedAt"
+      />
+
       <ChatInput
         :is-loading="isGenerating"
         :supports-vision="currentLlmConfig?.supports_vision || false"
@@ -215,6 +222,7 @@ import ChatSidebar from '../components/ChatSidebar.vue';
 import ChatHeader from '../components/ChatHeader.vue';
 import ChatMessages from '../components/ChatMessages.vue';
 import ChatInput from '../components/ChatInput.vue';
+import TestCaseProgressCard from '../components/TestCaseProgressCard.vue';
 import SystemPromptModal from '../components/SystemPromptModal.vue';
 import ToolApprovalCard from '../components/ToolApprovalCard.vue';
 import ToolApprovalSettingsModal from '../components/ToolApprovalSettingsModal.vue';
@@ -497,6 +505,36 @@ const isGenerating = computed(() => {
   const localStream = currentId ? activeStreams.value[currentId] : null;
   const localStreamRunning = !!(localStream && !localStream.isComplete);
   return isLoading.value || isRemoteGenerating.value || localStreamRunning;
+});
+
+// 手工测试用例执行时，在输入框上方固定显示简洁进度卡，避免进度散落在工具输出中。
+const testcaseProgress = computed(() => {
+  const stream = sessionId.value ? activeStreams.value[sessionId.value] : null;
+  // 从用例管理跳转到聊天页时，内存中的 stream 可能尚未恢复；
+  // 此时使用已展示的用户执行消息兜底，保证进度卡不会消失。
+  const latestExecutionMessage = [
+    stream?.userMessage || '',
+    ...messages.value.slice().reverse().filter((message) => message.isUser).map((message) => message.content || ''),
+  ].find((content) => /正在执行用例|执行用例管理/.test(content));
+  const totalFromMessage = (latestExecutionMessage || '').match(/共\s*(\d+)\s*个步骤/);
+  const totalSteps = stream?.testcaseTotal || Number(totalFromMessage?.[1]) || 0;
+  if (!totalSteps) return null;
+
+  const stepSources = [
+    ...messages.value.map((message) => message.content || ''),
+    ...(stream?.messages || []).map((message) => message.content || ''),
+  ].join('\n');
+  const detectedSteps = [...stepSources.matchAll(/(?:正在执行步骤\s*|case_\d+_step)(\d+)/g)]
+    .map((match) => Number(match[1]))
+    .filter((step) => Number.isFinite(step));
+  const recoveredStep = detectedSteps.length ? Math.max(...detectedSteps) : 1;
+  const isRunning = isGenerating.value && !(stream?.isComplete);
+  if (!isRunning) return null;
+  return {
+    currentStep: stream?.testcaseStep || recoveredStep,
+    totalSteps,
+    startedAt: stream?.testcaseStartedAt,
+  };
 });
 
 // 知识库相关
@@ -1344,6 +1382,12 @@ const finalizeSessionDisplayAfterRunEnd = (chatSessionId: string): Promise<void>
     if (viewingId !== chatSessionId) return;
 
     const localStream = activeStreams.value[chatSessionId];
+    // 部分终止路径（如前置数据校验失败）不会写入服务端对话历史。
+    // 在刷新历史前保留本地流文本，避免 applyChatHistoryResponse 把刚显示的
+    // 失败原因覆盖成空白页面。
+    const terminalStreamContent = localStream?.isComplete
+      ? stripExecutionReportFromText(localStream.content || '').trim()
+      : '';
     if (localStream?.isComplete) {
       solidifyStreamContent();
     }
@@ -1355,6 +1399,17 @@ const finalizeSessionDisplayAfterRunEnd = (chatSessionId: string): Promise<void>
       }
     } catch (error) {
       console.warn('执行结束后刷新会话历史失败:', error);
+    }
+
+    if (terminalStreamContent && !messages.value.some(
+      (message) => !message.isUser && message.content === terminalStreamContent
+    )) {
+      messages.value.push({
+        content: terminalStreamContent,
+        isUser: false,
+        time: getCurrentTime(),
+        messageType: 'ai',
+      });
     }
 
     if (!hasExecutionReportMessage()) {

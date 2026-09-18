@@ -48,6 +48,7 @@ from .middleware_config import (
     get_user_friendly_llm_error,
 )
 from .playwright_instructions import (
+    CLAIMABLE_PENDING_EXECUTION_HINT,
     MANUAL_TESTCASE_EXECUTION_HINT,
     OVERVIEW_SLA_DETAIL_EXECUTION_HINT,
     PLAYWRIGHT_SCRIPT_INSTRUCTION,
@@ -63,7 +64,7 @@ from langgraph_integration.views import (
     schedule_auto_summarize_session_title,
 )
 from projects.models import Project
-from prompts.models import UserPrompt
+from prompts.models import PromptType, UserPrompt
 from mcp_tools.models import RemoteMCPConfig
 from mcp_tools.persistent_client import mcp_session_manager
 from file_management.services import validate_file_ids, build_llm_attachment_context, sync_file_references
@@ -1172,8 +1173,6 @@ class AgentLoopStreamAPIView(View):
 
             # 6.5 用例管理单条执行：未指定 prompt 时自动使用「测试用例执行」提示词
             if test_case_id and not prompt_id:
-                from prompts.models import PromptType, UserPrompt
-
                 exec_prompt = await sync_to_async(UserPrompt.get_user_prompt_by_type)(
                     request.user, PromptType.TEST_CASE_EXECUTION
                 )
@@ -1244,13 +1243,69 @@ class AgentLoopStreamAPIView(View):
                     user_id=request.user.id,
                 )
                 if pre_data_result.blocked:
+                    # 数据准备可能在常规 start 事件之前中止。先发出标准 start，
+                    # 让前端建立流状态并显示随后返回的失败原因，避免只留下用户消息。
+                    display_message = await sync_to_async(
+                        _build_testcase_execution_display_message
+                    )(int(test_case_id))
+                    terminal_message = (
+                        "测试数据准备失败，已中止执行。\n\n"
+                        f"{pre_data_result.block_message}"
+                    )
+                    # 前置数据失败同样是一轮可追溯的用例执行结果。落库后，
+                    # 即使客户端在刷新会话历史时清除了本地流文本，也能从完成
+                    # 事件和执行记录中稳定展示失败卡片。
+                    from testcases.run_record_service import (
+                        block_testcase_run_record,
+                        start_testcase_run_record,
+                    )
+
+                    await sync_to_async(start_testcase_run_record)(
+                        testcase_id=int(test_case_id),
+                        user_id=request.user.id,
+                        session_id=session_id,
+                        generate_playwright_script=bool(generate_playwright_script),
+                        data_generation_run_id=None,
+                    )
+                    record = await sync_to_async(block_testcase_run_record)(
+                        session_id=session_id,
+                        reason=pre_data_result.block_message,
+                    )
                     yield create_sse_data(
                         {
-                            "type": "error",
-                            "message": pre_data_result.block_message,
+                            "type": "start",
+                            "session_id": session_id,
+                            "thread_id": session_id,
+                            "project_id": project_id,
+                            "display_message": display_message,
+                            "mode": "agent_loop",
+                            "created_at": chat_session.created_at.isoformat()
+                            if chat_session and chat_session.created_at
+                            else None,
+                        }
+                    )
+                    # 失败原因作为常规助手消息流返回。前端对 stream/complete
+                    # 事件的渲染路径已用于所有正常对话，避免 error 事件在会话
+                    # 尚未落盘时被丢弃而只留下用户消息。
+                    yield create_sse_data(
+                        {
+                            "type": "stream",
+                            "data": terminal_message,
                             "pre_data_status": "failed",
                         }
                     )
+                    yield create_sse_data(
+                        {
+                            "type": "complete",
+                            "total_steps": 0,
+                            "pre_data_status": "failed",
+                            "test_case_run": {
+                                "status": record.status if record else "fail",
+                                "summary": record.summary if record else "",
+                            },
+                        }
+                    )
+                    yield "data: [DONE]\n\n"
                     return
 
                 if pre_data_result.run is not None:
@@ -1295,7 +1350,10 @@ class AgentLoopStreamAPIView(View):
                 if nav_hint:
                     effective_user_message = effective_user_message + nav_hint
 
-                from data_generation.testcase_pre_data import is_overview_sla_detail_case
+                from data_generation.testcase_pre_data import (
+                    is_claimable_ticket_detail_case,
+                    is_overview_sla_detail_case,
+                )
                 from testcases.models import TestCase as ManualTestCaseModel
 
                 sla_case = await sync_to_async(
@@ -1307,8 +1365,16 @@ class AgentLoopStreamAPIView(View):
                     sla_case
                     and await sync_to_async(is_overview_sla_detail_case)(sla_case)
                 )
+                is_claimable = bool(
+                    sla_case
+                    and await sync_to_async(is_claimable_ticket_detail_case)(sla_case)
+                )
                 if is_sla_detail:
                     effective_prompt = (effective_prompt or "") + OVERVIEW_SLA_DETAIL_EXECUTION_HINT
+                    if nav_hint:
+                        effective_prompt = effective_prompt + nav_hint
+                elif is_claimable:
+                    effective_prompt = (effective_prompt or "") + CLAIMABLE_PENDING_EXECUTION_HINT
                     if nav_hint:
                         effective_prompt = effective_prompt + nav_hint
 
@@ -1956,9 +2022,10 @@ class AgentLoopStreamAPIView(View):
         if not test_case_id and user_message:
             import re
 
-            # 匹配 "执行ID为 11 的测试用例" 或 "测试用例 ID：11" 等模式
+            # 匹配“执行ID为 11 的测试用例”、“测试用例 ID：11”及
+            # 用例管理按钮实际发送的“测试用例 ID=11”等模式。
             match = re.search(
-                r"(?:执行\s*ID\s*为|测试用例\s*(?:ID|id)[：:]\s*|case[_-]?id[：:=]\s*)(\d+)",
+                r"(?:执行\s*ID\s*为|测试用例\s*(?:ID|id)\s*[：:=]\s*|case[_-]?id\s*[：:=]\s*)(\d+)",
                 user_message,
             )
             if match:

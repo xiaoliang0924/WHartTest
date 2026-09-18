@@ -1437,7 +1437,13 @@ export const getLatestTestCaseRunRecord = async (
         },
       }
     );
-    return { success: true, data: response.data };
+    const record = response.data?.status === 'success' && response.data?.data
+      ? response.data.data
+      : response.data;
+    if (!record || typeof record.session_id !== 'string') {
+      return { success: false, error: '执行记录响应格式不正确' };
+    }
+    return { success: true, data: record };
   } catch (error: any) {
     if (error.response?.status === 404) {
       return { success: false, error: '暂无执行记录' };
@@ -1468,7 +1474,13 @@ export const getTestCaseRunRecords = async (
         },
       }
     );
-    return { success: true, data: response.data };
+    const records = response.data?.status === 'success' && Array.isArray(response.data?.data)
+      ? response.data.data
+      : response.data;
+    if (!Array.isArray(records)) {
+      return { success: false, error: '执行历史响应格式不正确' };
+    }
+    return { success: true, data: records };
   } catch (error: any) {
     return {
       success: false,
