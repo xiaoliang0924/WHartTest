@@ -958,12 +958,28 @@ def _get_playwright_session_manager() -> PlaywrightSessionManager:
         with _playwright_session_manager_lock:
             if _playwright_session_manager is None:
                 idle_timeout = getattr(
-                    settings, "PLAYWRIGHT_BROWSER_SESSION_IDLE_TIMEOUT_SECONDS", 15 * 60
+                    settings, "PLAYWRIGHT_BROWSER_SESSION_IDLE_TIMEOUT_SECONDS", 180
                 )
-                max_sessions = getattr(settings, "PLAYWRIGHT_BROWSER_MAX_SESSIONS", 20)
+                max_sessions = getattr(settings, "PLAYWRIGHT_BROWSER_MAX_SESSIONS", 2)
+                max_concurrent = getattr(
+                    settings, "PLAYWRIGHT_BROWSER_MAX_CONCURRENT_EXECUTIONS", 1
+                )
+                exec_queue_timeout = getattr(
+                    settings, "PLAYWRIGHT_BROWSER_EXEC_QUEUE_TIMEOUT_SECONDS", 600
+                )
                 _playwright_session_manager = PlaywrightSessionManager(
                     idle_timeout_seconds=int(idle_timeout),
                     max_sessions=int(max_sessions),
+                    max_concurrent_executions=int(max_concurrent),
+                    exec_queue_timeout_seconds=int(exec_queue_timeout),
+                )
+                logger.info(
+                    "[persistent_playwright] 会话管理: idle=%ss max_sessions=%s "
+                    "max_concurrent=%s queue_timeout=%ss",
+                    idle_timeout,
+                    max_sessions,
+                    max_concurrent,
+                    exec_queue_timeout,
                 )
     return _playwright_session_manager
 

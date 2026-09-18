@@ -483,11 +483,22 @@ class PlaywrightSessionManager:
     全局会话管理器：
     - session_key 标识一个持久化 Node+Playwright 实例
     - 空闲超时自动清理（后台线程 + 惰性清理）
+    - max_concurrent_executions 限制同时跑 JS 的 Chromium 数量（无 GPU 小机器建议 1）
     """
 
-    def __init__(self, *, idle_timeout_seconds: int = 900, max_sessions: int = 20):
+    def __init__(
+        self,
+        *,
+        idle_timeout_seconds: int = 900,
+        max_sessions: int = 20,
+        max_concurrent_executions: int = 1,
+        exec_queue_timeout_seconds: int = 600,
+    ):
         self.idle_timeout_seconds = max(30, int(idle_timeout_seconds))
         self.max_sessions = max(1, int(max_sessions))
+        self.max_concurrent_executions = max(1, int(max_concurrent_executions))
+        self.exec_queue_timeout_seconds = max(30, int(exec_queue_timeout_seconds))
+        self._exec_semaphore = threading.Semaphore(self.max_concurrent_executions)
         self._lock = threading.RLock()
         self._entries: Dict[str, _SessionEntry] = {}
         self._cleanup_started = False
@@ -521,6 +532,11 @@ class PlaywrightSessionManager:
             to_close = victims[: max(0, len(self._entries) - self.max_sessions)]
 
         for entry in to_close:
+            logger.info(
+                "[persistent_playwright] LRU 回收会话 %s（max_sessions=%s）",
+                entry.session_key,
+                self.max_sessions,
+            )
             self.close_session(entry.session_key)
 
     def execute_run_js(
@@ -559,11 +575,26 @@ class PlaywrightSessionManager:
 
         self._prune_lru_if_needed()
 
-        entry.proc._start(env=env)
-
-        output = entry.proc.exec_run_js(
-            run_js_args=run_js_args, env=env, timeout_seconds=int(timeout_seconds)
+        acquired = self._exec_semaphore.acquire(
+            timeout=self.exec_queue_timeout_seconds
         )
+        if not acquired:
+            raise PlaywrightPersistentSessionError(
+                "Playwright 浏览器执行排队超时：当前已有 "
+                f"{self.max_concurrent_executions} 路 UI 自动化在运行。"
+                "请等待其结束或减少并行用例。"
+            )
+
+        try:
+            entry.proc._start(env=env)
+
+            output = entry.proc.exec_run_js(
+                run_js_args=run_js_args,
+                env=env,
+                timeout_seconds=int(timeout_seconds),
+            )
+        finally:
+            self._exec_semaphore.release()
 
         # 执行结束后再次更新时间戳
         with self._lock:
@@ -581,6 +612,11 @@ class PlaywrightSessionManager:
                 if (now - entry.last_used_monotonic) > self.idle_timeout_seconds:
                     expired.append(key)
         for key in expired:
+            logger.info(
+                "[persistent_playwright] 空闲超时回收会话 %s（idle=%ss）",
+                key,
+                self.idle_timeout_seconds,
+            )
             self.close_session(key)
 
     def close_session(self, session_key: str) -> None:

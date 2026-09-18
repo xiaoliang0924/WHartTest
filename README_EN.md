@@ -4,16 +4,13 @@ English | [中文](README.md)
 
 ## Overview
 
-WHartTest is an AI-powered intelligent testing platform built on **Django 5.2 + DRF** and modern LLM technologies. The platform adopts a frontend-backend separated Monorepo architecture, consisting of 6 sub-projects (Django backend, Vue frontend, UI automation executor, MCP tool service, Agent skill library, and online document editor). By aggregating natural language understanding, knowledge base retrieval, and embedding search capabilities, combined with **LangChain/LangGraph** and **MCP (Model Context Protocol)** tool calls, it achieves automated generation, management, and execution of test cases from requirements to executable test cases, providing a complete intelligent testing management solution for QA teams.
-
-## Official website address
-https://wharttest.mgdaas.com/
+WHartTest is an AI-powered intelligent test management platform for QA teams. It covers requirements, test cases, API and UI automation, task execution, and reporting, with knowledge-base and LLM assistance for authoring, review, and execution.
 
 ## Core Features
 
 ### 1. AI-Powered Test Case Generation
 - Automatically generate test cases from requirement documents, business descriptions, and knowledge base context.
-- Use LangChain/LangGraph to orchestrate multi-step reasoning workflows, including context completion, test case optimization, and result tracking.
+- Support multi-step reasoning with context completion, test case optimization, and result tracking.
 - Support Prompt templates, test case templates, and generation strategy configuration to help teams standardize testing practices.
 
 ### 2. Requirement Management and Intelligent Review
@@ -44,9 +41,9 @@ https://wharttest.mgdaas.com/
 - Support fully automated AI execution of UI cases, debug runs, and batch execution; collect logs, screenshots, videos, and Trace data for playback and troubleshooting.
 - Integrate with test cases and the task center to provide unified scheduling and tracking for UI automation tasks.
 
-### 6. Agent Chat and MCP Tool Calls
-- Provide a LangGraph-based intelligent chat entry point for test analysis, test case generation, and tool calls within project context.
-- Support remote MCP configuration management, enabling Agents to call external tool services and extend testing, analysis, and automation capabilities.
+### 6. Agent Chat and Tool Calls
+- Provide an intelligent chat entry point for test analysis, test case generation, and tool calls within project context.
+- Support external tool integration and configuration to extend testing, analysis, and automation.
 - Support tool approval, system prompts, token usage display, and multi-model configuration to improve controllability and security of AI calls.
 
 ### 7. Knowledge Base and Retrieval Augmentation
@@ -56,7 +53,7 @@ https://wharttest.mgdaas.com/
 
 ### 8. Skills Library
 - Support Skills installation, management, and skill store source configuration to extend Agent capabilities.
-- Support automation skills such as Playwright, enabling AI to work closer to real testing scenarios.
+- Support automation skills, enabling AI to work closer to real testing scenarios.
 - Skills have high system privileges and are strongly recommended to be used only in intranet or trusted environments.
 
 ### 9. Task Center and Execution Tracking
@@ -118,27 +115,5 @@ FILE_MANAGEMENT_MAX_FILE_SIZE=104857600
 # LLM attachments: per-file parsed text character limit; 0 means unlimited. Over-limit files fail with an error and are not truncated.
 FILE_MANAGEMENT_LLM_MAX_CHARS_PER_FILE=0
 ```
-
-## Contact
-
-For questions or suggestions:
-- Open an Issue
-- Use the project Discussions
-- When adding WeChat, please mention `github`!!! We will invite you to the WeChat group.
-- Join the group to get the latest updates and Skills.
-
-
-## When adding WeChat: please mention Github or WHartTest!!!
-
-<img width="400" alt="image" src="img/wx.png" />
-
----
-
-## IMPORTANT SECURITY NOTICE: Skills Permissions and Deployment Safety (v1.4.0 and later)
-Because the Skills module has high system execution privileges, please take the following security precautions:
-
-Deployment recommendation: Only deploy in an intranet or trusted private network.
-Access control: Do not expose the service to the public Internet or grant access to unauthenticated or untrusted users.
-Disclaimer: This project (WHartTest) is for learning and research purposes only. Users are responsible for all security risks and consequences caused by unsafe deployment (such as public exposure or missing authentication). The WHartTest team is not liable for any security incidents, including data leaks or server compromise, caused by improper configuration.
 
 **WHartTest** - AI-powered test case generation that makes testing smarter and development more efficient!
