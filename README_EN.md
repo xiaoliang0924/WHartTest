@@ -1,10 +1,10 @@
-# WHartTest - AI-Powered Intelligent Test Case Generation Platform
+# WHartTest - AI-Powered Intelligent Automated Testing Platform
 
 English | [中文](README.md)
 
 ## Overview
 
-WHartTest is an AI-powered intelligent test management platform for QA teams. It covers requirements, test cases, API and UI automation, task execution, and reporting, with knowledge-base and LLM assistance for authoring, review, and execution.
+An AI-powered intelligent automated testing platform for QA teams. It covers requirements, test cases, API and UI automation, task execution, and reporting, with knowledge-base and LLM assistance for authoring, review, and execution.
 
 ## Core Features
 
