@@ -1893,6 +1893,34 @@ class AgentLoopStreamAPIView(View):
                     logger.info(
                         "AgentLoopStreamAPI: Interrupt detected, returning early"
                     )
+                    if test_case_id:
+                        record, injected_report = await _complete_testcase_run_with_report(
+                            session_id=session_id,
+                            final_content=streamed_assistant_content,
+                            messages=all_messages if "all_messages" in locals() else [],
+                            stopped=True,
+                            error_message=(
+                                "执行已暂停：等待工具审批。"
+                                "若未在对话中继续，请重新执行用例。"
+                            ),
+                            agent=agent,
+                            invoke_config=invoke_config,
+                        )
+                        if injected_report:
+                            yield create_sse_data(
+                                {"type": "stream", "data": "\n\n" + injected_report}
+                            )
+                        yield create_sse_data(
+                            {
+                                "type": "complete",
+                                "total_steps": step_count,
+                                "status": "interrupt",
+                                "test_case_run": {
+                                    "status": record.status if record else "stopped",
+                                    "summary": record.summary if record else "",
+                                },
+                            }
+                        )
                 else:
                     if test_case_id:
                         final_content = streamed_assistant_content
