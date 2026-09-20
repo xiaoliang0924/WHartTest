@@ -425,13 +425,19 @@ def _list_tickets_from_api(
 
 
 def _ticket_row_supports_claim(row: dict[str, Any]) -> bool:
-    actions = row.get('availableActions') or []
-    if isinstance(actions, list) and 'claim' in actions:
-        return True
+    """A claim fixture must be both pending and genuinely unassigned.
+
+    Some target-system rows expose a ``claim`` action to an administrator even
+    after they have been assigned.  That action flag alone does not satisfy the
+    testcase precondition of “处理人未分配”.
+    """
     status = str(row.get('status') or '')
     assignee = row.get('assigneeUserId')
     unassigned = assignee in (None, '', 0)
-    return unassigned and status == 'pending_process'
+    if not unassigned or status != 'pending_process':
+        return False
+    actions = row.get('availableActions') or []
+    return not isinstance(actions, list) or 'claim' in actions
 
 
 def try_pick_claimable_ticket_from_pool(

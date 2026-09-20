@@ -451,6 +451,20 @@ class IntentRouterStateTests(DjangoTestCase):
             build_input_params(text, {'input_params': {}, 'steps': []})['ticketType'],
             'TYPE_A',
         )
+
+    def test_claimable_pool_rejects_assigned_ticket_even_with_claim_action(self):
+        from data_generation.testcase_pre_data import _ticket_row_supports_claim
+
+        self.assertFalse(_ticket_row_supports_claim({
+            'status': 'pending_process',
+            'assigneeUserId': 39,
+            'availableActions': ['claim'],
+        }))
+        self.assertTrue(_ticket_row_supports_claim({
+            'status': 'pending_process',
+            'assigneeUserId': None,
+            'availableActions': ['claim'],
+        }))
         self.assertEqual(
             _normalize_assignment_workflow_ticket_type(
                 'biz_create_and_transfer',
