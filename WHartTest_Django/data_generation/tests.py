@@ -431,6 +431,24 @@ class IntentRouterStateTests(DjangoTestCase):
         self.assertEqual(params['summary'], '可领取待处理测试工单')
         self.assertLessEqual(len(params['summary']), 20)
 
+    def test_assignment_templates_ignore_legacy_type_c_override(self):
+        from data_generation.testcase_pre_data import _normalize_assignment_workflow_ticket_type
+
+        self.assertEqual(
+            _normalize_assignment_workflow_ticket_type(
+                'biz_create_and_assign',
+                {'ticketType': 'TYPE_C'},
+            )['ticketType'],
+            'TYPE_A',
+        )
+        self.assertEqual(
+            _normalize_assignment_workflow_ticket_type(
+                'biz_create_and_transfer',
+                {'ticketType': 'TYPE_C'},
+            )['ticketType'],
+            'TYPE_A',
+        )
+
     def test_approval_ticket_uses_approval_processing_template(self):
         from data_generation.intent_router import (
             build_input_params,

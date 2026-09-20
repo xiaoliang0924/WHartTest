@@ -1114,6 +1114,24 @@ def _resolve_transfer_assignee_params(
     return params
 
 
+def _normalize_assignment_workflow_ticket_type(
+    template_key: Optional[str],
+    input_params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Keep assignment workflows on a ticket type accepted by the target API.
+
+    A testcase or module may contain legacy ``ticketType=TYPE_C`` parameters.
+    Those parameters override the template default at execution time, but a newly
+    created TYPE_C ticket cannot be assigned in the business system.  Assignment
+    and transfer templates therefore always need TYPE_A, regardless of an old
+    saved override.
+    """
+    params = dict(input_params or {})
+    if template_key in {'biz_create_and_assign', 'biz_create_and_transfer'}:
+        params['ticketType'] = 'TYPE_A'
+    return params
+
+
 def run_testcase_pre_data(
     testcase: TestCase,
     *,
@@ -1161,7 +1179,10 @@ def run_testcase_pre_data(
         default_environment_id=resolution.default_environment_id or plan.default_environment_id,
     )
 
-    exec_params = dict(resolution.input_params or {})
+    exec_params = _normalize_assignment_workflow_ticket_type(
+        resolution.template_key,
+        resolution.input_params,
+    )
     env_id = resolution.default_environment_id or plan.default_environment_id
     if resolution.template_key == 'biz_create_and_transfer':
         try:
