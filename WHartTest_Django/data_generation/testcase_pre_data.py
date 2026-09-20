@@ -1067,6 +1067,53 @@ def _build_manual_claimable_suffix(snapshot: Dict[str, Any]) -> str:
     return '\n'.join(lines)
 
 
+def _resolve_transfer_assignee_params(
+    input_params: Dict[str, Any],
+    *,
+    project_id: int,
+    environment_id: Optional[int],
+) -> Dict[str, Any]:
+    """解析转派造数里的当前处理人与转派目标的 userId。"""
+    from .assignee_resolver import AssigneeResolutionError, resolve_assignee_params
+
+    params = dict(input_params or {})
+    env_id = environment_id
+
+    target_name = str(params.get('assigneeName') or '').strip()
+    if target_name:
+        params = resolve_assignee_params(
+            params,
+            project_id=project_id,
+            environment_id=env_id,
+        )
+
+    source_name = str(params.get('sourceAssigneeName') or '').strip()
+    if source_name:
+        source_seed = {
+            'assigneeName': source_name,
+            'assigneeRole': params.get('sourceAssigneeRole')
+            or params.get('assigneeRole')
+            or 'customer_service',
+            'assigneeDepartment': params.get('sourceAssigneeDepartment') or '',
+        }
+        try:
+            resolved = resolve_assignee_params(
+                source_seed,
+                project_id=project_id,
+                environment_id=env_id,
+            )
+        except AssigneeResolutionError as exc:
+            raise DataGenerationError(str(exc)) from exc
+        params['sourceAssigneeUserId'] = resolved['assigneeUserId']
+        params['sourceAssigneeName'] = resolved['assigneeName']
+        params['sourceAssigneeDepartment'] = resolved.get('assigneeDepartment') or params.get(
+            'sourceAssigneeDepartment',
+        )
+        params['sourceAssigneeRole'] = resolved.get('assigneeRole') or params.get('sourceAssigneeRole')
+
+    return params
+
+
 def run_testcase_pre_data(
     testcase: TestCase,
     *,
@@ -1114,10 +1161,33 @@ def run_testcase_pre_data(
         default_environment_id=resolution.default_environment_id or plan.default_environment_id,
     )
 
+    exec_params = dict(resolution.input_params or {})
+    env_id = resolution.default_environment_id or plan.default_environment_id
+    if resolution.template_key == 'biz_create_and_transfer':
+        try:
+            exec_params = _resolve_transfer_assignee_params(
+                exec_params,
+                project_id=testcase.project_id,
+                environment_id=env_id,
+            )
+        except DataGenerationError as exc:
+            if resolution.fail_fast:
+                return TestcasePreDataResult(
+                    run=None,
+                    resolution=resolution,
+                    blocked=True,
+                    block_message=f'前置数据准备失败: {exc}',
+                )
+            logger.warning(
+                'Transfer assignee resolve failed: testcase_id=%s error=%s',
+                testcase.id,
+                exc,
+            )
+
     run = execute_plan(
         plan,
         trigger_type=DataGenerationRun.TRIGGER_CASE_PRE,
-        input_params=resolution.input_params,
+        input_params=exec_params,
         triggered_by=triggered_by,
         default_environment_id=resolution.default_environment_id or plan.default_environment_id,
     )

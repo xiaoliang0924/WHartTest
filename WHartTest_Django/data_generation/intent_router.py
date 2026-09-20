@@ -13,6 +13,14 @@ _ASSIGNEE_PATTERNS = (
     re.compile(r'处理人[是为：:]\s*([^\s，,。.；;]+)'),
     re.compile(r'使用\s*([^\s(（]+)账号'),
 )
+_INVALID_ASSIGNEE_NAMES = frozenset(
+    {
+        '当前登录用户',
+        '登录用户',
+        '当前用户',
+        '当前处理人',
+    }
+)
 
 _CREATE_ONLY_KEYWORDS = ('仅创建', '只创建', '仅生成', '不要分配', '无需分配', '不分配', '不要指派', '无需指派')
 _NEGATED_ASSIGN_PATTERN = re.compile(r'(?:不要|无需|不(?:要)?)(?:分配|指派)')
@@ -144,7 +152,35 @@ def extract_assignee_name(description: str) -> Optional[str]:
         match = pattern.search(text)
         if match:
             name = match.group(1).strip()
-            if name:
+            if name and name not in _INVALID_ASSIGNEE_NAMES:
+                return name
+    return None
+
+
+def extract_login_operator_name(description: str) -> Optional[str]:
+    """用例前置里「使用李亮账号(...)登录」中的当前操作人。"""
+    text = description or ''
+    match = re.search(r'使用\s*([^\s(（]+)\s*账号', text)
+    if match:
+        name = match.group(1).strip()
+        if name and name not in _INVALID_ASSIGNEE_NAMES:
+            return name
+    return None
+
+
+def extract_transfer_target_name(description: str) -> Optional[str]:
+    """转派目标处理人（如「转派给李清云」「可用处理人"李清云"」）。"""
+    text = description or ''
+    patterns = (
+        re.compile(r'转派给\s*([^\s，,。.；;」"\']+)'),
+        re.compile(r'可用处理人[“"\']([^”"\']+)'),
+        re.compile(r'转派[^"\n]*[给至]\s*([^\s，,。.；;]+)'),
+    )
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match:
+            name = match.group(1).strip().strip('"\'「」')
+            if name and name not in _INVALID_ASSIGNEE_NAMES:
                 return name
     return None
 
@@ -228,14 +264,25 @@ def build_input_params(description: str, llm_payload: Dict[str, Any]) -> Dict[st
     else:
         params.setdefault('ticketType', ticket_type)
 
-    assignee_name = extract_assignee_name(description)
-    if assignee_name and not claimable_pending:
-        params.setdefault('assigneeName', assignee_name)
+    if '转派' in (description or ''):
+        # TYPE_C 新建后无法分配；转派造数与状态筛选样本一致走 TYPE_A。
+        params['ticketType'] = 'TYPE_A'
+        params.setdefault('summary', '转派测试工单')
+        operator = extract_login_operator_name(description)
+        target = extract_transfer_target_name(description) or extract_assignee_name(description)
+        if operator:
+            params['sourceAssigneeName'] = operator
+        if target:
+            params['assigneeName'] = target
+    else:
+        assignee_name = extract_assignee_name(description)
+        if assignee_name and not claimable_pending:
+            params.setdefault('assigneeName', assignee_name)
 
     if claimable_pending:
         params['ticketType'] = 'TYPE_A'
         params['summary'] = '可领取待处理测试工单'
-    elif '待处理' in description and 'summary' not in params:
+    elif '转派' not in (description or '') and '待处理' in description and 'summary' not in params:
         params.setdefault('summary', f'{ticket_type}待处理测试工单')
 
     # 被测环境 summary 上限 20 字（创建工单校验）。
