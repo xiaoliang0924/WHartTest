@@ -522,16 +522,34 @@ const testcaseProgress = computed(() => {
   const totalSteps = stream?.testcaseTotal || Number(totalFromMessage?.[1]) || 0;
   if (!totalSteps) return null;
 
+  // 流式状态在浏览器重连时可能被重置，但已渲染的工具消息和附件仍在。
+  // `case_<caseId>_step<N>.png` 是后端保存成功的步骤截图，直接以附件名
+  // 恢复进度，确保卡片与用户正在看到的执行证据保持一致。
+  const renderedMessages = [...messages.value, ...(stream?.messages || [])];
+  const completedStepNumbers = renderedMessages.flatMap((message) => {
+    const references = [
+      message.content || '',
+      ...(message.fileAttachments || []).flatMap((file) => [file.name, file.path || '', file.url || '']),
+    ].join('\n');
+    return [...references.matchAll(/case_\d+_step(\d+)\.png/gi)]
+      .map((match) => Number(match[1]))
+      .filter((step) => Number.isFinite(step));
+  });
+  const recoveredCompletedStep = completedStepNumbers.length
+    ? Math.max(...completedStepNumbers)
+    : 0;
   const isRunning = isGenerating.value && !(stream?.isComplete);
   if (!isRunning) return null;
+  const currentStep = stream?.testcaseStep || recoveredCompletedStep;
+  const recovered = !stream?.testcaseStep && recoveredCompletedStep > 0;
   return {
     // 用例进度只能由后端 testcase_progress 事件更新；不能从 AI 文本或
     // 截图文件名猜测，否则会把“准备执行步骤 1”误报成“步骤 1 正在执行”。
-    currentStep: stream?.testcaseStep || 0,
+    currentStep,
     totalSteps,
     startedAt: stream?.testcaseStartedAt,
-    state: stream?.testcaseStepState || 'pending',
-    message: stream?.testcaseProgressMessage,
+    state: recovered ? 'completed' : (stream?.testcaseStepState || 'pending'),
+    message: recovered ? '步骤截图已保存，正在准备下一步' : stream?.testcaseProgressMessage,
   };
 });
 

@@ -792,6 +792,36 @@ export async function sendChatMessageStream(
             // 优先使用 tool_output（完整内容），fallback 到 summary（截断摘要）
             const toolOutput = parsed.tool_output || parsed.content || parsed.summary;
             const toolPayload = parseToolResultDisplayPayload(toolOutput);
+            // `testcase_progress` 是首选实时来源；但 SSE 在代理工具调用期间可能
+            // 被浏览器或代理断开/重连而丢失。工具返回中的 CASE_SCREENSHOT 是后端
+            // 已成功写盘的确定性证据，可作为兜底，绝不根据 AI 的自然语言推断步骤。
+            const rawToolOutput = typeof toolOutput === 'string'
+              ? toolOutput
+              : JSON.stringify(toolOutput || '');
+            // 工具正文有时只保留 last.png；原始步骤图则以附件返回。
+            // 两者都是后端已确认的结果，附件名才是稳定的步骤编号来源。
+            const screenshotReferences = [
+              rawToolOutput,
+              toolPayload.content,
+              ...(toolPayload.fileAttachments || []).flatMap((file) => [file.name, file.path, file.url]),
+            ].filter(Boolean).join('\n');
+            const testcaseStepMatch = screenshotReferences.match(/case_(\d+)_step(\d+)\.png/i);
+            if (testcaseStepMatch) {
+              const stream = activeStreams.value[streamSessionId];
+              const stepNumber = Number(testcaseStepMatch[2]);
+              const total = stream.testcaseTotal;
+              if (!stream.testcaseStep || stepNumber >= stream.testcaseStep) {
+                stream.currentStep = stepNumber;
+                stream.testcaseStep = stepNumber;
+                stream.testcaseStepState = 'completed';
+                stream.testcaseProgressMessage = '步骤截图已保存，正在准备下一步';
+                const status = `步骤 ${stepNumber}${total ? `/${total}` : ''} 已完成：${stream.testcaseProgressMessage}`;
+                const previous = stream.messages[stream.messages.length - 1];
+                if (!previous || previous.type !== 'system' || previous.content !== status) {
+                  stream.messages.push({ content: status, type: 'system', time: formatStreamTime() });
+                }
+              }
+            }
             if (toolPayload.content || toolPayload.imageDataUrl) {
               const time = formatStreamTime();
               const displayContent = toolPayload.content
@@ -1471,6 +1501,25 @@ export async function resumeAgentLoop(
             // 优先使用 tool_output（完整内容），fallback 到 summary（截断摘要）
             const toolOutput = parsed.tool_output || parsed.content || parsed.summary;
             const toolPayload = parseToolResultDisplayPayload(toolOutput);
+            const rawToolOutput = typeof toolOutput === 'string'
+              ? toolOutput
+              : JSON.stringify(toolOutput || '');
+            const screenshotReferences = [
+              rawToolOutput,
+              toolPayload.content,
+              ...(toolPayload.fileAttachments || []).flatMap((file) => [file.name, file.path, file.url]),
+            ].filter(Boolean).join('\n');
+            const testcaseStepMatch = screenshotReferences.match(/case_(\d+)_step(\d+)\.png/i);
+            if (testcaseStepMatch) {
+              const stream = activeStreams.value[sessionId];
+              const stepNumber = Number(testcaseStepMatch[2]);
+              if (!stream.testcaseStep || stepNumber >= stream.testcaseStep) {
+                stream.currentStep = stepNumber;
+                stream.testcaseStep = stepNumber;
+                stream.testcaseStepState = 'completed';
+                stream.testcaseProgressMessage = '步骤截图已保存，正在准备下一步';
+              }
+            }
             if (toolPayload.content || toolPayload.imageDataUrl) {
               const time = formatStreamTime();
               // 先固化当前 AI 内容
