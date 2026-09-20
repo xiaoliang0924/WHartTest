@@ -78,6 +78,8 @@
         :current-step="testcaseProgress.currentStep"
         :total-steps="testcaseProgress.totalSteps"
         :started-at="testcaseProgress.startedAt"
+        :state="testcaseProgress.state"
+        :message="testcaseProgress.message"
       />
 
       <ChatInput
@@ -520,20 +522,16 @@ const testcaseProgress = computed(() => {
   const totalSteps = stream?.testcaseTotal || Number(totalFromMessage?.[1]) || 0;
   if (!totalSteps) return null;
 
-  const stepSources = [
-    ...messages.value.map((message) => message.content || ''),
-    ...(stream?.messages || []).map((message) => message.content || ''),
-  ].join('\n');
-  const detectedSteps = [...stepSources.matchAll(/(?:正在执行步骤\s*|case_\d+_step)(\d+)/g)]
-    .map((match) => Number(match[1]))
-    .filter((step) => Number.isFinite(step));
-  const recoveredStep = detectedSteps.length ? Math.max(...detectedSteps) : 1;
   const isRunning = isGenerating.value && !(stream?.isComplete);
   if (!isRunning) return null;
   return {
-    currentStep: stream?.testcaseStep || recoveredStep,
+    // 用例进度只能由后端 testcase_progress 事件更新；不能从 AI 文本或
+    // 截图文件名猜测，否则会把“准备执行步骤 1”误报成“步骤 1 正在执行”。
+    currentStep: stream?.testcaseStep || 0,
     totalSteps,
     startedAt: stream?.testcaseStartedAt,
+    state: stream?.testcaseStepState || 'pending',
+    message: stream?.testcaseProgressMessage,
   };
 });
 

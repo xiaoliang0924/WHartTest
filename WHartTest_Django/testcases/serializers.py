@@ -476,6 +476,61 @@ class TestCaseScreenshotSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+class TestSuiteSummarySerializer(serializers.ModelSerializer):
+    """列表/嵌套场景下的套件摘要，避免展开全部用例。"""
+
+    class Meta:
+        model = TestSuite
+        fields = ["id", "name", "description"]
+        read_only_fields = fields
+
+
+class TestSuiteListSerializer(serializers.ModelSerializer):
+    """测试套件列表：不含 testcases_detail，避免列表接口拉取详情级数据。"""
+
+    creator_detail = UserDetailSerializer(source="creator", read_only=True)
+    testcase_count = serializers.SerializerMethodField()
+    pre_data_plan_name = serializers.CharField(
+        source="pre_data_plan.name",
+        read_only=True,
+        default=None,
+    )
+    pre_data_environment_name = serializers.CharField(
+        source="pre_data_environment.name",
+        read_only=True,
+        default=None,
+    )
+
+    class Meta:
+        model = TestSuite
+        fields = [
+            "id",
+            "name",
+            "description",
+            "project",
+            "testcase_count",
+            "max_concurrent_tasks",
+            "pre_data_plan",
+            "pre_data_plan_name",
+            "pre_data_params",
+            "pre_data_environment",
+            "pre_data_environment_name",
+            "pre_data_fail_fast",
+            "post_data_cleanup",
+            "creator",
+            "creator_detail",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_testcase_count(self, obj):
+        annotated = getattr(obj, "_testcase_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.testcases.count()
+
+
 class TestSuiteSerializer(serializers.ModelSerializer):
     """
     测试套件序列化器
@@ -714,6 +769,52 @@ class TestCaseResultSerializer(serializers.ModelSerializer):
                 parsed_url = urlparse(url)
                 relative_urls.append(parsed_url.path)
         return relative_urls
+
+
+class TestExecutionListSerializer(serializers.ModelSerializer):
+    """执行历史列表：不含 results / 完整 suite / 造数 step_logs，减小响应体积。"""
+
+    suite_detail = TestSuiteSummarySerializer(source="suite", read_only=True)
+    executor_detail = UserDetailSerializer(source="executor", read_only=True)
+    duration = serializers.ReadOnlyField()
+    pass_rate = serializers.ReadOnlyField()
+    data_generation_run_detail = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TestExecution
+        fields = [
+            "id",
+            "suite",
+            "suite_detail",
+            "status",
+            "executor",
+            "executor_detail",
+            "started_at",
+            "completed_at",
+            "total_count",
+            "passed_count",
+            "failed_count",
+            "skipped_count",
+            "error_count",
+            "duration",
+            "pass_rate",
+            "data_generation_run",
+            "data_generation_run_detail",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_data_generation_run_detail(self, obj):
+        run = getattr(obj, "data_generation_run", None)
+        if not run:
+            return None
+        return {
+            "id": run.id,
+            "status": run.status,
+            "plan_name": run.plan.name if run.plan_id else None,
+            "error_message": run.error_message,
+        }
 
 
 class TestExecutionSerializer(serializers.ModelSerializer):

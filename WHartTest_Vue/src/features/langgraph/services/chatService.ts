@@ -55,6 +55,8 @@ interface StreamState {
   maxSteps?: number;     // Agent Loop 最大步骤数
   testcaseStep?: number; // 手工测试用例当前步骤
   testcaseTotal?: number;
+  testcaseStepState?: 'pending' | 'running' | 'completed';
+  testcaseProgressMessage?: string;
   testcaseStartedAt?: number;
   userMessage?: string;  // 用户发送的消息内容
   userMessageTime?: string;  // 用户消息时间（会话创建时间）
@@ -87,8 +89,10 @@ export interface AgentLoopSseEvent {
   context_token_count?: number;
   max_steps?: number | string;
   step?: number | string;
-  summary?: string | Record<string, unknown>;
+  total_steps?: number | string;
+  state?: 'pending' | 'running' | 'completed';
   message?: string;
+  summary?: string | Record<string, unknown>;
   data?: string | { content?: string } | Record<string, unknown> | null;
 }
 
@@ -771,13 +775,15 @@ export async function sendChatMessageStream(
             const stream = activeStreams.value[streamSessionId];
             const stepNumber = normalizeNumericField(parsed.step);
             if (stepNumber !== undefined) {
-              const totalMatch = (stream.userMessage || '').match(/共\s*(\d+)\s*个步骤/);
-              const total = totalMatch ? Number(totalMatch[1]) : 4;
+              const total = normalizeNumericField(parsed.total_steps) || stream.testcaseTotal;
               const status = `正在执行步骤 ${stepNumber}/${total}`;
               stream.currentStep = stepNumber;
               stream.testcaseStep = stepNumber;
-              stream.testcaseTotal = total;
-              stream.messages.push({ content: status, type: 'system', time: formatStreamTime() });
+              if (total !== undefined) stream.testcaseTotal = total;
+              stream.testcaseStepState = parsed.state || 'running';
+              stream.testcaseProgressMessage = typeof parsed.message === 'string' ? parsed.message : undefined;
+              const detail = stream.testcaseProgressMessage ? `：${stream.testcaseProgressMessage}` : '';
+              stream.messages.push({ content: `${status}${detail}`, type: 'system', time: formatStreamTime() });
             }
           }
 
@@ -786,27 +792,6 @@ export async function sendChatMessageStream(
             // 优先使用 tool_output（完整内容），fallback 到 summary（截断摘要）
             const toolOutput = parsed.tool_output || parsed.content || parsed.summary;
             const toolPayload = parseToolResultDisplayPayload(toolOutput);
-            // 固定 Playwright helper 会在每个步骤完成后写入
-            // case_<用例ID>_step<步骤号>.png。这个标记已经用于截图上传，
-            // 因此直接以它更新用例进度，避免进度显示依赖后端额外 SSE 事件。
-            const rawToolOutput = typeof toolOutput === 'string'
-              ? toolOutput
-              : JSON.stringify(toolOutput || '');
-            const testcaseStepMatch = rawToolOutput.match(/case_(\d+)_step(\d+)\.png/i);
-            if (testcaseStepMatch) {
-              const stream = activeStreams.value[streamSessionId];
-              const stepNumber = Number(testcaseStepMatch[2]);
-              const totalMatch = (stream.userMessage || '').match(/共\s*(\d+)\s*个步骤/);
-              const total = totalMatch ? Number(totalMatch[1]) : 4;
-              const status = `正在执行步骤 ${stepNumber}/${total}`;
-              stream.currentStep = stepNumber;
-              stream.testcaseStep = stepNumber;
-              stream.testcaseTotal = total;
-              const previous = stream.messages[stream.messages.length - 1];
-              if (!previous || previous.type !== 'system' || previous.content !== status) {
-                stream.messages.push({ content: status, type: 'system', time: formatStreamTime() });
-              }
-            }
             if (toolPayload.content || toolPayload.imageDataUrl) {
               const time = formatStreamTime();
               const displayContent = toolPayload.content
@@ -1467,11 +1452,14 @@ export async function resumeAgentLoop(
             const stream = activeStreams.value[sessionId];
             const stepNumber = normalizeNumericField(parsed.step);
             if (stepNumber !== undefined) {
-              const totalMatch = (stream.userMessage || '').match(/共\s*(\d+)\s*个步骤/);
-              const total = totalMatch ? Number(totalMatch[1]) : 4;
+              const total = normalizeNumericField(parsed.total_steps) || stream.testcaseTotal;
               stream.currentStep = stepNumber;
+              stream.testcaseStep = stepNumber;
+              if (total !== undefined) stream.testcaseTotal = total;
+              stream.testcaseStepState = parsed.state || 'running';
+              stream.testcaseProgressMessage = typeof parsed.message === 'string' ? parsed.message : undefined;
               stream.messages.push({
-                content: `正在执行步骤 ${stepNumber}/${total}`,
+                content: `正在执行步骤 ${stepNumber}/${total}${stream.testcaseProgressMessage ? `：${stream.testcaseProgressMessage}` : ''}`,
                 type: 'system',
                 time: formatStreamTime()
               });

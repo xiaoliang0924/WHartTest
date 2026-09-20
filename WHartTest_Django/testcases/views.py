@@ -6,6 +6,9 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.db.models import Count
+
+from wharttest_django.pagination import StandardPagination
 from django.utils import timezone
 from django.http import HttpResponse
 from django.conf import settings
@@ -1358,6 +1361,7 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
     API 端点将嵌套在项目下，例如 /api/projects/{project_pk}/test-suites/
     """
 
+    pagination_class = StandardPagination
     filter_backends = [filters.SearchFilter]
     search_fields = ["name", "description"]
 
@@ -1376,15 +1380,23 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
         project_pk = self.kwargs.get("project_pk")
         if project_pk:
             project = get_object_or_404(Project, pk=project_pk)
-            return TestSuite.objects.filter(project=project).prefetch_related(
-                "testcases", "creator"
-            ).select_related("pre_data_plan", "pre_data_environment")
+            queryset = (
+                TestSuite.objects.filter(project=project)
+                .select_related("pre_data_plan", "pre_data_environment", "creator")
+            )
+            if getattr(self, "action", None) == "list":
+                return queryset.annotate(_testcase_count=Count("testcases", distinct=True)).order_by(
+                    "-id"
+                )
+            return queryset.prefetch_related("testcases")
         return TestSuite.objects.none()
 
     def get_serializer_class(self):
         """根据不同action返回不同的序列化器"""
-        from .serializers import TestSuiteSerializer
+        from .serializers import TestSuiteListSerializer, TestSuiteSerializer
 
+        if self.action == "list":
+            return TestSuiteListSerializer
         return TestSuiteSerializer
 
     def get_serializer_context(self):
@@ -1408,7 +1420,9 @@ class TestExecutionViewSet(viewsets.ModelViewSet):
     API 端点将嵌套在项目下，例如 /api/projects/{project_pk}/test-executions/
     """
 
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    pagination_class = StandardPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ["status"]
     search_fields = ["suite__name"]
     ordering_fields = ["created_at", "started_at", "completed_at", "status"]
     ordering = ["-created_at"]
@@ -1428,21 +1442,29 @@ class TestExecutionViewSet(viewsets.ModelViewSet):
         project_pk = self.kwargs.get("project_pk")
         if project_pk:
             project = get_object_or_404(Project, pk=project_pk)
-            return (
-                TestExecution.objects.filter(suite__project=project)
-                .select_related("suite", "executor", "data_generation_run", "data_generation_run__plan")
-                .prefetch_related("results")
+            queryset = TestExecution.objects.filter(suite__project=project).select_related(
+                "suite",
+                "executor",
+                "data_generation_run",
+                "data_generation_run__plan",
             )
+            if getattr(self, "action", None) in ("retrieve", "update", "partial_update"):
+                return queryset.prefetch_related("results__testcase")
+            return queryset
         return TestExecution.objects.none()
 
     def get_serializer_class(self):
         """根据不同action返回不同的序列化器"""
-        from .serializers import TestExecutionSerializer, TestExecutionCreateSerializer
-
-
+        from .serializers import (
+            TestExecutionCreateSerializer,
+            TestExecutionListSerializer,
+            TestExecutionSerializer,
+        )
 
         if self.action == "create":
             return TestExecutionCreateSerializer
+        if self.action == "list":
+            return TestExecutionListSerializer
         return TestExecutionSerializer
 
     def create(self, request, *args, **kwargs):

@@ -350,18 +350,16 @@ const fetchExecutions = async () => {
   loading.value = true;
   try {
     const response = await getTestExecutionList(currentProjectId.value, {
-      search: searchKeyword.value,
+      search: searchKeyword.value || undefined,
       ordering: '-created_at',
+      status: statusFilter.value || undefined,
+      page: paginationConfig.current,
+      page_size: paginationConfig.pageSize,
     });
 
     if (response.success && response.data) {
-      // 筛选状态
-      const filteredData = statusFilter.value
-        ? response.data.filter(item => item.status === statusFilter.value)
-        : response.data;
-      
-      executionData.value = filteredData;
-      paginationConfig.total = filteredData.length;
+      executionData.value = response.data;
+      paginationConfig.total = response.total ?? response.data.length;
     } else {
       Message.error(response.error || pageText.value.fetchExecutionsFailed);
       executionData.value = [];
@@ -384,11 +382,13 @@ const handleSearch = () => {
 // 分页处理
 const handlePageChange = (page: number) => {
   paginationConfig.current = page;
+  fetchExecutions();
 };
 
 const handlePageSizeChange = (pageSize: number) => {
   paginationConfig.pageSize = pageSize;
   paginationConfig.current = 1;
+  fetchExecutions();
 };
 
 // 刷新

@@ -240,12 +240,14 @@ const fetchSuites = async () => {
   loading.value = true;
   try {
     const response = await getTestSuiteList(currentProjectId.value, {
-      search: searchKeyword.value,
+      search: searchKeyword.value || undefined,
+      page: paginationConfig.current,
+      page_size: paginationConfig.pageSize,
     });
 
     if (response.success && response.data) {
       suiteData.value = response.data;
-      paginationConfig.total = response.total || response.data.length;
+      paginationConfig.total = response.total ?? response.data.length;
     } else {
       Message.error(response.error || pageText.value.fetchListFailed);
       suiteData.value = [];

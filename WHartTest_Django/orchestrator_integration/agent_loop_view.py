@@ -559,6 +559,67 @@ def _extract_helper_testcase_progress(content: Any) -> tuple[Optional[int], Opti
     return int(match.group(1)), int(match.group(2))
 
 
+def _extract_testcase_step_from_tool_call(tool_call: Any) -> Optional[int]:
+    """Return the declared testcase step for a Playwright tool call.
+
+    This is deliberately based on the executable helper call rather than the
+    model's prose.  A message such as “I will execute step 1” must not make the
+    UI look as if the browser has started executing it.
+    """
+    if isinstance(tool_call, dict):
+        name = str(tool_call.get("name") or "")
+        args = tool_call.get("args") or tool_call.get("arguments") or {}
+    else:
+        name = str(getattr(tool_call, "name", "") or "")
+        args = getattr(tool_call, "args", None) or getattr(tool_call, "arguments", None) or {}
+    if name != "execute_skill_script":
+        return None
+    if isinstance(args, str):
+        command = args
+    elif isinstance(args, dict):
+        command = str(args.get("command") or "")
+    else:
+        command = ""
+
+    if re.search(r"\bloginStep1\s*\(", command, flags=re.IGNORECASE):
+        return 1
+    patterns = (
+        r"run(?:ClaimableTicket|TicketDetail)?CaseStep\s*\(\s*page\s*,\s*(\d+)",
+        r"screenshotCaseStep\s*\(\s*page\s*,\s*(\d+)",
+        r"case[_-]\d+_step(\d+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, command, flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+async def _emit_testcase_tool_started(
+    tool_calls: Any, *, session_id: str, test_case_id: Optional[int]
+) -> list[dict[str, Any]]:
+    """Build authoritative progress events for Playwright execution starts."""
+    if not test_case_id:
+        return []
+    total_steps = await sync_to_async(_get_testcase_step_count)(int(test_case_id))
+    events: list[dict[str, Any]] = []
+    for tool_call in tool_calls or []:
+        step = _extract_testcase_step_from_tool_call(tool_call)
+        if step is not None:
+            events.append(
+                {
+                    "type": "testcase_progress",
+                    "session_id": session_id,
+                    "test_case_id": int(test_case_id),
+                    "step": step,
+                    "total_steps": total_steps,
+                    "state": "running",
+                    "message": "正在等待浏览器资源并执行步骤",
+                }
+            )
+    return events
+
+
 def process_mcp_tool_output(content: Any) -> tuple:
     """
     处理 MCP 工具返回的内容，提取实际数据并生成摘要
@@ -1680,6 +1741,12 @@ class AgentLoopStreamAPIView(View):
                                                         "tools": tool_names_in_step,
                                                     }
                                                 )
+                                                for progress_event in await _emit_testcase_tool_started(
+                                                    current_tool_calls,
+                                                    session_id=session_id,
+                                                    test_case_id=test_case_id,
+                                                ):
+                                                    yield create_sse_data(progress_event)
                                                 logger.info(
                                                     f"AgentLoopStreamAPI: Step {step_count} started with tools: {tool_names_in_step}"
                                                 )
@@ -1721,6 +1788,9 @@ class AgentLoopStreamAPIView(View):
                                                                 "session_id": session_id,
                                                                 "test_case_id": int(test_case_id),
                                                                 "step": helper_step,
+                                                                "total_steps": total_steps,
+                                                                "state": "completed",
+                                                                "message": "步骤执行完成，正在校验结果",
                                                             }
                                                         )
 
@@ -2673,6 +2743,12 @@ class AgentLoopResumeAPIView(View):
                                                         "tools": tool_names_in_step,
                                                     }
                                                 )
+                                                for progress_event in await _emit_testcase_tool_started(
+                                                    msg.tool_calls,
+                                                    session_id=session_id,
+                                                    test_case_id=test_case_id,
+                                                ):
+                                                    yield create_sse_data(progress_event)
 
                                     elif node_name == "tools" and isinstance(
                                         node_output, dict
@@ -2708,6 +2784,9 @@ class AgentLoopResumeAPIView(View):
                                                             "type": "testcase_progress",
                                                             "session_id": session_id,
                                                             "step": helper_step,
+                                                            "total_steps": total_steps,
+                                                            "state": "completed",
+                                                            "message": "步骤执行完成，正在校验结果",
                                                         }
                                                     )
 

@@ -151,6 +151,9 @@ export const getTestExecutionList = async (
   params?: {
     search?: string;
     ordering?: string;
+    status?: string;
+    page?: number;
+    page_size?: number;
   }
 ): Promise<TestExecutionListResponse> => {
   const authStore = useAuthStore();

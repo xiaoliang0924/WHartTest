@@ -91,7 +91,7 @@ export interface OperationResponse {
  */
 export const getTestSuiteList = async (
   projectId: number,
-  params?: { search?: string }
+  params?: { search?: string; page?: number; page_size?: number }
 ): Promise<TestSuiteListResponse> => {
   const authStore = useAuthStore();
   const accessToken = authStore.getAccessToken;
