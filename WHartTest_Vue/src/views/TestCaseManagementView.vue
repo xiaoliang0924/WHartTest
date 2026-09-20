@@ -429,15 +429,11 @@ const EXECUTION_PENDING_NOTIFICATION_ID = 'exec-case-pending';
 const EXEC_CASE_LINK_STYLE = 'color: rgb(var(--primary-6)); cursor: pointer; font-size: 13px;';
 
 const resolveExecCaseSessionId = (): string | null => {
-  const candidates = [
-    executionSessionId.value,
-    localStorage.getItem('langgraph_session_id'),
-  ];
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.trim()) {
-      return candidate.trim();
-    }
+  const sessionId = executionSessionId.value;
+  if (typeof sessionId === 'string' && sessionId.trim()) {
+    return sessionId.trim();
   }
+  // 勿回退 langgraph_session_id：那是 LLM 页上次打开的会话，会导致「打开新窗口」进旧对话。
   return null;
 };
 

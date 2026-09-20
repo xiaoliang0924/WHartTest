@@ -57,6 +57,25 @@ def _mentions_assign_action(text: str) -> bool:
     )
 
 
+def _is_creation_time_filter(text: str) -> bool:
+    """Date-range filter on list「创建时间」; relies on env data, not create+assign."""
+    if '创建时间' not in text:
+        return False
+    return any(
+        keyword in text
+        for keyword in (
+            '筛选',
+            '查询',
+            '日历',
+            '日期',
+            '区间',
+            '开始日期',
+            '结束日期',
+            '指定区间',
+        )
+    )
+
+
 def _is_ticket_status_filter(text: str) -> bool:
     """Return whether the case verifies filtering a work-order list by status.
 
@@ -146,6 +165,9 @@ def infer_business_template_key(description: str) -> Optional[str]:
     if _is_ticket_status_filter(text):
         return 'biz_prepare_status_filter_data'
 
+    if _is_creation_time_filter(text):
+        return None
+
     if _wants_create_only(text):
         ticket_type = infer_ticket_type(text, fallback='TYPE_A')
         return 'biz_create_type_b' if ticket_type == 'TYPE_B' else 'biz_create_type_a'
@@ -161,7 +183,7 @@ def infer_business_template_key(description: str) -> Optional[str]:
     if _mentions_assign_action(text):
         return 'biz_create_and_assign'
 
-    if re.search(r'创建.*工单|工单.*创建', text):
+    if re.search(r'创建\s*工单|工单\s*创建', text):
         ticket_type = infer_ticket_type(text)
         if ticket_type == 'TYPE_C':
             return 'biz_create_and_assign'

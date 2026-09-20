@@ -382,6 +382,17 @@ class IntentRouterStateTests(DjangoTestCase):
             'biz_create_assign_resolve',
         )
 
+    def test_creation_time_filter_does_not_use_create_and_assign(self):
+        from data_generation.intent_router import infer_business_template_key
+
+        self.assertIsNone(
+            infer_business_template_key('创建时间自定义-返回指定区间内工单'),
+        )
+        self.assertEqual(
+            infer_business_template_key('点击创建工单按钮进入表单'),
+            'biz_create_and_assign',
+        )
+
     def test_status_filter_template_prepares_matching_and_contrast_records(self):
         from data_generation.templates import get_template_by_key
 

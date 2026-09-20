@@ -3,11 +3,18 @@
     v-model:visible="drawerVisible"
     :width="860"
     :footer="false"
+    :closable="false"
+    :mask-closable="true"
     unmount-on-close
     @cancel="handleClose"
   >
     <template #title>
-      {{ text.title }} · {{ testCase?.name || '-' }}
+      <div class="drawer-title">
+        <span class="drawer-title-text">{{ text.title }} · {{ testCase?.name || '-' }}</span>
+        <a-button type="text" class="drawer-close-btn" :aria-label="text.close" @click="handleClose">
+          <template #icon><icon-close /></template>
+        </a-button>
+      </div>
     </template>
 
     <div v-if="!testCase" class="empty-wrap">
@@ -97,6 +104,7 @@
       </a-card>
 
       <div class="footer-actions">
+        <a-button @click="handleClose">{{ text.close }}</a-button>
         <a-button type="primary" @click="refreshRecord" :loading="loading">{{ text.refresh }}</a-button>
       </div>
     </div>
@@ -107,6 +115,7 @@
 import { computed, ref, watch, onBeforeUnmount } from 'vue';
 import { useRouter } from 'vue-router';
 import type { TableColumnData } from '@arco-design/web-vue';
+import { IconClose } from '@arco-design/web-vue/es/icon';
 import {
   getLatestTestCaseRunRecord,
   getTestCaseScreenshots,
@@ -172,6 +181,7 @@ const text = computed(() => (
         openChatCurrentPage: 'Open on this page',
         openChatNewWindow: 'Open in new window',
         refresh: 'Refresh',
+        close: 'Close',
         step: 'Step',
         description: 'Description',
         expected: 'Expected',
@@ -206,6 +216,7 @@ const text = computed(() => (
         openChatCurrentPage: '当前页打开',
         openChatNewWindow: '打开新窗口',
         refresh: '刷新',
+        close: '关闭',
         step: '步骤',
         description: '描述',
         expected: '预期结果',
@@ -480,5 +491,27 @@ defineExpose({
 
 .empty-wrap {
   padding: 48px 0;
+}
+
+.drawer-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+
+.drawer-title-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer-close-btn {
+  flex-shrink: 0;
+  color: var(--color-text-2);
 }
 </style>
