@@ -329,3 +329,8 @@ volumes:
 
 # 一步到位命令（如有需要）:
 # docker compose -f docker-compose.local.yml build && docker compose -f docker-compose.local.yml up -d --force-recreate
+#
+# 快速本地部署（跳过完整 backend Dockerfile 的 apt 构建，与服务器 custom 镜像策略一致）:
+# docker build -f Dockerfile.backend-custom -t wharttest-backend:latest .
+# docker compose -f docker-compose.local.yml build frontend
+# docker compose -f docker-compose.local.yml -f docker-compose.local.override.yml up -d --no-build --force-recreate backend frontend

@@ -1,0 +1,3 @@
+FROM ghcr.io/mgdaaslab/wharttest-backend:latest
+COPY WHartTest_Django/ /app/
+RUN chmod +x /app/entrypoint.sh

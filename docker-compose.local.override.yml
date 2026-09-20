@@ -1,0 +1,7 @@
+# Fast local redeploy: use overlay backend + built frontend (see Dockerfile.backend-custom)
+services:
+  backend:
+    image: wharttest-backend:latest
+  frontend:
+    image: wharttest-frontend:latest
+    entrypoint: ["nginx", "-g", "daemon off;"]
