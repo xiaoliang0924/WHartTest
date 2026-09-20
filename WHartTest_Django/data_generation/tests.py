@@ -441,6 +441,16 @@ class IntentRouterStateTests(DjangoTestCase):
             )['ticketType'],
             'TYPE_A',
         )
+
+    def test_automatic_assignment_uses_create_only_type_a_data(self):
+        from data_generation.intent_router import build_input_params, infer_business_template_key
+
+        text = '创建工单后按系统自动分配规则分配给对应处理人，验证分配结果正确'
+        self.assertEqual(infer_business_template_key(text), 'biz_create_type_a')
+        self.assertEqual(
+            build_input_params(text, {'input_params': {}, 'steps': []})['ticketType'],
+            'TYPE_A',
+        )
         self.assertEqual(
             _normalize_assignment_workflow_ticket_type(
                 'biz_create_and_transfer',

@@ -23,6 +23,7 @@ _INVALID_ASSIGNEE_NAMES = frozenset(
 )
 
 _CREATE_ONLY_KEYWORDS = ('仅创建', '只创建', '仅生成', '不要分配', '无需分配', '不分配', '不要指派', '无需指派')
+_AUTO_ASSIGN_KEYWORDS = ('自动分配', '自动派单', '自动派发', '自动指派')
 _NEGATED_ASSIGN_PATTERN = re.compile(r'(?:不要|无需|不(?:要)?)(?:分配|指派)')
 _ASSIGN_PERMISSION_PHRASES = (
     '已分配访问权限',
@@ -38,6 +39,15 @@ _ASSIGN_PERMISSION_PHRASES = (
 
 def _wants_create_only(text: str) -> bool:
     return any(keyword in text for keyword in _CREATE_ONLY_KEYWORDS)
+
+
+def uses_automatic_assignment(text: str) -> bool:
+    """Whether the case verifies the system's own assignment rule.
+
+    These cases must not run the manual assignment API after a ticket is
+    created: the target system assigns the ticket itself.
+    """
+    return any(keyword in (text or '') for keyword in _AUTO_ASSIGN_KEYWORDS)
 
 
 def _strip_permission_assign_phrases(text: str) -> str:
@@ -195,7 +205,10 @@ def infer_business_template_key(description: str) -> Optional[str]:
         return explicit.group(1).lower()
 
     if _needs_unassigned_pending_ticket(text):
-        # 自动造数：创建 TYPE_A；UI 侧在「待处理」筛选 + 专用 helper 点「处理」进领取详情。
+        # 领取类由前置数据层从真实可领取池挑选，不创建后再假定其仍未分配。
+        return 'biz_create_type_a'
+
+    if uses_automatic_assignment(text):
         return 'biz_create_type_a'
 
     if _is_ticket_status_filter(text):
@@ -258,7 +271,8 @@ def build_input_params(description: str, llm_payload: Dict[str, Any]) -> Dict[st
     params.update(_collect_step_params(llm_payload.get('steps') or []))
 
     claimable_pending = _needs_unassigned_pending_ticket(description or '')
-    ticket_type = 'TYPE_A' if claimable_pending else infer_ticket_type(description)
+    automatic_assignment = uses_automatic_assignment(description or '')
+    ticket_type = 'TYPE_A' if claimable_pending or automatic_assignment else infer_ticket_type(description)
     if _TICKET_TYPE_PATTERN.search(description or ''):
         params['ticketType'] = ticket_type
     else:
@@ -282,6 +296,9 @@ def build_input_params(description: str, llm_payload: Dict[str, Any]) -> Dict[st
     if claimable_pending:
         params['ticketType'] = 'TYPE_A'
         params['summary'] = '可领取待处理测试工单'
+    elif automatic_assignment:
+        params['ticketType'] = 'TYPE_A'
+        params.setdefault('summary', '自动分配测试工单')
     elif '转派' not in (description or '') and '待处理' in description and 'summary' not in params:
         params.setdefault('summary', f'{ticket_type}待处理测试工单')
 

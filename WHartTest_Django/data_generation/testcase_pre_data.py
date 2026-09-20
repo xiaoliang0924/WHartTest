@@ -13,7 +13,11 @@ from django.contrib.auth import get_user_model
 from testcases.models import TestCase, TestCaseModule
 
 from .exceptions import DataGenerationError
-from .intent_router import build_input_params, infer_business_template_key
+from .intent_router import (
+    build_input_params,
+    infer_business_template_key,
+    uses_automatic_assignment,
+)
 from .models import DataGenerationPlan, DataGenerationRun
 from .plan_validation import ensure_plan_has_environment
 from .services import execute_plan
@@ -21,7 +25,7 @@ from .templates import get_template_by_key
 
 logger = logging.getLogger(__name__)
 
-# 兼容早期保存的模板。待领取类用例默认自动创建 TYPE_A，由 helper 在「待处理」列表完成领单流程。
+# 兼容早期保存的模板。领取类用例只使用系统中真实可领取的工单。
 _LEGACY_CLAIMABLE_TEMPLATE_KEY = 'biz_create_claimable_pending'
 _CLAIMABLE_AUTO_SOURCE = 'claimable-auto'
 _CLAIMABLE_MANUAL_SOURCE = 'manual-fixture'
@@ -1022,6 +1026,15 @@ def _build_message_suffix(
     if snapshot:
         lines.append('- 数据快照:')
         lines.append(json.dumps(snapshot, ensure_ascii=False, indent=2))
+    automatic_assignment = snapshot.get('autoAssignment') if isinstance(snapshot, dict) else None
+    if isinstance(automatic_assignment, dict):
+        assignee_name = automatic_assignment.get('assigneeName') or '-'
+        assignee_id = automatic_assignment.get('assigneeUserId') or '-'
+        status = automatic_assignment.get('status') or '-'
+        lines.append(
+            f'- 自动分配结果: 状态={status}，处理人={assignee_name}（ID: {assignee_id}）。'
+            '请按该实际分配结果验证自动分配规则；不要再按“未分配/领取工单”流程执行。'
+        )
     ticket_no = snapshot.get('ticketNo')
     fixed_claimable_flow = (
         '待处理' in case_text and '未分配' in case_text and '领取工单' in case_text
@@ -1065,6 +1078,50 @@ def _build_manual_claimable_suffix(snapshot: Dict[str, Any]) -> str:
     if ticket_no:
         lines.append(f'- 本次工单号: {ticket_no}')
     return '\n'.join(lines)
+
+
+def _build_claimable_pool_suffix(snapshot: Dict[str, Any]) -> str:
+    lines = [
+        '',
+        '【系统可领取工单前置数据】',
+        '- 来源: 当前环境的可领取工单池（未创建新工单）',
+        '- 数据快照:',
+        json.dumps(snapshot, ensure_ascii=False, indent=2),
+        '- 执行时 helper 会在「工单列表 + 待处理」筛选下使用该工单号，并校验“领取工单”按钮。',
+    ]
+    if snapshot.get('ticketNo'):
+        lines.append(f'- 本次工单号: {snapshot["ticketNo"]}')
+    return '\n'.join(lines)
+
+
+def _enrich_auto_assignment_snapshot(
+    snapshot: Dict[str, Any],
+    *,
+    project_id: int,
+    environment_id: Optional[int],
+) -> Dict[str, Any]:
+    """Record the target system's actual assignment result after creation."""
+    ticket_no = snapshot.get('ticketNo')
+    if not ticket_no or not environment_id:
+        return snapshot
+    rows = _list_tickets_from_api(
+        project_id=project_id,
+        environment_id=int(environment_id),
+        query_path=f'/api/tickets?ticketNo={ticket_no}&page=1&pageSize=5',
+    )
+    row = next((item for item in rows if str(item.get('ticketNo') or '') == str(ticket_no)), None)
+    if row is None:
+        return snapshot
+    assignee = row.get('assignee') if isinstance(row.get('assignee'), dict) else {}
+    return {
+        **snapshot,
+        'autoAssignment': {
+            'status': row.get('status'),
+            'assigneeUserId': row.get('assigneeUserId') or assignee.get('id'),
+            'assigneeName': row.get('assigneeName') or assignee.get('name') or assignee.get('username'),
+            'availableActions': row.get('availableActions') or [],
+        },
+    }
 
 
 def _resolve_transfer_assignee_params(
@@ -1145,6 +1202,29 @@ def run_testcase_pre_data(
             run=None,
             resolution=resolution,
             message_suffix=_build_manual_claimable_suffix(snapshot),
+        )
+
+    # 新建工单会被被测系统自动分配，不能再把它作为「未分配、可领取」数据。
+    # 领取用例只从真实可领取池取数；没有数据就清晰阻断，避免在 UI 步骤中误报失败。
+    if resolution.source == _CLAIMABLE_AUTO_SOURCE:
+        pool = try_pick_claimable_ticket_from_pool(
+            testcase,
+            environment_id=resolution.default_environment_id,
+        )
+        if not pool.get('ticketNo'):
+            return TestcasePreDataResult(
+                run=None,
+                resolution=resolution,
+                blocked=True,
+                block_message=(
+                    '前置数据准备失败: 当前环境没有“待处理且未分配、可领取”的工单；'
+                    '请准备可领取测试数据后再执行该用例。'
+                ),
+            )
+        return TestcasePreDataResult(
+            run=None,
+            resolution=resolution,
+            message_suffix=_build_claimable_pool_suffix(pool),
         )
 
     plan = resolution.plan
@@ -1230,35 +1310,21 @@ def run_testcase_pre_data(
         return TestcasePreDataResult(run=run, resolution=resolution)
 
     env_id = resolution.default_environment_id or plan.default_environment_id
-    claimable_warn = ''
-    if resolution.source == _CLAIMABLE_AUTO_SOURCE and isinstance(run.output_snapshot, dict):
-        pool = try_pick_claimable_ticket_from_pool(testcase, environment_id=env_id)
-        if pool.get('ticketNo'):
-            run.output_snapshot = {**run.output_snapshot, **pool}
+    if uses_automatic_assignment(collect_testcase_text(testcase)) and isinstance(run.output_snapshot, dict):
+        enriched_snapshot = _enrich_auto_assignment_snapshot(
+            run.output_snapshot,
+            project_id=testcase.project_id,
+            environment_id=env_id,
+        )
+        if enriched_snapshot != run.output_snapshot:
+            run.output_snapshot = enriched_snapshot
             run.save(update_fields=['output_snapshot'])
-        else:
-            # 暂不阻断：TYPE_A 常无 claim 能力，仍继续跑 UI；步骤4可能因无「领取工单」失败。
-            warn = validate_claimable_ticket_snapshot(
-                run.output_snapshot,
-                project_id=testcase.project_id,
-                environment_id=env_id,
-            )
-            if warn:
-                claimable_warn = f'\n- 造数能力警告（不阻断执行）: {warn}'
-                logger.warning(
-                    'Claimable pre-data warning (continue): testcase_id=%s %s',
-                    testcase.id,
-                    warn,
-                )
 
     suffix = _build_message_suffix(
         run,
         resolution,
         case_text=collect_testcase_text(testcase),
     )
-    if claimable_warn:
-        suffix = (suffix or '') + claimable_warn
-
     return TestcasePreDataResult(
         run=run,
         resolution=resolution,
