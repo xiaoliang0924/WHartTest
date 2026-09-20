@@ -414,7 +414,8 @@ const notifyExecutionOutcome = async (
         ? (isEnglish.value ? 'Test data preparation failed' : '测试数据准备失败，未执行用例步骤')
         : (isEnglish.value ? 'Case execution failed' : '用例执行失败'),
       content: extractExecutionFailReason(summary),
-      duration: 0,
+      // 失败原因较长时保留足够阅读时间，同时避免提示长期遮挡执行结果。
+      duration: 10000,
       closable: true,
       id: `exec-case-fail-${caseId}`,
       footer: () => h(
