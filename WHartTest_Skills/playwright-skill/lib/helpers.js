@@ -3814,7 +3814,7 @@ async function runTicketDetailCaseStep(page, stepNumber, caseId) {
 }
 
 /**
- * 待处理、未分配工单的固定流程：筛选 -> 点处理 -> 验证领取工单。
+ * 待处理、已自动分配工单的固定流程：以被分配处理人登录 -> 筛选 -> 点处理 -> 验证领取工单。
  * 步骤4失败时故意不保存截图，避免把列表页误作详情页证据。
  */
 async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
@@ -3824,6 +3824,7 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
   const dir = process.env.SCREENSHOT_DIR || '.';
   const target = pathMod.join(dir, `case_${cid}_step${step}.png`);
   const ticketNo = getTicketNoFromEnv();
+  const expectedAssignee = String(process.env.WHARTTEST_CLAIM_ASSIGNEE_NAME || '').trim();
 
   // 固定 helper 的控制台输出会直接展示在执行对话中；每一步开始先输出进度，
   // 让用户无需依赖聊天层解析即可看到当前用例进展。
@@ -3865,7 +3866,7 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
       }
       return null;
     }
-    // 只在已按“待处理”筛选的结果中匹配本次造数的工单，避免误点列表中的其他未分配工单。
+    // 只在已按“待处理”筛选的结果中匹配本次造数的工单，避免误点其他处理人的工单。
     const row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
     try {
       await row.waitFor({ state: 'visible', timeout: 12000 });
@@ -3878,14 +3879,14 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
         }
         return row;
       }
-      const assigneeOk =
-        !fields.assignee || fields.assignee.includes('未分配');
-      const statusOk =
-        fields.status.includes('待处理') || fields.status.includes('待分配');
+      const assigneeOk = expectedAssignee
+        ? fields.assignee.includes(expectedAssignee)
+        : !!fields.assignee && !fields.assignee.includes('未分配');
+      const statusOk = fields.status.includes('待处理');
       if (!statusOk || !assigneeOk) {
         if (reportFailure) {
           console.log(
-            `RESULT=FAIL: 本次造数工单 ${ticketNo} 不满足“待处理且未分配”条件，当前状态=${fields.status}，处理人=${fields.assignee}`,
+            `RESULT=FAIL: 本次造数工单 ${ticketNo} 不满足“待处理且已分配给当前登录处理人”条件，当前状态=${fields.status}，处理人=${fields.assignee}，期望处理人=${expectedAssignee || '已分配处理人'}`,
           );
         }
         return null;
@@ -3905,7 +3906,7 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
     return null;
   }
 
-  // 步骤3 在待处理/待分配/仅工单号下列表确认造数；步骤4 由 enterClaimableTicketDetailFromList 进领取详情。
+  // 步骤3 在待处理列表确认已自动分配的造数；步骤4 由 enterClaimableTicketDetailFromList 进领取详情。
   const queryClaimableTicketOnList = async () => {
     await fillFilterField(page, '工单号', ticketNo);
     await selectFormDropdownOption(page, '工单状态', '待处理');
@@ -3914,17 +3915,7 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
     await waitForTicketListSettled();
   };
 
-  const queryClaimableTicketFallbackAssign = async () => {
-    await fillFilterField(page, '工单号', ticketNo);
-    await selectFormDropdownOption(page, '工单状态', '待分配');
-    await clickPageButton(page, '查询');
-    await page.waitForLoadState('domcontentloaded').catch(() => {});
-    await waitForTicketListSettled();
-  };
-
   if (step === 2) {
-    // “未分配”属于全量工单列表的处理人字段；“我的工单”只展示当前用户范围，
-    // 无法稳定验证未分配条件。
     await navigateToTicketListPage(page);
     await waitForPageBodyText(page, 80, 10000);
     await screenshotCaseStep(page, step, cid);
@@ -3938,24 +3929,18 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
     if (row) {
       return { row, listHint: '待处理' };
     }
-    console.log(
-      `RESULT=INFO: 工单号+待处理未命中，改用待分配或仅工单号确认造数 ${ticketNo}`,
-    );
-    await queryClaimableTicketFallbackAssign();
-    row = await claimableRow({ reportFailure: false });
-    if (row) {
-      return { row, listHint: '待分配' };
-    }
+    console.log(`RESULT=INFO: 工单号+待处理未命中，改用仅工单号确认造数 ${ticketNo}`);
     await queryTicketByNoOnly(page, ticketNo);
     row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
     try {
       await row.waitFor({ state: 'visible', timeout: 12000 });
       const fields = await readClaimableRowFields(row);
-      const assigneeOk =
-        !fields.assignee || fields.assignee.includes('未分配');
+      const assigneeOk = expectedAssignee
+        ? fields.assignee.includes(expectedAssignee)
+        : !!fields.assignee && !fields.assignee.includes('未分配');
       if (!assigneeOk) {
         console.log(
-          `RESULT=FAIL: 造数工单 ${ticketNo} 已有处理人=${fields.assignee}，无法领取`,
+          `RESULT=FAIL: 造数工单 ${ticketNo} 的处理人=${fields.assignee}，与当前领取账号不一致`,
         );
         return { row: null, listHint: '' };
       }
@@ -3973,7 +3958,7 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
       return null;
     }
     console.log(
-      `RESULT=PASS: 步骤3已找到造数工单 ${ticketNo}（${listHint || '列表'}，处理人未分配）；步骤4将进领取详情`,
+      `RESULT=PASS: 步骤3已找到造数工单 ${ticketNo}（${listHint || '列表'}，处理人=${expectedAssignee || '已自动分配'}）；步骤4将进领取详情`,
     );
     return target;
   }

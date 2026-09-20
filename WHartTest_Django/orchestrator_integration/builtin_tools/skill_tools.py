@@ -1191,6 +1191,8 @@ def get_skill_tools(
                             is_overview_dashboard_case,
                             is_overview_sla_detail_case,
                             is_ticket_detail_boundary_case,
+                            get_pre_data_snapshot_for_execution,
+                            resolve_claim_login_credentials,
                         )
 
                         blob = collect_testcase_text(tc)
@@ -1229,6 +1231,24 @@ def get_skill_tools(
                                 env["WHARTTEST_TICKET_NO"] = ticket_no
                             if ticket_id:
                                 env["WHARTTEST_TICKET_ID"] = ticket_id
+                            if is_claimable_ticket_detail_case(tc):
+                                snapshot = get_pre_data_snapshot_for_execution(
+                                    tc,
+                                    chat_session_id=current_chat_session_id,
+                                )
+                                claim_credentials, claim_credential_error = (
+                                    resolve_claim_login_credentials(tc, snapshot)
+                                )
+                                if claim_credential_error:
+                                    return f"错误: 领取工单前置账号不可用：{claim_credential_error}"
+                                if claim_credentials:
+                                    env["WHARTTEST_USERNAME"] = claim_credentials["username"]
+                                    env["WHARTTEST_PASSWORD"] = claim_credentials["password"]
+                                    if claim_credentials.get("login_url"):
+                                        env["WHARTTEST_LOGIN_URL"] = claim_credentials["login_url"]
+                                    env["WHARTTEST_CLAIM_ASSIGNEE_NAME"] = claim_credentials[
+                                        "assignee_name"
+                                    ]
                 except Exception as exc:
                     logger.debug(
                         "[execute_skill_script] overview case hint skipped: %s", exc

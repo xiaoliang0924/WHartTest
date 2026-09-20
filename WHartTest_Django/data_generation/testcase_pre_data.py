@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from django.contrib.auth import get_user_model
+from projects.models import ProjectCredential
 
 from testcases.models import TestCase, TestCaseModule
 
@@ -424,20 +426,122 @@ def _list_tickets_from_api(
     return []
 
 
-def _ticket_row_supports_claim(row: dict[str, Any]) -> bool:
-    """A claim fixture must be both pending and genuinely unassigned.
+def _assignment_snapshot_from_row(row: dict[str, Any]) -> Dict[str, Any]:
+    """Keep non-secret assignment facts needed to select a browser credential."""
+    assignee = row.get('assignee') if isinstance(row.get('assignee'), dict) else {}
+    return {
+        'status': row.get('status'),
+        'assigneeUserId': row.get('assigneeUserId') or assignee.get('id'),
+        'assigneeName': row.get('assigneeName') or assignee.get('name') or assignee.get('username'),
+        'assigneeUsername': row.get('assigneeUsername') or assignee.get('username'),
+        'availableActions': row.get('availableActions') or [],
+    }
 
-    Some target-system rows expose a ``claim`` action to an administrator even
-    after they have been assigned.  That action flag alone does not satisfy the
-    testcase precondition of “处理人未分配”.
+
+def _find_assigned_ticket_snapshot(
+    *,
+    ticket_no: Any,
+    project_id: int,
+    environment_id: Optional[int],
+) -> Dict[str, Any]:
+    if not ticket_no or not environment_id:
+        return {}
+    rows = _list_tickets_from_api(
+        project_id=project_id,
+        environment_id=int(environment_id),
+        query_path=f'/api/tickets?ticketNo={ticket_no}&page=1&pageSize=5',
+    )
+    row = next(
+        (item for item in rows if str(item.get('ticketNo') or '') == str(ticket_no)),
+        None,
+    )
+    if row is None or not _ticket_row_supports_claim(row):
+        return {}
+    return {
+        'ticketId': row.get('id') or row.get('ticketId'),
+        'ticketNo': str(row.get('ticketNo') or ticket_no),
+        'work_order_id': row.get('id') or row.get('ticketId'),
+        'ticketStatus': row.get('status'),
+        'autoAssignment': _assignment_snapshot_from_row(row),
+        'source': 'claimable-auto-assigned',
+    }
+
+
+def _wait_for_assigned_claim_snapshot(
+    snapshot: Dict[str, Any],
+    *,
+    project_id: int,
+    environment_id: Optional[int],
+) -> Dict[str, Any]:
+    """Wait briefly for the target system's asynchronous auto-assignment."""
+    ticket_no = snapshot.get('ticketNo')
+    for attempt in range(5):
+        assigned = _find_assigned_ticket_snapshot(
+            ticket_no=ticket_no,
+            project_id=project_id,
+            environment_id=environment_id,
+        )
+        if assigned:
+            return {**snapshot, **assigned}
+        if attempt < 4:
+            time.sleep(1)
+    return snapshot
+
+
+def resolve_claim_login_credentials(
+    testcase: TestCase,
+    snapshot: Dict[str, Any],
+) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+    """Resolve the assigned handler to a configured project browser account.
+
+    Passwords only flow into the transient Playwright environment; they are
+    deliberately never added to a data-generation snapshot or chat message.
+    """
+    assignment = snapshot.get('autoAssignment') if isinstance(snapshot, dict) else None
+    assignment = assignment if isinstance(assignment, dict) else {}
+    assignee_name = str(assignment.get('assigneeName') or '').strip()
+    assignee_username = str(assignment.get('assigneeUsername') or '').strip()
+    if not assignee_name and not assignee_username:
+        return None, '自动分配尚未返回处理人，请等待自动分配完成后重试。'
+
+    credentials = ProjectCredential.objects.filter(project_id=testcase.project_id).exclude(
+        username=''
+    )
+    matches = credentials.filter(username__iexact=assignee_username) if assignee_username else credentials.none()
+    if not matches.exists() and assignee_name:
+        matches = credentials.filter(user_role__iexact=assignee_name)
+    count = matches.count()
+    if count == 0:
+        label = assignee_name or assignee_username
+        return None, (
+            f'未配置自动分配处理人“{label}”的测试账号。'
+            '请在项目管理的项目凭据中新增该人员：角色填姓名、用户名和密码填实际登录凭据。'
+        )
+    if count > 1:
+        label = assignee_name or assignee_username
+        return None, f'处理人“{label}”匹配到多个项目凭据，请保留唯一的姓名/账号映射。'
+    credential = matches.first()
+    if credential is None or not str(credential.password or '').strip():
+        return None, f'处理人“{assignee_name or assignee_username}”的项目凭据缺少密码。'
+    return {
+        'username': str(credential.username).strip(),
+        'password': str(credential.password),
+        'login_url': str(credential.system_url or '').strip(),
+        'assignee_name': assignee_name or str(credential.user_role or credential.username),
+    }, None
+
+
+def _ticket_row_supports_claim(row: dict[str, Any]) -> bool:
+    """A claim fixture is pending and has completed automatic assignment.
+
+    In the target system, automatic assignment chooses the handler first.  The
+    assigned handler then manually claims the ticket before processing it.
+    ``availableActions`` is read with an administrator token, so it cannot be
+    used to decide whether the assigned handler's UI can claim it.
     """
     status = str(row.get('status') or '')
     assignee = row.get('assigneeUserId')
-    unassigned = assignee in (None, '', 0)
-    if not unassigned or status != 'pending_process':
-        return False
-    actions = row.get('availableActions') or []
-    return not isinstance(actions, list) or 'claim' in actions
+    return status == 'pending_process' and assignee not in (None, '', 0)
 
 
 def try_pick_claimable_ticket_from_pool(
@@ -448,10 +552,7 @@ def try_pick_claimable_ticket_from_pool(
     env_id = environment_id or getattr(testcase, 'pre_data_environment_id', None)
     if not env_id:
         return {}
-    queries = (
-        '/api/tickets?currentStatus=pending_process&page=1&pageSize=50',
-        '/api/tickets?currentStatus=pending_assign&page=1&pageSize=50',
-    )
+    queries = ('/api/tickets?currentStatus=pending_process&page=1&pageSize=50',)
     for query in queries:
         for row in _list_tickets_from_api(
             project_id=testcase.project_id,
@@ -469,6 +570,7 @@ def try_pick_claimable_ticket_from_pool(
                 'ticketNo': str(ticket_no),
                 'work_order_id': ticket_id,
                 'ticketStatus': row.get('status') or 'pending_process',
+                'autoAssignment': _assignment_snapshot_from_row(row),
                 'source': 'claimable-pool',
             }
     return {}
@@ -507,9 +609,8 @@ def validate_claimable_ticket_snapshot(
     actions = row.get('availableActions') or []
     return (
         f'造数工单 {snapshot.get("ticketNo")} 在环境中为 status={status}，'
-        f'availableActions={actions}，不具备 claim/领取 能力。'
-        'TYPE_A 新建多为 pending_assign（仅 assign）；取消分配接口当前 500，无法转为可领取态。'
-        '请后端修复 unassign 或提供可领取种子工单，或在 pre_data_params 配置手工 ticketNo。'
+        f'availableActions={actions}，尚未成为“待处理且已自动分配”的可领取数据。'
+        '请等待自动分配完成，或检查自动分配规则与处理人测试账号配置。'
     )
 
 
@@ -686,11 +787,10 @@ def is_ticket_detail_boundary_case(testcase: TestCase) -> bool:
 
 
 def is_claimable_ticket_detail_case(testcase: TestCase) -> bool:
-    """Cases that must open an unassigned pending ticket and expose claim."""
+    """Cases that must open an assigned pending ticket and expose claim."""
     blob = collect_testcase_text(testcase)
     return (
         '待处理' in blob
-        and '未分配' in blob
         and '处理' in blob
         and '领取工单' in blob
     )
@@ -925,7 +1025,7 @@ def build_testcase_navigation_hint(testcase: TestCase) -> str:
     if is_claimable_ticket_detail_case(testcase):
         lines = [
             '',
-            '【待处理未分配工单 — 固定 Playwright 脚本，禁止改写】',
+            '【待处理已分配工单→领取 — 固定 Playwright 脚本，禁止改写】',
             '全程 session_id 不变；每步只执行下面一行 JavaScript：',
         ]
         for step in testcase.steps.order_by('step_number'):
@@ -933,7 +1033,7 @@ def build_testcase_navigation_hint(testcase: TestCase) -> str:
                 f'- 步骤{step.step_number}: `await helpers.runClaimableTicketCaseStep(page, {step.step_number});`'
             )
         lines.extend([
-            '- 步骤4须进入详情并确认「领取工单」后才会截图；TYPE_A 自动造数多为待分配，helper 会优先待处理+「处理」，否则用工单号链接进详情。',
+            '- 系统会先自动分配处理人；helper 会自动切换到该处理人的已配置账号，步骤4须进入详情并确认「领取工单」后才会截图。',
             '- helper 返回 null 或输出 RESULT=FAIL 时立即判不通过，禁止自行补截图或改报通过。',
         ])
         return '\n'.join(lines)
@@ -1043,13 +1143,13 @@ def _build_message_suffix(
         )
     ticket_no = snapshot.get('ticketNo')
     fixed_claimable_flow = (
-        '待处理' in case_text and '未分配' in case_text and '领取工单' in case_text
+        '待处理' in case_text and '领取工单' in case_text
     )
     if ticket_no and needs_ticket_row_action(case_text):
         if fixed_claimable_flow:
             lines.append(
-                f'- 本次造数工单号: {ticket_no}。专用 helper 会按工单号定位行并进入领取详情：'
-                '优先「待处理」+「处理」，若为 TYPE_A 待分配则改点工单号链接（勿用 ticketId 直达）。'
+                f'- 本次造数工单号: {ticket_no}。专用 helper 会以自动分配的处理人登录，'
+                '按工单号在「待处理」列表定位并进入领取详情。'
             )
             return '\n'.join(lines)
         lines.append(
@@ -1074,7 +1174,7 @@ def _build_message_suffix(
 def _build_manual_claimable_suffix(snapshot: Dict[str, Any]) -> str:
     lines = [
         '',
-        '【手工/fixture 前置数据 — 待处理未分配领单用例】',
+        '【手工/fixture 前置数据 — 待处理已分配领单用例】',
         '- 来源: 用例 pre_data_params（非 TYPE_A 自动造数）',
         '- 数据快照:',
         json.dumps(snapshot, ensure_ascii=False, indent=2),
@@ -1089,8 +1189,8 @@ def _build_manual_claimable_suffix(snapshot: Dict[str, Any]) -> str:
 def _build_claimable_pool_suffix(snapshot: Dict[str, Any]) -> str:
     lines = [
         '',
-        '【系统可领取工单前置数据】',
-        '- 来源: 当前环境的可领取工单池（未创建新工单）',
+        '【系统自动分配后的可领取工单前置数据】',
+        '- 来源: 本次自动造数及自动分配',
         '- 数据快照:',
         json.dumps(snapshot, ensure_ascii=False, indent=2),
         '- 执行时 helper 会在「工单列表 + 待处理」筛选下使用该工单号，并校验“领取工单”按钮。',
@@ -1118,15 +1218,9 @@ def _enrich_auto_assignment_snapshot(
     row = next((item for item in rows if str(item.get('ticketNo') or '') == str(ticket_no)), None)
     if row is None:
         return snapshot
-    assignee = row.get('assignee') if isinstance(row.get('assignee'), dict) else {}
     return {
         **snapshot,
-        'autoAssignment': {
-            'status': row.get('status'),
-            'assigneeUserId': row.get('assigneeUserId') or assignee.get('id'),
-            'assigneeName': row.get('assigneeName') or assignee.get('name') or assignee.get('username'),
-            'availableActions': row.get('availableActions') or [],
-        },
+        'autoAssignment': _assignment_snapshot_from_row(row),
     }
 
 
@@ -1208,29 +1302,6 @@ def run_testcase_pre_data(
             run=None,
             resolution=resolution,
             message_suffix=_build_manual_claimable_suffix(snapshot),
-        )
-
-    # 新建工单会被被测系统自动分配，不能再把它作为「未分配、可领取」数据。
-    # 领取用例只从真实可领取池取数；没有数据就清晰阻断，避免在 UI 步骤中误报失败。
-    if resolution.source == _CLAIMABLE_AUTO_SOURCE:
-        pool = try_pick_claimable_ticket_from_pool(
-            testcase,
-            environment_id=resolution.default_environment_id,
-        )
-        if not pool.get('ticketNo'):
-            return TestcasePreDataResult(
-                run=None,
-                resolution=resolution,
-                blocked=True,
-                block_message=(
-                    '前置数据准备失败: 当前环境没有“待处理且未分配、可领取”的工单；'
-                    '请准备可领取测试数据后再执行该用例。'
-                ),
-            )
-        return TestcasePreDataResult(
-            run=None,
-            resolution=resolution,
-            message_suffix=_build_claimable_pool_suffix(pool),
         )
 
     plan = resolution.plan
@@ -1316,20 +1387,52 @@ def run_testcase_pre_data(
         return TestcasePreDataResult(run=run, resolution=resolution)
 
     env_id = resolution.default_environment_id or plan.default_environment_id
-    if uses_automatic_assignment(collect_testcase_text(testcase)) and isinstance(run.output_snapshot, dict):
-        enriched_snapshot = _enrich_auto_assignment_snapshot(
-            run.output_snapshot,
-            project_id=testcase.project_id,
-            environment_id=env_id,
+    case_text = collect_testcase_text(testcase)
+    needs_assigned_claim = resolution.source == _CLAIMABLE_AUTO_SOURCE
+    if (uses_automatic_assignment(case_text) or needs_assigned_claim) and isinstance(run.output_snapshot, dict):
+        enriched_snapshot = (
+            _wait_for_assigned_claim_snapshot(
+                run.output_snapshot,
+                project_id=testcase.project_id,
+                environment_id=env_id,
+            )
+            if needs_assigned_claim
+            else _enrich_auto_assignment_snapshot(
+                run.output_snapshot,
+                project_id=testcase.project_id,
+                environment_id=env_id,
+            )
         )
         if enriched_snapshot != run.output_snapshot:
             run.output_snapshot = enriched_snapshot
             run.save(update_fields=['output_snapshot'])
 
+    if needs_assigned_claim:
+        snapshot = run.output_snapshot if isinstance(run.output_snapshot, dict) else {}
+        assignment = snapshot.get('autoAssignment') if isinstance(snapshot, dict) else None
+        if not isinstance(assignment, dict) or not assignment.get('assigneeUserId'):
+            return TestcasePreDataResult(
+                run=run,
+                resolution=resolution,
+                blocked=True,
+                block_message=(
+                    '前置数据准备失败: 新建工单尚未完成自动分配为“待处理”状态；'
+                    '请检查自动分配规则后重试。'
+                ),
+            )
+        _, credential_error = resolve_claim_login_credentials(testcase, snapshot)
+        if credential_error:
+            return TestcasePreDataResult(
+                run=run,
+                resolution=resolution,
+                blocked=True,
+                block_message=f'前置数据准备失败: {credential_error}',
+            )
+
     suffix = _build_message_suffix(
         run,
         resolution,
-        case_text=collect_testcase_text(testcase),
+        case_text=case_text,
     )
     return TestcasePreDataResult(
         run=run,
