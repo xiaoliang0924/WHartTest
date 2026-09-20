@@ -806,10 +806,16 @@ def cancel_test_execution(execution_id):
             execution.completed_at = timezone.now()
             execution.save(update_fields=['status', 'completed_at', 'updated_at'])
             
-            # 取消所有pending状态的测试用例结果
+            # 取消未结束的用例结果（含卡住的 running）
+            now = timezone.now()
             execution.results.filter(status='pending').update(
                 status='skip',
-                completed_at=timezone.now()
+                completed_at=now,
+            )
+            execution.results.filter(status='running').update(
+                status='error',
+                error_message='测试执行已取消（用例执行中被终止）',
+                completed_at=now,
             )
             
             logger.info(f"测试执行已取消: {execution_id}")

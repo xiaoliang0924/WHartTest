@@ -408,13 +408,30 @@ const notifyExecutionOutcome = async (
 
   if (status === 'fail' || status === 'error') {
     const preDataFailed = summary.startsWith('测试数据准备失败');
-    Notification.error({
+    let failNotificationReturn: { close?: () => void } | undefined;
+    failNotificationReturn = Notification.error({
       title: preDataFailed
         ? (isEnglish.value ? 'Test data preparation failed' : '测试数据准备失败，未执行用例步骤')
         : (isEnglish.value ? 'Case execution failed' : '用例执行失败'),
       content: extractExecutionFailReason(summary),
-      duration: 12000,
+      duration: 0,
+      closable: true,
       id: `exec-case-fail-${caseId}`,
+      footer: () => h(
+        'div',
+        { style: 'display: flex; justify-content: flex-end; margin-top: 8px;' },
+        [
+          h(
+            'a',
+            {
+              href: 'javascript:;',
+              style: EXEC_CASE_LINK_STYLE,
+              onClick: () => failNotificationReturn?.close?.(),
+            },
+            isEnglish.value ? 'Close' : '关闭',
+          ),
+        ],
+      ),
     });
     return;
   }
