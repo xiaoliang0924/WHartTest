@@ -380,7 +380,7 @@ const extractExecutionFailReason = (summary?: string) => {
   }
   const reasonMatch = summary.match(/失败原因[:：]\s*([\s\S]+?)(?:\n\s*\n|###|结论|$)/);
   const text = (reasonMatch?.[1] || summary).replace(/[#|*`-]/g, ' ').replace(/\s+/g, ' ').trim();
-  return text.slice(0, 180) || (isEnglish.value ? 'The case did not pass.' : '用例未通过，请查看执行结果。');
+  return text || (isEnglish.value ? 'The case did not pass.' : '用例未通过，请查看执行结果。');
 };
 
 const notifyExecutionOutcome = async (
@@ -413,7 +413,14 @@ const notifyExecutionOutcome = async (
       title: preDataFailed
         ? (isEnglish.value ? 'Test data preparation failed' : '测试数据准备失败，未执行用例步骤')
         : (isEnglish.value ? 'Case execution failed' : '用例执行失败'),
-      content: extractExecutionFailReason(summary),
+      // 完整保留失败原因；长文本在固定高度区域内滚动，避免通知无限撑高或被截断。
+      content: () => h(
+        'div',
+        {
+          style: 'max-width: 520px; max-height: 220px; overflow-y: auto; overflow-wrap: anywhere; line-height: 1.55; padding-right: 4px;',
+        },
+        extractExecutionFailReason(summary),
+      ),
       // 失败原因较长时保留足够阅读时间，同时避免提示长期遮挡执行结果。
       duration: 10000,
       closable: true,
