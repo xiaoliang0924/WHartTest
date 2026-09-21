@@ -1033,7 +1033,7 @@ def build_testcase_navigation_hint(testcase: TestCase) -> str:
                 f'- 步骤{step.step_number}: `await helpers.runClaimableTicketCaseStep(page, {step.step_number});`'
             )
         lines.extend([
-            '- 系统会先自动分配处理人；helper 会自动切换到该处理人的已配置账号，步骤4须进入详情并确认「领取工单」后才会截图。',
+            '- 系统会先自动分配处理人；helper 会自动切换到该处理人的已配置账号，并从「我的工单」进入详情，步骤4须确认「领取工单」后才会截图。',
             '- helper 返回 null 或输出 RESULT=FAIL 时立即判不通过，禁止自行补截图或改报通过。',
         ])
         return '\n'.join(lines)
@@ -1149,7 +1149,7 @@ def _build_message_suffix(
         if fixed_claimable_flow:
             lines.append(
                 f'- 本次造数工单号: {ticket_no}。专用 helper 会以自动分配的处理人登录，'
-                '按工单号在「待处理」列表定位并进入领取详情。'
+                '按工单号在「我的工单 → 待处理」列表定位并进入领取详情。'
             )
             return '\n'.join(lines)
         lines.append(

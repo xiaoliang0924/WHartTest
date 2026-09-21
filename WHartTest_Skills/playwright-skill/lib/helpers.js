@@ -2975,7 +2975,7 @@ function getTicketIdFromEnv() {
 }
 
 function isTicketDetailUrl(url) {
-  return /\/work-order\/tickets?\/\d+(?:\?|$|\/)/.test(String(url || ''));
+  return /\/work-order\/(?:tickets?|my-tickets)\/\d+(?:\?|$|\/)/.test(String(url || ''));
 }
 
 function isSlaDetailLandingUrl(url) {
@@ -3906,7 +3906,8 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
     return null;
   }
 
-  // 步骤3 在待处理列表确认已自动分配的造数；步骤4 由 enterClaimableTicketDetailFromList 进领取详情。
+  // “领取工单”按钮仅在「我的工单」详情页展示，不能走全量工单列表详情。
+  // 步骤3 在我的待处理列表确认已自动分配的造数；步骤4 点处理进领取详情。
   const queryClaimableTicketOnList = async () => {
     await fillFilterField(page, '工单号', ticketNo);
     await selectFormDropdownOption(page, '工单状态', '待处理');
@@ -3915,11 +3916,18 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
     await waitForTicketListSettled();
   };
 
+  const queryClaimableTicketByNo = async () => {
+    await fillFilterField(page, '工单号', ticketNo);
+    await clickPageButton(page, '查询');
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    await waitForTicketListSettled();
+  };
+
   if (step === 2) {
-    await navigateToTicketListPage(page);
+    await navigateToMyTicketsPage(page);
     await waitForPageBodyText(page, 80, 10000);
     await screenshotCaseStep(page, step, cid);
-    console.log(`RESULT=PASS: 步骤2已进入工单列表 URL=${page.url()}`);
+    console.log(`RESULT=PASS: 步骤2已进入我的工单列表 URL=${page.url()}`);
     return target;
   }
 
@@ -3929,8 +3937,8 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
     if (row) {
       return { row, listHint: '待处理' };
     }
-    console.log(`RESULT=INFO: 工单号+待处理未命中，改用仅工单号确认造数 ${ticketNo}`);
-    await queryTicketByNoOnly(page, ticketNo);
+    console.log(`RESULT=INFO: 工单号+待处理未命中，改用我的工单仅工单号确认造数 ${ticketNo}`);
+    await queryClaimableTicketByNo();
     row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
     try {
       await row.waitFor({ state: 'visible', timeout: 12000 });
@@ -3964,16 +3972,18 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
   }
 
   if (step === 4) {
-    if (!(await ensureTicketListPage(page))) {
-      await navigateToTicketListPage(page);
+    if (detectWorkOrderPage(page) !== 'my-tickets') {
+      await navigateToMyTicketsPage(page);
     }
-    if (isLoginPageUrl(page.url()) || detectWorkOrderPage(page) !== 'ticket-list') {
-      console.log(`RESULT=FAIL: 步骤4无法进入工单列表 URL=${page.url()}`);
+    if (isLoginPageUrl(page.url()) || detectWorkOrderPage(page) !== 'my-tickets') {
+      console.log(`RESULT=FAIL: 步骤4无法进入我的工单列表 URL=${page.url()}`);
       return null;
     }
     await dismissBlockingDialogs(page);
     console.log(`RESULT=INFO: 步骤4进入待领取详情 ${ticketNo}`);
-    const enteredDetail = await enterClaimableTicketDetailFromList(page, ticketNo);
+    await queryClaimableTicketOnList();
+    const row = await claimableRow();
+    const enteredDetail = row ? await clickProcessInTableRow(page, row) : false;
     if (!enteredDetail) {
       const captured = await captureTicketDetailView(page, target, step);
       if (captured) {
