@@ -115,6 +115,22 @@ class ExecutionResultReportTests(SimpleTestCase):
         self.assertEqual(outcome["status"], "pass")
         self.assertTrue(all(item["status"] == "pass" for item in outcome["step_results"]))
 
+    def test_all_step_evidence_overrides_model_timeout_failure_text(self):
+        transcript = "\n".join(
+            f"[CASE_SCREENSHOT] /tmp/case_1520_step{step}.png\nRESULT=PASS: 步骤{step}通过"
+            for step in range(1, 5)
+        )
+        outcome = ensure_execution_result_report(
+            _fake_case(),
+            transcript=(
+                transcript
+                + "\nModel call failed after 4 attempts with APITimeoutError.\n"
+                + "RESULT=FAIL: ...')` + 截图。通过则 RESULT=PASS。"
+            ),
+        )
+        self.assertEqual(outcome["status"], "pass")
+        self.assertIn("## 测试执行结果: 通过", outcome["report"])
+
     def test_synthesizes_report_for_missing_screenshot_file(self):
         outcome = ensure_execution_result_report(
             _fake_case(),

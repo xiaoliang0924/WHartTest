@@ -597,8 +597,19 @@ def ensure_execution_result_report(
             combined,
             fail_reason=fail_reason,
         )
+    expected_steps = _testcase_steps(testcase)
+    all_steps_passed = bool(expected_steps) and len(step_results) == len(expected_steps) and all(
+        item.get("status") == "pass" for item in step_results
+    )
     if step_results:
-        if any(item.get("status") == "skip" for item in step_results):
+        # Browser helper evidence is authoritative once every configured step
+        # passed.  A later LLM timeout or an instructional example containing
+        # ``RESULT=FAIL`` must not overwrite a fully evidenced successful run.
+        if all_steps_passed:
+            status = "pass"
+            fail_reason = ""
+            extra_note = ""
+        elif any(item.get("status") == "skip" for item in step_results):
             status = "fail"
             if not fail_reason or fail_reason == "执行中途结束，未输出完整测试报告":
                 fail_reason = "仍有步骤未执行完成"
@@ -612,7 +623,7 @@ def ensure_execution_result_report(
             fail_reason=fail_reason,
         )
 
-    if already_has_report:
+    if already_has_report and not all_steps_passed:
         summary = assistant_text
         start = assistant_text.find("## 测试执行结果")
         if start < 0:
