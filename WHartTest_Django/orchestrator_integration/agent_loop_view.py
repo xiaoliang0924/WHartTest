@@ -1803,6 +1803,37 @@ class AgentLoopStreamAPIView(View):
                                                         "step": step_count,
                                                     }
                                                 )
+
+                                                # Playwright helper 已给出确定失败时无需再等待
+                                                # 模型生成“下一步/总结”。否则所有步骤都已结束，
+                                                # 页面仍会长时间停在“正在准备下一步”。
+                                                if test_case_id and re.search(
+                                                    r"RESULT\s*=\s*FAIL\b",
+                                                    str(content),
+                                                    flags=re.IGNORECASE,
+                                                ):
+                                                    record, injected_report = await _complete_testcase_run_with_report(
+                                                        session_id=session_id,
+                                                        final_content=str(content),
+                                                        messages=[],
+                                                        agent=agent,
+                                                        invoke_config=invoke_config,
+                                                    )
+                                                    if injected_report:
+                                                        yield create_sse_data(
+                                                            {"type": "stream", "data": "\n\n" + injected_report}
+                                                        )
+                                                    yield create_sse_data(
+                                                        {
+                                                            "type": "complete",
+                                                            "total_steps": step_count,
+                                                            "test_case_run": {
+                                                                "status": record.status if record else "fail",
+                                                                "summary": record.summary if record else "",
+                                                            },
+                                                        }
+                                                    )
+                                                    return
                                         # 步骤完成
                                         if step_count > 0:
                                             yield create_sse_data(
