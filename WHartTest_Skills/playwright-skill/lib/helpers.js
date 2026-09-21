@@ -3987,11 +3987,17 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
     }
     await dismissBlockingDialogs(page);
     console.log(`RESULT=INFO: 步骤4进入待领取详情 ${ticketNo}`);
-    if (!(await queryClaimableTicketOnList())) {
-      await screenshotCaseStep(page, step, cid);
-      return null;
+    // 步骤3已经完成“待处理”筛选。步骤4应优先操作该筛选结果，避免
+    // 重复打开下拉框时因页面重渲染将选择重置为“全部”。仅当当前列表
+    // 没有目标行时才重新查询。
+    let row = await claimableRow({ reportFailure: false });
+    if (!row) {
+      if (!(await queryClaimableTicketOnList())) {
+        await screenshotCaseStep(page, step, cid);
+        return null;
+      }
+      row = await claimableRow();
     }
-    const row = await claimableRow();
     const enteredDetail = row ? await clickProcessInTableRow(page, row) : false;
     if (!enteredDetail) {
       const captured = await captureTicketDetailView(page, target, step);
