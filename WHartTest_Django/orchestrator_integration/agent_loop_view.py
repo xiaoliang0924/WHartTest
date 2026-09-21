@@ -2384,12 +2384,27 @@ class AgentLoopStopAPIView(View):
         # 3. 设置停止信号
         success = set_stop_signal(session_id)
 
+        # 停止不能只依赖运行中的流在“下一次产出”时轮询信号：当模型请求
+        # 正在等待或重试时，流不会产出任何 chunk，记录会长时间停留在执行中。
+        # 立即结束用例运行记录；后续旧请求即使返回，也不会覆盖已停止的结果。
+        record, _ = await _complete_testcase_run_with_report(
+            session_id=session_id,
+            stopped=True,
+            error_message="用户主动停止执行",
+        )
+
         logger.info(
             f"AgentLoopStopAPI: Stop signal set for session {session_id} by user {user.id}"
         )
 
         return api_success_response(
-            "已发送停止信号", {"session_id": session_id, "success": success}
+            "已停止执行",
+            {
+                "session_id": session_id,
+                "success": success,
+                "run_record_id": getattr(record, "id", None),
+                "run_status": getattr(record, "status", None),
+            },
         )
 
 
