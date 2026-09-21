@@ -14,12 +14,43 @@ from langchain_core.outputs import ChatGenerationChunk
 
 from . import agent_loop_view
 from .agent_loop_view import (
-	_build_sanitized_messages,
+    _is_final_testcase_step_pass,
+    _build_sanitized_messages,
     _extract_linked_image_urls,
     _is_linked_image_url_allowed,
     _normalize_uploaded_image_base64_list,
     _prepare_agent_loop_human_message,
 )
+
+
+class FinalTestcaseStepTests(SimpleTestCase):
+    def test_final_fixed_helper_pass_is_terminal(self):
+        self.assertTrue(
+            _is_final_testcase_step_pass(
+                tool_name="execute_skill_script",
+                content="[执行进度] 正在执行步骤 4/4\nRESULT=PASS: 步骤4通过",
+                helper_step=4,
+                total_steps=4,
+            )
+        )
+
+    def test_non_final_or_failed_step_is_not_terminal(self):
+        self.assertFalse(
+            _is_final_testcase_step_pass(
+                tool_name="execute_skill_script",
+                content="RESULT=PASS: 步骤3通过",
+                helper_step=3,
+                total_steps=4,
+            )
+        )
+        self.assertFalse(
+            _is_final_testcase_step_pass(
+                tool_name="execute_skill_script",
+                content="RESULT=FAIL: 步骤4失败",
+                helper_step=4,
+                total_steps=4,
+            )
+        )
 from .builtin_tools.skill_tools import (
     _build_skill_artifacts_dir,
     _collect_skill_artifacts,
@@ -571,4 +602,3 @@ class SkillFailureReminderTests(SimpleTestCase):
         )
         self.assertIn("脚本错误，请修正后重试", output)
         self.assertIn("测试执行结果: 不通过", output)
-

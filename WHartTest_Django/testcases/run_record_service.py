@@ -290,6 +290,94 @@ def _infer_run_status(*, transcript: str, stopped: bool, error_message: Optional
     return "fail"
 
 
+def collect_checkpoint_execution_transcript(
+    *,
+    user_id: int,
+    project_id: int | str,
+    session_id: str,
+) -> str:
+    """Load tool/assistant execution text from the latest LangGraph checkpoint."""
+    thread_id = f"{user_id}_{project_id}_{session_id}"
+    try:
+        from wharttest_django.checkpointer import get_sync_checkpointer
+
+        with get_sync_checkpointer() as memory:
+            checkpoint_tuples = list(
+                memory.list(config={"configurable": {"thread_id": thread_id}})
+            )
+        if not checkpoint_tuples:
+            return ""
+        checkpoint_data = checkpoint_tuples[0].checkpoint
+        if not isinstance(checkpoint_data, dict):
+            return ""
+        messages = checkpoint_data.get("channel_values", {}).get("messages") or []
+        if not messages:
+            return ""
+        return collect_message_transcript(messages, exclude_human=True)
+    except Exception as exc:
+        logger.warning(
+            "collect_checkpoint_execution_transcript failed session=%s: %s",
+            session_id,
+            exc,
+        )
+        return ""
+
+
+def build_step_results_from_execution_evidence(
+    testcase,
+    transcript: str,
+    *,
+    fail_reason: str,
+) -> list[dict[str, Any]]:
+    """Derive per-step status from Playwright helper output (RESULT=PASS/FAIL + step screenshots)."""
+    text = transcript or ""
+    if not text.strip():
+        return []
+
+    case_id = int(getattr(testcase, "id", 0) or 0)
+    step_outcomes: dict[int, str] = {}
+    for match in re.finditer(
+        rf"case[_-]{case_id}_step(\d+)[\s\S]{{0,5000}}?RESULT=(PASS|FAIL)",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        step_outcomes[int(match.group(1))] = match.group(2).lower()
+
+    for match in re.finditer(
+        r"正在执行步骤\s*(\d+)[\s\S]{0,5000}?RESULT=(PASS|FAIL)",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        step_outcomes.setdefault(int(match.group(1)), match.group(2).lower())
+
+    if not step_outcomes:
+        return []
+
+    steps = _testcase_steps(testcase)
+    results: list[dict[str, Any]] = []
+    for step in steps:
+        number = int(getattr(step, "step_number", 0) or 0)
+        description = getattr(step, "description", "") or ""
+        expected = getattr(step, "expected_result", "") or ""
+        outcome = step_outcomes.get(number)
+        if outcome == "pass":
+            step_status, actual = "pass", "通过"
+        elif outcome == "fail":
+            step_status, actual = "fail", fail_reason or "步骤执行失败"
+        else:
+            step_status, actual = "skip", "未执行"
+        results.append(
+            {
+                "step_number": number,
+                "description": description,
+                "expected_result": expected,
+                "actual_result": actual,
+                "status": step_status,
+            }
+        )
+    return results
+
+
 def build_step_results(
     testcase,
     *,
@@ -497,6 +585,19 @@ def ensure_execution_result_report(
 
     parsed = parse_execution_outcome(assistant_text) if already_has_report else None
     step_results = (parsed or {}).get("step_results") or []
+    if not step_results:
+        step_results = build_step_results_from_execution_evidence(
+            testcase,
+            combined,
+            fail_reason=fail_reason,
+        )
+    if step_results:
+        if any(item.get("status") == "skip" for item in step_results):
+            status = "fail"
+            if not fail_reason or fail_reason == "执行中途结束，未输出完整测试报告":
+                fail_reason = "仍有步骤未执行完成"
+        elif any(item.get("status") == "fail" for item in step_results):
+            status = "fail"
     if not step_results:
         step_results = build_step_results(
             testcase,
@@ -706,6 +807,19 @@ def finalize_testcase_run_record(
 
     if record.status != "running":
         return record
+
+    # A fixed helper can finalize immediately after the last PASS marker, before
+    # the streaming loop has loaded ``all_messages``.  Include its checkpoint so
+    # the successful final step does not make earlier steps look unexecuted.
+    checkpoint_transcript = collect_checkpoint_execution_transcript(
+        user_id=int(record.executor_id),
+        project_id=record.testcase.project_id,
+        session_id=session_id,
+    )
+    if checkpoint_transcript and checkpoint_transcript not in (transcript or ""):
+        transcript = "\n".join(
+            part for part in (checkpoint_transcript, transcript) if part
+        )
 
     combined = "\n".join(part for part in (transcript, final_content) if part).strip()
     assistant_text = "\n".join(

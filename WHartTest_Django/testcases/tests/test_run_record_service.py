@@ -94,6 +94,16 @@ class ExecutionResultReportTests(SimpleTestCase):
         self.assertEqual(outcome["step_results"][1]["status"], "fail")
         self.assertEqual(outcome["step_results"][2]["status"], "skip")
 
+    def test_synthesizes_pass_report_from_all_fixed_helper_steps(self):
+        transcript = "\n".join(
+            f"[CASE_SCREENSHOT] /tmp/case_1520_step{step}.png\nRESULT=PASS: 步骤{step}通过"
+            for step in range(1, 5)
+        )
+        outcome = ensure_execution_result_report(_fake_case(), transcript=transcript)
+        self.assertTrue(outcome["injected"])
+        self.assertEqual(outcome["status"], "pass")
+        self.assertTrue(all(item["status"] == "pass" for item in outcome["step_results"]))
+
     def test_synthesizes_report_for_missing_screenshot_file(self):
         outcome = ensure_execution_result_report(
             _fake_case(),

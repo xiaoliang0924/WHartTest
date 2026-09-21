@@ -78,6 +78,20 @@ from requirements.context_limits import (
 logger = logging.getLogger(__name__)
 
 
+def _is_final_testcase_step_pass(
+    *, tool_name: str, content: str, helper_step: Optional[int], total_steps: Optional[int]
+) -> bool:
+    """Return whether a fixed helper conclusively completed the final case step."""
+    if tool_name != "execute_skill_script" or not helper_step or not total_steps:
+        return False
+    if helper_step != total_steps:
+        return False
+    markers = re.findall(
+        r"RESULT\s*=\s*(PASS|FAIL)\b", str(content), flags=re.IGNORECASE
+    )
+    return bool(markers) and markers[-1].upper() == "PASS"
+
+
 def _build_sse_error_event(exc: Exception) -> Dict[str, Any]:
     friendly_error = get_user_friendly_llm_error(exc)
     if friendly_error:
@@ -1764,6 +1778,8 @@ class AgentLoopStreamAPIView(View):
                                                 ) or getattr(
                                                     tool_msg, "tool_name", "unknown"
                                                 )
+                                                helper_step = None
+                                                total_steps = None
 
                                                 # 使用辅助函数处理 MCP 工具输出
                                                 content, summary = (
@@ -1835,6 +1851,37 @@ class AgentLoopStreamAPIView(View):
                                                             "total_steps": step_count,
                                                             "test_case_run": {
                                                                 "status": record.status if record else "fail",
+                                                                "summary": record.summary if record else "",
+                                                            },
+                                                        }
+                                                    )
+                                                    return
+                                                if test_case_id and _is_final_testcase_step_pass(
+                                                    tool_name=tool_name,
+                                                    content=str(content),
+                                                    helper_step=helper_step,
+                                                    total_steps=total_steps,
+                                                ):
+                                                    # The helper has already proved every required
+                                                    # step. Do not wait for a further LLM turn just
+                                                    # to produce a summary, as that turn can stall.
+                                                    record, injected_report = await _complete_testcase_run_with_report(
+                                                        session_id=session_id,
+                                                        final_content=str(content),
+                                                        messages=[],
+                                                        agent=agent,
+                                                        invoke_config=invoke_config,
+                                                    )
+                                                    if injected_report:
+                                                        yield create_sse_data(
+                                                            {"type": "stream", "data": "\n\n" + injected_report}
+                                                        )
+                                                    yield create_sse_data(
+                                                        {
+                                                            "type": "complete",
+                                                            "total_steps": step_count,
+                                                            "test_case_run": {
+                                                                "status": record.status if record else "pass",
                                                                 "summary": record.summary if record else "",
                                                             },
                                                         }
