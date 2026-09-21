@@ -787,12 +787,22 @@ def is_ticket_detail_boundary_case(testcase: TestCase) -> bool:
 
 
 def is_claimable_ticket_detail_case(testcase: TestCase) -> bool:
-    """Cases that must open an assigned pending ticket and expose claim."""
+    """Whether this is the five-step *claim-dialog copy* scenario.
+
+    The original broad keyword match also caught cancellation, confirmation,
+    post-claim and message cases.  Those cases have different numbers of
+    steps and assertions, so forcing the five-step helper on them made their
+    execution stop at an unsupported step.  Only the case that verifies the
+    contents of the confirmation dialog should use that fixed helper.
+    """
     blob = collect_testcase_text(testcase)
     return (
         '待处理' in blob
         and '处理' in blob
         and '领取工单' in blob
+        and '确认领取' in blob
+        and ('弹窗文案' in blob or '标题为' in blob)
+        and ('取消' in blob and '确定' in blob)
     )
 
 
