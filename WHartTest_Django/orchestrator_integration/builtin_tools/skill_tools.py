@@ -1353,7 +1353,7 @@ def get_skill_tools(
                             )
                     exec_timeout_seconds = 60
                     if re.search(
-                        r"runClaimableTicketCaseStep\s*\(\s*page\s*,\s*[34]\s*\)",
+                        r"runClaimableTicketCaseStep\s*\(\s*page\s*,\s*[345]\s*\)",
                         helper_code,
                         flags=re.IGNORECASE,
                     ):

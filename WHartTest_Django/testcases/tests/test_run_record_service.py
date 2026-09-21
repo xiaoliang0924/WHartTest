@@ -94,6 +94,17 @@ class ExecutionResultReportTests(SimpleTestCase):
         self.assertEqual(outcome["step_results"][1]["status"], "fail")
         self.assertEqual(outcome["step_results"][2]["status"], "skip")
 
+    def test_ignores_result_fail_mentioned_only_in_guard_instructions(self):
+        outcome = ensure_execution_result_report(
+            _fake_case(),
+            transcript=(
+                "RESULT=PASS: fixed helper complete\n"
+                "helper 返回 null 或输出 RESULT=FAIL 时立即判不通过，"
+                "禁止自行补截图或改报通过。"
+            ),
+        )
+        self.assertEqual(outcome["status"], "pass")
+
     def test_synthesizes_pass_report_from_all_fixed_helper_steps(self):
         transcript = "\n".join(
             f"[CASE_SCREENSHOT] /tmp/case_1520_step{step}.png\nRESULT=PASS: 步骤{step}通过"

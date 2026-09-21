@@ -38,6 +38,10 @@ _REPORT_TEMPLATE_MARKERS = (
     "| 1 | … |",
 )
 _RESULT_FAIL_RE = re.compile(r"RESULT=FAIL[:：]?\s*(.+)", re.IGNORECASE)
+_NON_EXECUTION_RESULT_FAIL_RE = re.compile(
+    r"RESULT=FAIL\s*(?:时立即判不通过，禁止自行补截图或改报通过|必须停止，禁止改报通过)[。.]?",
+    re.IGNORECASE,
+)
 _FILE_MISSING_RE = re.compile(r"文件不存在[:：]?\s*(.+)")
 _COMMAND_FAIL_RE = re.compile(r"命令执行失败[^\n]*")
 _TIMEOUT_RE = re.compile(r"(TimeoutError|Timeout \d+ms exceeded)[^\n]*", re.IGNORECASE)
@@ -186,11 +190,12 @@ def collect_assistant_transcript(messages) -> str:
 
 
 def _infer_status_from_text(final_content: str) -> tuple[str, str, list]:
-    title = _REPORT_TITLE_RE.search(final_content or "")
+    effective_content = _NON_EXECUTION_RESULT_FAIL_RE.sub("", final_content or "")
+    title = _REPORT_TITLE_RE.search(effective_content)
     if title:
         status = "pass" if title.group(1) == "通过" else "fail"
         return status, (final_content or "")[:8000], []
-    lowered = (final_content or "").lower()
+    lowered = effective_content.lower()
     if any(token in lowered for token in _FAIL_HINTS):
         return "fail", final_content[:8000], []
     if any(token in lowered for token in _PASS_HINTS):
@@ -225,7 +230,7 @@ def _testcase_steps(testcase) -> list:
 
 
 def _extract_fail_context(transcript: str) -> dict[str, Any]:
-    text = transcript or ""
+    text = _NON_EXECUTION_RESULT_FAIL_RE.sub("", transcript or "")
     reason = ""
     fail_match = _RESULT_FAIL_RE.search(text)
     if fail_match:
@@ -275,13 +280,14 @@ def _infer_run_status(*, transcript: str, stopped: bool, error_message: Optional
         return "stopped"
     if error_message:
         return "error"
-    title = _REPORT_TITLE_RE.search(transcript or "")
+    effective_transcript = _NON_EXECUTION_RESULT_FAIL_RE.sub("", transcript or "")
+    title = _REPORT_TITLE_RE.search(effective_transcript)
     if title:
         return "pass" if title.group(1) == "通过" else "fail"
-    lowered = (transcript or "").lower()
+    lowered = effective_transcript.lower()
     if any(token in lowered for token in _FAIL_HINTS):
         return "fail"
-    if "RESULT=PASS" in (transcript or "") and "RESULT=FAIL" not in (transcript or ""):
+    if "RESULT=PASS" in effective_transcript and "RESULT=FAIL" not in effective_transcript:
         return "pass"
     if any(token in lowered for token in _PASS_HINTS) and not any(
         token in lowered for token in _FAIL_HINTS

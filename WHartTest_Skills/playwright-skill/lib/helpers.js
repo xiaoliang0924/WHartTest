@@ -3815,7 +3815,7 @@ async function runTicketDetailCaseStep(page, stepNumber, caseId) {
 
 /**
  * 待处理、已自动分配工单的固定流程：以被分配处理人登录 -> 筛选 -> 点处理 -> 验证领取工单。
- * 步骤4失败时故意不保存截图，避免把列表页误作详情页证据。
+ * 步骤4失败时故意不保存截图，避免把列表页误作详情页证据；步骤5验证领取确认弹窗。
  */
 async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
   const step = Number(stepNumber);
@@ -3825,10 +3825,11 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
   const target = pathMod.join(dir, `case_${cid}_step${step}.png`);
   const ticketNo = getTicketNoFromEnv();
   const expectedAssignee = String(process.env.WHARTTEST_CLAIM_ASSIGNEE_NAME || '').trim();
+  const totalSteps = Number(process.env.WHARTTEST_CASE_STEP_COUNT || 5) || 5;
 
   // 固定 helper 的控制台输出会直接展示在执行对话中；每一步开始先输出进度，
   // 让用户无需依赖聊天层解析即可看到当前用例进展。
-  console.log(`[执行进度] 正在执行步骤 ${step}/4`);
+  console.log(`[执行进度] 正在执行步骤 ${step}/${totalSteps}`);
 
   const readClaimableRowFields = async (row) =>
     row.evaluate((element) => {
@@ -4042,7 +4043,55 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
     return target;
   }
 
-  return screenshotCaseStep(page, step, cid);
+  if (step === 5) {
+    // 只验证弹窗，不点击弹窗中的「确定」，避免将测试数据的工单真正领取走。
+    if (!(await isClaimTicketButtonVisible(page, 5000))) {
+      console.log('RESULT=FAIL: 步骤5前详情页未出现“领取工单”按钮');
+      return null;
+    }
+    const claimButton = page
+      .getByRole('button', { name: /领取工单/ })
+      .first();
+    try {
+      await claimButton.waitFor({ state: 'visible', timeout: 5000 });
+      await claimButton.click({ timeout: 5000 });
+    } catch (err) {
+      console.log(`RESULT=FAIL: 步骤5点击“领取工单”按钮失败: ${String(err?.message || err).slice(0, 180)}`);
+      return null;
+    }
+
+    const dialog = page
+      .locator('.el-dialog:visible, .el-message-box:visible, [role="dialog"]:visible')
+      .filter({ hasText: /确认领取/ })
+      .last();
+    try {
+      await dialog.waitFor({ state: 'visible', timeout: 8000 });
+      const text = (await dialog.innerText()).replace(/\s+/g, ' ').trim();
+      const hasTitle = /确认领取/.test(text);
+      const hasPrompt = /确认.*领取.*工单|领取.*工单/.test(text);
+      const hasCancel = await dialog.getByRole('button', { name: /取消/ }).count() > 0;
+      const hasConfirm = await dialog.getByRole('button', { name: /确定/ }).count() > 0;
+      const captured = !!(await screenshotCaseStep(page, step, cid));
+      if (!hasTitle || !hasPrompt || !hasCancel || !hasConfirm) {
+        console.log(
+          `RESULT=FAIL: 确认领取弹窗内容不完整 title=${hasTitle} prompt=${hasPrompt} cancel=${hasCancel} confirm=${hasConfirm} text=${text.slice(0, 180)}`,
+        );
+        return null;
+      }
+      if (!captured) {
+        console.log('RESULT=FAIL: 确认领取弹窗截图保存失败');
+        return null;
+      }
+      console.log(`RESULT=PASS: 步骤5已弹出“确认领取”弹窗并确认文案及取消/确定按钮 URL=${page.url()}`);
+      return target;
+    } catch (err) {
+      console.log(`RESULT=FAIL: 步骤5未出现“确认领取”弹窗: ${String(err?.message || err).slice(0, 180)}`);
+      return null;
+    }
+  }
+
+  console.log(`RESULT=FAIL: 不支持的领取工单步骤 ${step}，当前固定流程最多 ${totalSteps} 步`);
+  return null;
 }
 
 /**
