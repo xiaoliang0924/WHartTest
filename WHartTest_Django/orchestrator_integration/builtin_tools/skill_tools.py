@@ -810,15 +810,10 @@ def _auto_upload_case_screenshots(
         if step_match:
             step_to_path[step_match.group(1)] = resolved
 
-    # 本轮目录在开跑时已清空，这里补传 hook 写盘但 stdout 为空的步骤图
-    if screenshot_dir and os.path.isdir(screenshot_dir):
-        for name in sorted(os.listdir(screenshot_dir)):
-            if not re.match(rf"case_{case_id}_step\d+\.png$", name, re.IGNORECASE):
-                continue
-            full_path = os.path.join(screenshot_dir, name)
-            step_match = re.search(r"step(\d+)", name, re.IGNORECASE)
-            if step_match:
-                step_to_path[step_match.group(1)] = full_path
+    # 只接受当前命令 stdout 明确声明的截图。截图目录会在同一用例的多次
+    # 命令间复用，扫描整个目录会把上一轮或其他步骤遗留的同名文件错误绑定到
+    # 当前执行记录，导致“步骤”和截图内容不一致。缺少声明时宁可不上传，
+    # 由调用方补充 CASE_SCREENSHOT，也不能上传无法归属的旧图。
 
     max_step = 0
     try:
