@@ -1807,14 +1807,16 @@ class AgentLoopStreamAPIView(View):
                                                 # Playwright helper 已给出确定失败时无需再等待
                                                 # 模型生成“下一步/总结”。否则所有步骤都已结束，
                                                 # 页面仍会长时间停在“正在准备下一步”。
+                                                result_markers = re.findall(
+                                                    r"RESULT\s*=\s*(PASS|FAIL)\b",
+                                                    str(content),
+                                                    flags=re.IGNORECASE,
+                                                )
                                                 if (
                                                     test_case_id
                                                     and tool_name == "execute_skill_script"
-                                                    and re.search(
-                                                        r"RESULT\s*=\s*FAIL\b",
-                                                        str(content),
-                                                        flags=re.IGNORECASE,
-                                                    )
+                                                    and result_markers
+                                                    and result_markers[-1].upper() == "FAIL"
                                                 ):
                                                     record, injected_report = await _complete_testcase_run_with_report(
                                                         session_id=session_id,

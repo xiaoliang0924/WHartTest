@@ -3910,10 +3910,14 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
   // 步骤3 在我的待处理列表确认已自动分配的造数；步骤4 点处理进领取详情。
   const queryClaimableTicketOnList = async () => {
     await fillFilterField(page, '工单号', ticketNo);
-    await selectFormDropdownOption(page, '工单状态', '待处理');
+    const statusSelected = await selectFormDropdownOption(page, '工单状态', '待处理');
+    // “待处理”是该用例的必要验证条件。选择失败时不能继续按工单号
+    // 进入详情，否则同一命令会同时输出 FAIL 与 PASS，掩盖真实失败。
+    if (!statusSelected) return false;
     await clickPageButton(page, '查询');
     await page.waitForLoadState('domcontentloaded').catch(() => {});
     await waitForTicketListSettled();
+    return true;
   };
 
   const queryClaimableTicketByNo = async () => {
@@ -3932,7 +3936,9 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
   }
 
   const findClaimableRowAnyList = async () => {
-    await queryClaimableTicketOnList();
+    if (!(await queryClaimableTicketOnList())) {
+      return { row: null, listHint: '' };
+    }
     let row = await claimableRow({ reportFailure: false });
     if (row) {
       return { row, listHint: '待处理' };
@@ -3981,7 +3987,10 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
     }
     await dismissBlockingDialogs(page);
     console.log(`RESULT=INFO: 步骤4进入待领取详情 ${ticketNo}`);
-    await queryClaimableTicketOnList();
+    if (!(await queryClaimableTicketOnList())) {
+      await screenshotCaseStep(page, step, cid);
+      return null;
+    }
     const row = await claimableRow();
     const enteredDetail = row ? await clickProcessInTableRow(page, row) : false;
     if (!enteredDetail) {
