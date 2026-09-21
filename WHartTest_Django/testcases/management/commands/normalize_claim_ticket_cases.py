@@ -125,9 +125,18 @@ class Command(BaseCommand):
                 case_updates += 1
                 if case.id in LIFECYCLE_STEPS:
                     for number, (description, expected) in LIFECYCLE_STEPS[case.id].items():
-                        step = case.steps.get(step_number=number)
-                        step.description, step.expected_result = description, expected
-                        step.save(update_fields=["description", "expected_result", "updated_at"])
+                        step, created = TestCaseStep.objects.get_or_create(
+                            test_case=case,
+                            step_number=number,
+                            defaults={
+                                "description": description,
+                                "expected_result": expected,
+                                "creator": case.creator,
+                            },
+                        )
+                        if not created:
+                            step.description, step.expected_result = description, expected
+                            step.save(update_fields=["description", "expected_result", "updated_at"])
                         step_updates += 1
                 else:
                     step_updates += _normalize_remaining_steps(case)
