@@ -787,22 +787,23 @@ def is_ticket_detail_boundary_case(testcase: TestCase) -> bool:
 
 
 def is_claimable_ticket_detail_case(testcase: TestCase) -> bool:
-    """Whether this is the five-step *claim-dialog copy* scenario.
+    """Whether a case belongs to the deterministic claim lifecycle helper.
 
-    The original broad keyword match also caught cancellation, confirmation,
-    post-claim and message cases.  Those cases have different numbers of
-    steps and assertions, so forcing the five-step helper on them made their
-    execution stop at an unsupported step.  Only the case that verifies the
-    contents of the confirmation dialog should use that fixed helper.
+    These five lifecycle cases share reliable navigation and generated data,
+    but have explicit branches for opening the detail, checking dialog copy,
+    cancelling, confirming, and checking list synchronisation.  Message and
+    external-system cases deliberately do not use it.
     """
-    blob = collect_testcase_text(testcase)
-    return (
-        '待处理' in blob
-        and '处理' in blob
-        and '领取工单' in blob
-        and '确认领取' in blob
-        and ('弹窗文案' in blob or '标题为' in blob)
-        and ('取消' in blob and '确定' in blob)
+    name = (getattr(testcase, 'name', '') or '').strip()
+    return any(
+        marker in name
+        for marker in (
+            '待处理工单-列表点击处理进入详情页',
+            '点击领取-弹出确认领取弹窗文案正确',
+            '确认领取-点击取消',
+            '确认领取-点击确定',
+            '领取成功后-列表当前状态同步为处理中',
+        )
     )
 
 

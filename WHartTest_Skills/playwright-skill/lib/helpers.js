@@ -3814,8 +3814,9 @@ async function runTicketDetailCaseStep(page, stepNumber, caseId) {
 }
 
 /**
- * 待处理、已自动分配工单的固定流程：以被分配处理人登录 -> 筛选 -> 点处理 -> 验证领取工单。
- * 步骤4失败时故意不保存截图，避免把列表页误作详情页证据；步骤5验证领取确认弹窗。
+ * 待处理、已自动分配工单的固定领取生命周期：以被分配处理人登录 ->
+ * 筛选 -> 点处理 -> 验证弹窗，并按用例分支取消、确认或回列表校验。
+ * 步骤4失败时故意不保存截图，避免把列表页误作详情页证据。
  */
 async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
   const step = Number(stepNumber);
@@ -4044,7 +4045,7 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
   }
 
   if (step === 5) {
-    // 只验证弹窗，不点击弹窗中的「确定」，避免将测试数据的工单真正领取走。
+    // 1400/1401 只验证弹窗；1403 会在本步骤确认领取。
     if (!(await isClaimTicketButtonVisible(page, 5000))) {
       console.log('RESULT=FAIL: 步骤5前详情页未出现“领取工单”按钮');
       return null;
@@ -4071,23 +4072,123 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
       const hasPrompt = /确认.*领取.*工单|领取.*工单/.test(text);
       const hasCancel = await dialog.getByRole('button', { name: /取消/ }).count() > 0;
       const hasConfirm = await dialog.getByRole('button', { name: /确定/ }).count() > 0;
-      const captured = !!(await screenshotCaseStep(page, step, cid));
       if (!hasTitle || !hasPrompt || !hasCancel || !hasConfirm) {
         console.log(
           `RESULT=FAIL: 确认领取弹窗内容不完整 title=${hasTitle} prompt=${hasPrompt} cancel=${hasCancel} confirm=${hasConfirm} text=${text.slice(0, 180)}`,
         );
         return null;
       }
+      if (String(cid) === '1403') {
+        try {
+          await dialog.getByRole('button', { name: /确定/ }).click({ timeout: 5000 });
+          await dialog.waitFor({ state: 'hidden', timeout: 8000 });
+          const bodyText = await page.locator('body').innerText();
+          if (!bodyText.includes('处理中')) {
+            console.log('RESULT=FAIL: 确认领取后详情页未显示“处理中”状态');
+            return null;
+          }
+        } catch (err) {
+          console.log(`RESULT=FAIL: 步骤5确认领取失败: ${String(err?.message || err).slice(0, 180)}`);
+          return null;
+        }
+      }
+      const captured = !!(await screenshotCaseStep(page, step, cid));
       if (!captured) {
         console.log('RESULT=FAIL: 确认领取弹窗截图保存失败');
         return null;
       }
-      console.log(`RESULT=PASS: 步骤5已弹出“确认领取”弹窗并确认文案及取消/确定按钮 URL=${page.url()}`);
+      console.log(
+        String(cid) === '1403'
+          ? `RESULT=PASS: 步骤5已确认领取，详情页状态为“处理中” URL=${page.url()}`
+          : `RESULT=PASS: 步骤5已弹出“确认领取”弹窗并确认文案及取消/确定按钮 URL=${page.url()}`,
+      );
       return target;
     } catch (err) {
       console.log(`RESULT=FAIL: 步骤5未出现“确认领取”弹窗: ${String(err?.message || err).slice(0, 180)}`);
       return null;
     }
+  }
+
+  const visibleClaimDialog = () => page
+    .locator('.el-dialog:visible, .el-message-box:visible, [role="dialog"]:visible')
+    .filter({ hasText: /确认领取/ })
+    .last();
+
+  const queryTicketForFinalState = async (expectedStatus) => {
+    await navigateToMyTicketsPage(page);
+    await fillFilterField(page, '工单号', ticketNo);
+    if (expectedStatus) {
+      const selected = await selectFormDropdownOption(page, '工单状态', expectedStatus);
+      if (!selected) return null;
+    }
+    await clickPageButton(page, '查询');
+    await waitForTicketListSettled();
+    const row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
+    try {
+      await row.waitFor({ state: 'visible', timeout: 12000 });
+      return row;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  if (step === 6 && String(cid) === '1401') {
+    const dialog = visibleClaimDialog();
+    try {
+      await dialog.waitFor({ state: 'visible', timeout: 5000 });
+      await dialog.getByRole('button', { name: /取消/ }).click({ timeout: 5000 });
+      await dialog.waitFor({ state: 'hidden', timeout: 8000 });
+      if (!(await isClaimTicketButtonVisible(page, 5000))) {
+        console.log('RESULT=FAIL: 取消领取后“领取工单”按钮未保留');
+        return null;
+      }
+      await screenshotCaseStep(page, step, cid);
+      console.log('RESULT=PASS: 步骤6已取消领取，工单仍未被领取');
+      return target;
+    } catch (err) {
+      console.log(`RESULT=FAIL: 步骤6取消领取失败: ${String(err?.message || err).slice(0, 180)}`);
+      return null;
+    }
+  }
+
+  if (step === 6 && String(cid) === '1402') {
+    const dialog = visibleClaimDialog();
+    try {
+      await dialog.waitFor({ state: 'visible', timeout: 5000 });
+      await dialog.getByRole('button', { name: /确定/ }).click({ timeout: 5000 });
+      await dialog.waitFor({ state: 'hidden', timeout: 8000 });
+      const bodyText = await page.locator('body').innerText();
+      if (!bodyText.includes('处理中')) {
+        console.log('RESULT=FAIL: 确认领取后详情页未显示“处理中”状态');
+        return null;
+      }
+      await screenshotCaseStep(page, step, cid);
+      console.log('RESULT=PASS: 步骤6已确认领取，详情页状态为“处理中”');
+      return target;
+    } catch (err) {
+      console.log(`RESULT=FAIL: 步骤6确认领取失败: ${String(err?.message || err).slice(0, 180)}`);
+      return null;
+    }
+  }
+
+  if (
+    (step === 7 && (String(cid) === '1401' || String(cid) === '1402')) ||
+    (step === 6 && String(cid) === '1403')
+  ) {
+    const expectedStatus = String(cid) === '1401' ? '待处理' : '处理中';
+    const row = await queryTicketForFinalState(expectedStatus);
+    if (!row) {
+      console.log(`RESULT=FAIL: 列表中未找到状态为“${expectedStatus}”的本次造数工单 ${ticketNo}`);
+      return null;
+    }
+    const fields = await readClaimableRowFields(row);
+    if (!fields.status.includes(expectedStatus)) {
+      console.log(`RESULT=FAIL: 列表状态不一致，期望=${expectedStatus}，实际=${fields.status || '空'}`);
+      return null;
+    }
+    await screenshotCaseStep(page, step, cid);
+    console.log(`RESULT=PASS: 步骤${step}已确认列表状态为“${expectedStatus}”`);
+    return target;
   }
 
   console.log(`RESULT=FAIL: 不支持的领取工单步骤 ${step}，当前固定流程最多 ${totalSteps} 步`);
