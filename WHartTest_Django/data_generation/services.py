@@ -40,15 +40,20 @@ _DYNAMIC_GENERATORS = {
 
 
 def _normalize_legacy_auth_header_placeholders(interface_data: Dict[str, Any]) -> None:
-    """Convert Postman-style ``$accessToken`` into ``{{accessToken}}`` for substitution."""
+    """Normalize auth headers to HttpRunner ``$var`` placeholders.
+
+    InterfaceRunner/HttpRunner substitutes ``$accessToken`` / ``${accessToken}``,
+    but not Django-style ``{{accessToken}}``. Some interfaces also still store
+    Postman-style ``$accessToken`` already; leave those alone.
+    """
     headers = interface_data.get('headers')
     if not isinstance(headers, list):
         return
     replacements = (
-        ('$accessToken', '{{accessToken}}'),
-        ('$adminToken', '{{adminToken}}'),
-        ('$assigneeToken', '{{assigneeToken}}'),
-        ('$noCommonToken', '{{noCommonToken}}'),
+        ('{{accessToken}}', '$accessToken'),
+        ('{{adminToken}}', '$adminToken'),
+        ('{{assigneeToken}}', '$assigneeToken'),
+        ('{{noCommonToken}}', '$noCommonToken'),
     )
     for item in headers:
         if not isinstance(item, dict):
