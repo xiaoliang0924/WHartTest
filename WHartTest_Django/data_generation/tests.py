@@ -452,6 +452,20 @@ class IntentRouterStateTests(DjangoTestCase):
             'TYPE_A',
         )
 
+    def test_ticket_row_already_assigned_detects_pending_process(self):
+        from data_generation.services import _ticket_row_is_already_assigned
+
+        self.assertTrue(
+            _ticket_row_is_already_assigned(
+                {'status': 'pending_process', 'assigneeUserId': 39},
+            )
+        )
+        self.assertFalse(
+            _ticket_row_is_already_assigned(
+                {'status': 'pending_assign', 'assigneeUserId': None},
+            )
+        )
+
     def test_claimable_pool_requires_auto_assigned_pending_ticket(self):
         from data_generation.testcase_pre_data import _ticket_row_supports_claim
 

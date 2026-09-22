@@ -26,7 +26,7 @@ from ui_automation.models import UiPublicData
 from .exceptions import DataGenerationError
 from .models import DataGenerationPlan, DataGenerationRun
 from .template_resolver import resolve_template_steps
-from .templates import get_template_by_key
+from .templates import REF_ASSIGN_TICKET, get_template_by_key
 from .sql_utils import execute_sql_step, extract_sql_result
 
 logger = logging.getLogger(__name__)
@@ -156,6 +156,68 @@ def _collect_force_refresh_token_vars(interface_data: Dict[str, Any]) -> List[st
             elif 'accessToken' in value:
                 forced.append('accessToken')
     return list(dict.fromkeys(forced))
+
+
+def _ticket_row_is_already_assigned(row: Dict[str, Any]) -> bool:
+    """Target system already moved the ticket past manual assign."""
+    status = str(row.get('status') or '').strip()
+    assignee = row.get('assigneeUserId')
+    assignee_obj = row.get('assignee') if isinstance(row.get('assignee'), dict) else {}
+    if assignee in (None, '', 0) and assignee_obj.get('id') not in (None, '', 0):
+        assignee = assignee_obj.get('id')
+    if assignee in (None, '', 0):
+        return False
+    return status in {'pending_process', 'processing', 'claimed'}
+
+
+def _query_ticket_rows_for_plan(
+    *,
+    project_id: int,
+    environment_id: int,
+    query_path: str,
+) -> List[Dict[str, Any]]:
+    """Best-effort ticket list lookup during plan execution."""
+    try:
+        from api_environments.token_refresh import refresh_environment_tokens
+
+        iface = ApiInterface.objects.filter(
+            project_id=project_id,
+            name='工单列表查询',
+        ).first()
+        if iface is None:
+            return []
+        environment = ApiEnvironment.objects.filter(id=environment_id).first()
+        if environment is None:
+            return []
+
+        interface_data = iface.get_interface_data()
+        interface_data['project_id'] = project_id
+        interface_data['base_url'] = environment.base_url or ''
+        interface_data['verify'] = environment.verify_ssl
+        interface_data['method'] = 'GET'
+        interface_data['url'] = query_path
+
+        runner = InterfaceRunner(interface_data)
+        runner.variables = refresh_environment_tokens(
+            base_url=environment.base_url,
+            variables=environment.get_all_variables(),
+            verify_ssl=environment.verify_ssl,
+            environment_id=environment.id,
+            persist=True,
+            force_token_vars=_collect_force_refresh_token_vars(interface_data),
+        )
+        runner.run_interface({})
+        response_data = runner.get_response()
+        body = _parse_response_body((response_data.get('response') or {}).get('content'))
+        if isinstance(body, dict):
+            block = body.get('data')
+            if isinstance(block, list):
+                return [row for row in block if isinstance(row, dict)]
+        if isinstance(body, list):
+            return [row for row in body if isinstance(row, dict)]
+    except Exception as exc:
+        logger.debug('plan executor ticket lookup skipped: %s', exc)
+    return []
 
 
 class PlanExecutor:
@@ -400,7 +462,96 @@ class PlanExecutor:
         except ApiEnvironment.DoesNotExist as exc:
             raise DataGenerationError(f'API 环境不存在: {env_id}') from exc
 
+    def _is_manual_assign_api_step(self, step: Dict[str, Any]) -> bool:
+        step_name = str(step.get('name') or '').strip()
+        if step_name == '分配工单':
+            return True
+        if step.get('interface_ref') == REF_ASSIGN_TICKET:
+            return True
+        interface_id = step.get('interface_id')
+        if not interface_id:
+            return False
+        interface = ApiInterface.objects.filter(
+            id=interface_id,
+            project_id=self.plan.project_id,
+        ).first()
+        if interface is None:
+            return False
+        name = str(interface.name or '')
+        return '分配工单' in name or (name.startswith('分配') and '取消' not in name)
+
+    def _find_ticket_row_for_context(self) -> Optional[Dict[str, Any]]:
+        env_id = self.default_environment_id
+        if not env_id:
+            return None
+        ticket_no = self.context.get('ticketNo')
+        ticket_id = self.context.get('ticketId') or self.context.get('processingTicketId')
+        if ticket_no:
+            rows = _query_ticket_rows_for_plan(
+                project_id=self.plan.project_id,
+                environment_id=int(env_id),
+                query_path=f'/api/tickets?ticketNo={ticket_no}&page=1&pageSize=5',
+            )
+            for row in rows:
+                if str(row.get('ticketNo') or '') == str(ticket_no):
+                    return row
+        if ticket_id:
+            rows = _query_ticket_rows_for_plan(
+                project_id=self.plan.project_id,
+                environment_id=int(env_id),
+                query_path=f'/api/tickets/{ticket_id}',
+            )
+            if rows:
+                return rows[0]
+            rows = _query_ticket_rows_for_plan(
+                project_id=self.plan.project_id,
+                environment_id=int(env_id),
+                query_path=f'/api/tickets?id={ticket_id}&page=1&pageSize=5',
+            )
+            for row in rows:
+                if str(row.get('id') or row.get('ticketId') or '') == str(ticket_id):
+                    return row
+        return None
+
+    def _merge_assign_context_from_ticket_row(self, row: Dict[str, Any]) -> None:
+        assignee = row.get('assignee') if isinstance(row.get('assignee'), dict) else {}
+        ticket_id = row.get('id') or row.get('ticketId') or self.context.get('ticketId')
+        if ticket_id:
+            self.context['processingTicketId'] = ticket_id
+            self.context.setdefault('ticketId', ticket_id)
+        assignee_id = row.get('assigneeUserId') or assignee.get('id')
+        assignee_name = row.get('assigneeName') or assignee.get('name') or assignee.get('username')
+        if assignee_id not in (None, '', 0):
+            self.context['assigneeUserId'] = assignee_id
+        if assignee_name:
+            self.context['assigneeName'] = assignee_name
+        self.context['ticketStatus'] = row.get('status') or 'pending_process'
+
+    def _maybe_skip_manual_assign_api_call(self, step: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not self._is_manual_assign_api_step(step):
+            return None
+        row = self._find_ticket_row_for_context()
+        if row is None or not _ticket_row_is_already_assigned(row):
+            return None
+        self._merge_assign_context_from_ticket_row(row)
+        logger.info(
+            'Skip manual assign API: ticket already assigned ticketNo=%s assignee=%s status=%s',
+            row.get('ticketNo') or self.context.get('ticketNo'),
+            row.get('assigneeName') or row.get('assigneeUserId'),
+            row.get('status'),
+        )
+        return {
+            'skipped': True,
+            'reason': 'ticket_already_assigned',
+            'ticketNo': row.get('ticketNo'),
+            'assigneeUserId': self.context.get('assigneeUserId'),
+        }
+
     def _run_api_call(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        skipped = self._maybe_skip_manual_assign_api_call(step)
+        if skipped is not None:
+            return skipped
+
         interface_id = step.get('interface_id')
         if not interface_id:
             raise DataGenerationError('api_call 步骤缺少 interface_id')
@@ -466,6 +617,21 @@ class PlanExecutor:
                 or response_data.get('error')
                 or f'HTTP {status_code}'
             )
+            error_text = str(error_detail)
+            if self._is_manual_assign_api_step(step) and 'TICKET_STATUS_INVALID' in error_text:
+                row = self._find_ticket_row_for_context()
+                if row is not None and _ticket_row_is_already_assigned(row):
+                    self._merge_assign_context_from_ticket_row(row)
+                    logger.info(
+                        'Treat assign API failure as success: ticket already assigned ticketNo=%s',
+                        row.get('ticketNo') or self.context.get('ticketNo'),
+                    )
+                    return {
+                        'skipped': True,
+                        'reason': 'assign_rejected_ticket_already_assigned',
+                        'interface_name': interface.name,
+                        'status_code': status_code,
+                    }
             raise DataGenerationError(f'接口 [{interface.name}] 调用失败: {error_detail}')
 
         extracted = dict(response_data.get('extracted_variables') or {})
