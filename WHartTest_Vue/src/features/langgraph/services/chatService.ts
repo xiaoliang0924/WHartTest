@@ -55,7 +55,7 @@ interface StreamState {
   maxSteps?: number;     // Agent Loop 最大步骤数
   testcaseStep?: number; // 手工测试用例当前步骤
   testcaseTotal?: number;
-  testcaseStepState?: 'pending' | 'running' | 'completed';
+  testcaseStepState?: 'pending' | 'running' | 'completed' | 'waiting_llm';
   testcaseProgressMessage?: string;
   testcaseStartedAt?: number;
   userMessage?: string;  // 用户发送的消息内容
@@ -90,7 +90,7 @@ export interface AgentLoopSseEvent {
   max_steps?: number | string;
   step?: number | string;
   total_steps?: number | string;
-  state?: 'pending' | 'running' | 'completed';
+  state?: 'pending' | 'running' | 'completed' | 'waiting_llm';
   message?: string;
   summary?: string | Record<string, unknown>;
   data?: string | { content?: string } | Record<string, unknown> | null;
@@ -496,6 +496,10 @@ export async function sendChatMessageStream(
     if (sessionId && activeStreams.value[sessionId]) {
       activeStreams.value[sessionId].error = message;
       activeStreams.value[sessionId].isComplete = true;
+      if (/超时|timed out|APITimeout|模型服务/i.test(message)) {
+        activeStreams.value[sessionId].testcaseStepState = 'waiting_llm';
+        activeStreams.value[sessionId].testcaseProgressMessage = message;
+      }
     }
     if (sessionId) {
       clearSessionRunning(sessionId);
@@ -776,14 +780,11 @@ export async function sendChatMessageStream(
             const stepNumber = normalizeNumericField(parsed.step);
             if (stepNumber !== undefined) {
               const total = normalizeNumericField(parsed.total_steps) || stream.testcaseTotal;
-              const status = `正在执行步骤 ${stepNumber}/${total}`;
               stream.currentStep = stepNumber;
               stream.testcaseStep = stepNumber;
               if (total !== undefined) stream.testcaseTotal = total;
               stream.testcaseStepState = parsed.state || 'running';
               stream.testcaseProgressMessage = typeof parsed.message === 'string' ? parsed.message : undefined;
-              const detail = stream.testcaseProgressMessage ? `：${stream.testcaseProgressMessage}` : '';
-              stream.messages.push({ content: `${status}${detail}`, type: 'system', time: formatStreamTime() });
             }
           }
 
@@ -809,17 +810,11 @@ export async function sendChatMessageStream(
             if (testcaseStepMatch) {
               const stream = activeStreams.value[streamSessionId];
               const stepNumber = Number(testcaseStepMatch[2]);
-              const total = stream.testcaseTotal;
               if (!stream.testcaseStep || stepNumber >= stream.testcaseStep) {
                 stream.currentStep = stepNumber;
                 stream.testcaseStep = stepNumber;
                 stream.testcaseStepState = 'completed';
                 stream.testcaseProgressMessage = '步骤截图已保存，正在准备下一步';
-                const status = `步骤 ${stepNumber}${total ? `/${total}` : ''} 已完成：${stream.testcaseProgressMessage}`;
-                const previous = stream.messages[stream.messages.length - 1];
-                if (!previous || previous.type !== 'system' || previous.content !== status) {
-                  stream.messages.push({ content: status, type: 'system', time: formatStreamTime() });
-                }
               }
             }
             if (toolPayload.content || toolPayload.imageDataUrl) {
@@ -895,6 +890,11 @@ export async function sendChatMessageStream(
             const content = parsed.data;
             if (content) {
               activeStreams.value[streamSessionId].content += content;
+              if (/Model call failed after|APITimeoutError|Request timed out/i.test(content)) {
+                const stream = activeStreams.value[streamSessionId];
+                stream.testcaseStepState = 'waiting_llm';
+                stream.testcaseProgressMessage = '模型调用超时或失败，正在结束本次执行…';
+              }
             }
           }
 
@@ -1488,11 +1488,6 @@ export async function resumeAgentLoop(
               if (total !== undefined) stream.testcaseTotal = total;
               stream.testcaseStepState = parsed.state || 'running';
               stream.testcaseProgressMessage = typeof parsed.message === 'string' ? parsed.message : undefined;
-              stream.messages.push({
-                content: `正在执行步骤 ${stepNumber}/${total}${stream.testcaseProgressMessage ? `：${stream.testcaseProgressMessage}` : ''}`,
-                type: 'system',
-                time: formatStreamTime()
-              });
             }
           }
 

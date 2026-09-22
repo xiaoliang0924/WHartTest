@@ -43,6 +43,7 @@ from langchain.agents import create_agent
 from wharttest_django.checkpointer import get_async_checkpointer
 
 from .middleware_config import (
+    extract_llm_failure_message_from_text,
     get_middleware_from_config,
     get_user_tool_approvals,
     get_user_friendly_llm_error,
@@ -111,6 +112,55 @@ def _build_sse_error_event(exc: Exception) -> Dict[str, Any]:
         return event
 
     return {"type": "error", "message": f"执行错误: {str(exc)}", "code": 500}
+
+
+def create_flushed_sse(data_dict: Dict[str, Any]) -> str:
+    """SSE event plus padding so nginx/proxies flush before the next blocking helper."""
+    return create_sse_data(data_dict) + (":" + (" " * 4096) + "\n\n")
+
+
+async def _persist_helper_step_to_checkpoint(
+    *,
+    agent,
+    invoke_config,
+    commentary: str,
+    tool_output: str,
+    step: int,
+    command: str,
+) -> None:
+    """Write auto-run step cards into LangGraph history so refresh keeps them."""
+    if agent is None or invoke_config is None:
+        return
+    call_id = f"auto_step_{int(step)}_{uuid.uuid4().hex[:10]}"
+    try:
+        await agent.aupdate_state(
+            invoke_config,
+            {
+                "messages": [
+                    AIMessage(
+                        content=(commentary or "").strip() or f"步骤 {step}",
+                        tool_calls=[
+                            {
+                                "id": call_id,
+                                "name": "execute_skill_script",
+                                "args": {"command": command},
+                            }
+                        ],
+                    ),
+                    ToolMessage(
+                        content=tool_output or "",
+                        name="execute_skill_script",
+                        tool_call_id=call_id,
+                    ),
+                ]
+            },
+        )
+    except Exception as persist_err:
+        logger.warning(
+            "AgentLoopStreamAPI: persist helper step %s failed: %s",
+            step,
+            persist_err,
+        )
 
 
 async def _complete_testcase_run_with_report(
@@ -564,13 +614,287 @@ def _get_testcase_step_count(testcase_id: int) -> int:
     return testcase.steps.count() if testcase else 0
 
 
+def _get_testcase_step_names(testcase_id: int) -> dict[int, str]:
+    """Map step_number -> description for live '步骤 N: ...' chat lines."""
+    from testcases.models import TestCaseStep
+
+    rows = TestCaseStep.objects.filter(test_case_id=int(testcase_id)).values_list(
+        "step_number", "description"
+    )
+    names: dict[int, str] = {}
+    for number, description in rows:
+        try:
+            step_no = int(number)
+        except (TypeError, ValueError):
+            continue
+        text = (description or "").strip() or f"步骤{step_no}"
+        names[step_no] = text
+    return names
+
+
+def _extract_helper_result_reason(content: Any) -> tuple[str, str]:
+    """Return (PASS|FAIL|'', reason) from helper stdout, ignoring skill-doc samples."""
+    if isinstance(content, (dict, list)):
+        text = json.dumps(content, ensure_ascii=False)
+    else:
+        text = content if isinstance(content, str) else str(content or "")
+    stripped = text.strip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            parsed = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, list):
+            text = "\n".join(
+                str(item.get("text") or "") if isinstance(item, dict) else str(item)
+                for item in parsed
+            )
+        elif isinstance(parsed, dict):
+            text = str(parsed.get("text") or text)
+    text = text.replace("\\n", "\n")
+    matches = list(
+        re.finditer(
+            r"^RESULT=(PASS|FAIL)[:：]?\s*(.*)$",
+            text,
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
+    )
+    if re.search(
+        r"Playwright exec timed out|浏览器已重置",
+        text,
+        flags=re.IGNORECASE,
+    ) and not any((m.group(1) or "").upper() == "PASS" for m in matches):
+        return "FAIL", "执行超时，未完成截图"
+    if not matches:
+        return "", ""
+    last = matches[-1]
+    status = (last.group(1) or "").upper()
+    reason = (last.group(2) or "").strip().strip("'\"")
+    if reason.lower().startswith("result="):
+        reason = ""
+    return status, reason
+
+
+def _build_helper_step_commentary(
+    *,
+    prev_step: Optional[int] = None,
+    prev_status: str = "",
+    prev_reason: str = "",
+    next_step: Optional[int] = None,
+    next_action: str = "",
+) -> str:
+    """Build the image-3 style AI lines between helper cards."""
+    lines: list[str] = []
+    if prev_step:
+        passed = (prev_status or "PASS").upper() != "FAIL"
+        label = "通过" if passed else "失败"
+        reason = prev_reason or ("已完成" if passed else "未通过")
+        lines.append(f"步骤 {prev_step} {label}: {reason}")
+    if next_step:
+        action = (next_action or "").strip() or f"步骤{next_step}"
+        lines.append(f"步骤 {next_step}: {action}")
+    return "\n".join(lines)
+
+
 def _extract_helper_testcase_progress(content: Any) -> tuple[Optional[int], Optional[int]]:
     """Extract testcase and step ids from a fixed Playwright helper result."""
     text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-    match = re.search(r"case[_-](\d+)_step(\d+)", text, flags=re.IGNORECASE)
-    if not match:
+    declared = re.findall(
+        r"\[(?:CASE_SCREENSHOT|SCREENSHOT_SAVED)\]\s+\S*case[_-](\d+)_step(\d+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if declared:
+        case_id, step = declared[-1]
+        return int(case_id), int(step)
+    matches = list(re.finditer(r"case[_-](\d+)_step(\d+)", text, flags=re.IGNORECASE))
+    if not matches:
         return None, None
-    return int(match.group(1)), int(match.group(2))
+    last = matches[-1]
+    return int(last.group(1)), int(last.group(2))
+
+
+def _latest_passed_helper_step_from_messages(messages) -> Optional[int]:
+    """Highest helper step that produced CASE_SCREENSHOT / RESULT=PASS evidence."""
+    max_step: Optional[int] = None
+    for msg in messages or []:
+        msg_type = type(msg).__name__
+        if msg_type not in ("ToolMessage", "ToolMessageChunk"):
+            # Tool outputs may also be stored as plain strings on AI tool traces.
+            name = str(getattr(msg, "name", "") or "")
+            if name != "execute_skill_script" and msg_type != "AIMessage":
+                continue
+        content = getattr(msg, "content", "") or ""
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        _, step = _extract_helper_testcase_progress(text)
+        if not step:
+            continue
+        has_shot = bool(
+            re.search(
+                rf"\[(?:CASE_SCREENSHOT|SCREENSHOT_SAVED)\]\s+\S*case[_-]\d+_step{step}\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+        markers = re.findall(r"RESULT\s*=\s*(PASS|FAIL)\b", text, flags=re.IGNORECASE)
+        passed = bool(markers) and markers[-1].upper() == "PASS"
+        if has_shot or passed:
+            max_step = step if max_step is None else max(max_step, step)
+    return max_step
+
+
+async def _run_and_stream_remaining_helper_steps(
+    *,
+    test_case_id: int,
+    user_id: int,
+    project_id: int,
+    session_id: str,
+    from_step: int,
+    to_step: int,
+    messages,
+    previous_output: Any = "",
+    agent=None,
+    invoke_config=None,
+):
+    """Run remaining helper steps one by one and yield live chat events.
+
+    Each step is streamed as:
+    1. AI commentary (`步骤 N 通过` / `步骤 N+1: ...`)
+    2. testcase_progress so the progress bar moves
+    3. tool_result with the same screenshot card shape as execute_skill_script
+    """
+    from .builtin_tools.skill_tools import (
+        auto_run_missing_testcase_helper_steps,
+        infer_fixed_helper_call_template,
+    )
+
+    template = infer_fixed_helper_call_template(messages)
+    step_names = await sync_to_async(_get_testcase_step_names)(int(test_case_id))
+    chunks: list[str] = []
+    last_step = int(from_step)
+    prev_status, prev_reason = _extract_helper_result_reason(previous_output)
+    prev_step = int(from_step) - 1 if int(from_step) > 1 else None
+    if previous_output and not prev_status and prev_step:
+        prev_status, prev_reason = "PASS", "已完成"
+
+    if previous_output and prev_step:
+        prev_display = (
+            previous_output
+            if isinstance(previous_output, str)
+            else json.dumps(previous_output, ensure_ascii=False)
+        )
+        await _persist_helper_step_to_checkpoint(
+            agent=agent,
+            invoke_config=invoke_config,
+            commentary=_build_helper_step_commentary(
+                next_step=prev_step,
+                next_action=step_names.get(prev_step, f"步骤{prev_step}"),
+            ),
+            tool_output=prev_display,
+            step=prev_step,
+            command=(template or "await helpers.runClaimableTicketCaseStep(page, {step});").format(
+                step=prev_step
+            ),
+        )
+
+    for step in range(int(from_step), int(to_step) + 1):
+        commentary = _build_helper_step_commentary(
+            prev_step=prev_step if step == int(from_step) else step - 1,
+            prev_status=prev_status,
+            prev_reason=prev_reason,
+            next_step=step,
+            next_action=step_names.get(step, f"步骤{step}"),
+        )
+        if commentary:
+            yield {"type": "stream", "data": f"\n{commentary}\n"}
+        yield {
+            "type": "testcase_progress",
+            "session_id": session_id,
+            "test_case_id": int(test_case_id),
+            "step": step,
+            "total_steps": int(to_step),
+            "state": "running",
+            "message": f"正在执行步骤 {step}/{to_step}",
+        }
+        await asyncio.sleep(0.05)
+        output = await sync_to_async(auto_run_missing_testcase_helper_steps)(
+            test_case_id=int(test_case_id),
+            user_id=int(user_id),
+            project_id=int(project_id),
+            chat_session_id=str(session_id),
+            browser_session_id=f"case_{int(test_case_id)}",
+            from_step=step,
+            to_step=step,
+            helper_call_template=template,
+            total_steps=int(to_step),
+        )
+        if isinstance(output, dict):
+            plain = output.get("plain") or ""
+            display = output.get("display") or plain
+        else:
+            plain = output or ""
+            display = plain
+        chunks.append(plain)
+        last_step = step
+        yield {
+            "type": "tool_result",
+            "tool_name": "execute_skill_script",
+            "tool_output": display,
+            "summary": f"已执行步骤 {step}/{to_step}",
+            "step": step,
+        }
+        command = (template or "await helpers.runClaimableTicketCaseStep(page, {step});").format(
+            step=step
+        )
+        await _persist_helper_step_to_checkpoint(
+            agent=agent,
+            invoke_config=invoke_config,
+            commentary=commentary,
+            tool_output=display if isinstance(display, str) else json.dumps(display, ensure_ascii=False),
+            step=step,
+            command=command,
+        )
+        prev_status, prev_reason = _extract_helper_result_reason(plain)
+        if not prev_status and re.search(
+            r"timed out|浏览器已重置|执行异常",
+            plain,
+            flags=re.IGNORECASE,
+        ):
+            prev_status, prev_reason = "FAIL", "执行超时，未完成截图"
+        prev_step = step
+        await asyncio.sleep(0.05)
+        if prev_status == "FAIL" or re.search(
+            r"RESULT\s*=\s*FAIL\b|Playwright exec timed out|浏览器已重置",
+            plain,
+            flags=re.IGNORECASE,
+        ):
+            fail_line = _build_helper_step_commentary(
+                prev_step=step,
+                prev_status="FAIL",
+                prev_reason=prev_reason,
+            )
+            if fail_line:
+                yield {"type": "stream", "data": f"\n{fail_line}\n"}
+            break
+    yield {
+        "type": "_auto_run_bundle",
+        "output": "\n".join(chunks).strip(),
+        "last_step": last_step,
+    }
+
+
+def _build_incomplete_testcase_resume_prompt(*, done_step: int, total_steps: int) -> str:
+    next_step = done_step + 1
+    return (
+        f"【强制继续】用例共 {total_steps} 步，目前只完成到步骤 {done_step}，"
+        f"步骤 {next_step}～{total_steps} 尚未执行，也没有对应 `[CASE_SCREENSHOT]`。\n"
+        f"禁止输出测试报告，禁止总结，禁止跳步。\n"
+        f"立即调用 `execute_skill_script`，脚本只能写一行：\n"
+        f"`await helpers.runClaimableTicketCaseStep(page, {next_step});`\n"
+        f"若本用例不是领取工单流程，则改用与前面步骤相同的固定 helper，"
+        f"参数步骤号必须是 {next_step}。\n"
+        f"工具输出必须含步骤 {next_step} 的 `[CASE_SCREENSHOT]` 与 RESULT=PASS/FAIL。"
+    )
 
 
 def _extract_testcase_step_from_tool_call(tool_call: Any) -> Optional[int]:
@@ -1834,28 +2158,53 @@ class AgentLoopStreamAPIView(View):
                                                     and result_markers
                                                     and result_markers[-1].upper() == "FAIL"
                                                 ):
-                                                    record, injected_report = await _complete_testcase_run_with_report(
-                                                        session_id=session_id,
-                                                        final_content=str(content),
-                                                        messages=[],
-                                                        agent=agent,
-                                                        invoke_config=invoke_config,
-                                                    )
-                                                    if injected_report:
-                                                        yield create_sse_data(
-                                                            {"type": "stream", "data": "\n\n" + injected_report}
+                                                    # 失败但没产出该步截图时，不要立刻收尾：
+                                                    # 常见于最后一步卡在详情页筛选项，收尾前的
+                                                    # coverage auto-run 还能再补跑一次并取证。
+                                                    fail_case_id, fail_step = (
+                                                        _extract_helper_testcase_progress(
+                                                            content
                                                         )
-                                                    yield create_sse_data(
-                                                        {
-                                                            "type": "complete",
-                                                            "total_steps": step_count,
-                                                            "test_case_run": {
-                                                                "status": record.status if record else "fail",
-                                                                "summary": record.summary if record else "",
-                                                            },
-                                                        }
                                                     )
-                                                    return
+                                                    has_fail_step_shot = bool(
+                                                        fail_step
+                                                        and re.search(
+                                                            rf"\[(?:CASE_SCREENSHOT|SCREENSHOT_SAVED)\]\s+\S*case[_-](\d+)_step{int(fail_step)}\b",
+                                                            str(content),
+                                                            flags=re.IGNORECASE,
+                                                        )
+                                                    )
+                                                    if not has_fail_step_shot:
+                                                        logger.warning(
+                                                            "AgentLoopStreamAPI: helper FAIL without "
+                                                            "step screenshot case=%s step=%s; "
+                                                            "defer early finalize for coverage auto-run",
+                                                            fail_case_id or test_case_id,
+                                                            fail_step,
+                                                        )
+                                                    else:
+                                                        record, injected_report = await _complete_testcase_run_with_report(
+                                                            session_id=session_id,
+                                                            final_content=str(content),
+                                                            messages=[],
+                                                            agent=agent,
+                                                            invoke_config=invoke_config,
+                                                        )
+                                                        if injected_report:
+                                                            yield create_sse_data(
+                                                                {"type": "stream", "data": "\n\n" + injected_report}
+                                                            )
+                                                        yield create_sse_data(
+                                                            {
+                                                                "type": "complete",
+                                                                "total_steps": step_count,
+                                                                "test_case_run": {
+                                                                    "status": record.status if record else "fail",
+                                                                    "summary": record.summary if record else "",
+                                                                },
+                                                            }
+                                                        )
+                                                        return
                                                 if test_case_id and _is_final_testcase_step_pass(
                                                     tool_name=tool_name,
                                                     content=str(content),
@@ -1883,6 +2232,98 @@ class AgentLoopStreamAPIView(View):
                                                             "test_case_run": {
                                                                 "status": record.status if record else "pass",
                                                                 "summary": record.summary if record else "",
+                                                            },
+                                                        }
+                                                    )
+                                                    return
+                                                if (
+                                                    test_case_id
+                                                    and tool_name == "execute_skill_script"
+                                                    and helper_step is not None
+                                                    and total_steps
+                                                    and helper_step < total_steps
+                                                    and result_markers
+                                                    and result_markers[-1].upper() == "PASS"
+                                                ):
+                                                    # 固定 helper 用例：模型常在非末步 PASS 后直接出报告。
+                                                    # 非末步 PASS 后立刻按步补跑，并推送进度，不再等 LLM。
+                                                    next_step = int(helper_step) + 1
+                                                    logger.warning(
+                                                        "AgentLoopStreamAPI: non-final PASS "
+                                                        "case=%s step=%s/%s, auto-running %s..%s",
+                                                        test_case_id,
+                                                        helper_step,
+                                                        total_steps,
+                                                        next_step,
+                                                        total_steps,
+                                                    )
+                                                    auto_output = ""
+                                                    auto_step = helper_step
+                                                    async for event in _run_and_stream_remaining_helper_steps(
+                                                        test_case_id=int(test_case_id),
+                                                        user_id=int(request.user.id),
+                                                        project_id=int(project_id),
+                                                        session_id=str(session_id),
+                                                        from_step=next_step,
+                                                        to_step=int(total_steps),
+                                                        messages=(
+                                                            all_messages
+                                                            if "all_messages" in locals()
+                                                            else []
+                                                        ),
+                                                        previous_output=content,
+                                                        agent=agent if "agent" in locals() else None,
+                                                        invoke_config=invoke_config if "invoke_config" in locals() else None,
+                                                    ):
+                                                        if event.get("type") == "_auto_run_bundle":
+                                                            auto_output = event.get("output") or ""
+                                                            auto_step = event.get("last_step") or auto_step
+                                                            continue
+                                                        yield create_flushed_sse(event)
+                                                    if auto_output:
+                                                        content = (
+                                                            f"{content}\n{auto_output}"
+                                                        ).strip()
+                                                    if auto_step is not None:
+                                                        yield create_sse_data(
+                                                            {
+                                                                "type": "testcase_progress",
+                                                                "session_id": session_id,
+                                                                "test_case_id": int(test_case_id),
+                                                                "step": auto_step,
+                                                                "total_steps": total_steps,
+                                                                "state": "completed",
+                                                                "message": "自动补跑步骤完成，正在校验结果",
+                                                            }
+                                                        )
+                                                    # 剩余步骤已强制跑完：直接收尾，避免模型再写假报告
+                                                    record, injected_report = await _complete_testcase_run_with_report(
+                                                        session_id=session_id,
+                                                        final_content=str(content),
+                                                        messages=all_messages
+                                                        if "all_messages" in locals()
+                                                        else [],
+                                                        agent=agent,
+                                                        invoke_config=invoke_config,
+                                                    )
+                                                    if injected_report:
+                                                        yield create_sse_data(
+                                                            {
+                                                                "type": "stream",
+                                                                "data": "\n\n" + injected_report,
+                                                            }
+                                                        )
+                                                    yield create_sse_data(
+                                                        {
+                                                            "type": "complete",
+                                                            "total_steps": step_count,
+                                                            "test_case_run": {
+                                                                "status": record.status
+                                                                if record
+                                                                else "pass",
+                                                                "summary": record.summary
+                                                                if record
+                                                                else "",
                                                             },
                                                         }
                                                     )
@@ -2097,10 +2538,116 @@ class AgentLoopStreamAPIView(View):
                                 "AgentLoopStreamAPI: Failed to extract final testcase content: %s",
                                 extract_err,
                             )
+                        llm_failure_message = extract_llm_failure_message_from_text(
+                            final_content
+                        )
+                        if llm_failure_message and test_case_id:
+                            yield create_sse_data(
+                                {
+                                    "type": "testcase_progress",
+                                    "session_id": session_id,
+                                    "test_case_id": int(test_case_id),
+                                    "state": "waiting_llm",
+                                    "message": llm_failure_message,
+                                }
+                            )
+
+                        # 模型常在倒数第二步后直接出报告，跳过最后一步截图。
+                        # 收尾前若发现 helper 进度未到总步数，直接在持久化浏览器会话上
+                        # 强制执行剩余步骤（不依赖模型），并自动上传截图。
+                        if (
+                            not user_stopped
+                            and not interrupt_detected
+                            and "agent" in locals()
+                            and "invoke_config" in locals()
+                        ):
+                            try:
+                                total_case_steps = await sync_to_async(
+                                    _get_testcase_step_count
+                                )(int(test_case_id))
+                                current_messages = (
+                                    all_messages if "all_messages" in locals() else []
+                                )
+                                if not current_messages:
+                                    try:
+                                        st = await agent.aget_state(invoke_config)
+                                        current_messages = (
+                                            (st.values or {}).get("messages") or []
+                                        )
+                                    except Exception:
+                                        current_messages = []
+                                done_step = _latest_passed_helper_step_from_messages(
+                                    current_messages
+                                )
+                                logger.warning(
+                                    "AgentLoopStreamAPI: step coverage check "
+                                    "case=%s done=%s total=%s msgs=%s",
+                                    test_case_id,
+                                    done_step,
+                                    total_case_steps,
+                                    len(current_messages or []),
+                                )
+                                if (
+                                    total_case_steps
+                                    and done_step
+                                    and done_step < total_case_steps
+                                ):
+                                    next_step = done_step + 1
+                                    logger.warning(
+                                        "AgentLoopStreamAPI: incomplete steps "
+                                        "case=%s done=%s/%s, auto-running %s..%s",
+                                        test_case_id,
+                                        done_step,
+                                        total_case_steps,
+                                        next_step,
+                                        total_case_steps,
+                                    )
+                                    auto_output = ""
+                                    helper_step = done_step
+                                    async for event in _run_and_stream_remaining_helper_steps(
+                                        test_case_id=int(test_case_id),
+                                        user_id=int(request.user.id),
+                                        project_id=int(project_id),
+                                        session_id=str(session_id),
+                                        from_step=next_step,
+                                        to_step=int(total_case_steps),
+                                        messages=current_messages,
+                                        previous_output=str(final_content or streamed_assistant_content or ""),
+                                        agent=agent if "agent" in locals() else None,
+                                        invoke_config=invoke_config if "invoke_config" in locals() else None,
+                                    ):
+                                        if event.get("type") == "_auto_run_bundle":
+                                            auto_output = event.get("output") or ""
+                                            helper_step = event.get("last_step") or helper_step
+                                            continue
+                                        yield create_flushed_sse(event)
+                                    if auto_output:
+                                        final_content = (
+                                            f"{final_content}\n{auto_output}"
+                                        ).strip()
+                                        yield create_sse_data(
+                                            {
+                                                "type": "testcase_progress",
+                                                "session_id": session_id,
+                                                "test_case_id": int(test_case_id),
+                                                "step": helper_step,
+                                                "total_steps": total_case_steps,
+                                                "state": "completed",
+                                                "message": "自动补跑步骤完成，正在校验结果",
+                                            }
+                                        )
+                            except Exception as resume_err:
+                                logger.warning(
+                                    "AgentLoopStreamAPI: incomplete-step auto-resume failed: %s",
+                                    resume_err,
+                                    exc_info=True,
+                                )
+
                         record, injected_report = await _complete_testcase_run_with_report(
                             session_id=session_id,
                             final_content=final_content,
                             messages=all_messages if "all_messages" in locals() else [],
+                            error_message=llm_failure_message,
                             agent=agent,
                             invoke_config=invoke_config,
                         )
@@ -2898,6 +3445,34 @@ class AgentLoopResumeAPIView(View):
                                                         "step": step_count,
                                                     }
                                                 )
+                                                resume_markers = re.findall(
+                                                    r"RESULT\s*=\s*(PASS|FAIL)\b",
+                                                    str(content),
+                                                    flags=re.IGNORECASE,
+                                                )
+                                                if (
+                                                    test_case_id
+                                                    and tool_name == "execute_skill_script"
+                                                    and helper_step is not None
+                                                    and total_steps
+                                                    and helper_step < total_steps
+                                                    and resume_markers
+                                                    and resume_markers[-1].upper() == "PASS"
+                                                ):
+                                                    yield create_sse_data(
+                                                        {
+                                                            "type": "testcase_progress",
+                                                            "session_id": session_id,
+                                                            "test_case_id": int(test_case_id),
+                                                            "step": helper_step,
+                                                            "total_steps": total_steps,
+                                                            "state": "waiting_llm",
+                                                            "message": (
+                                                                "浏览器步骤已完成，正在调用模型生成下一步脚本"
+                                                                "（模型或网络较慢时可能等待数分钟）"
+                                                            ),
+                                                        }
+                                                    )
                                         if step_count > 0:
                                             yield create_sse_data(
                                                 {

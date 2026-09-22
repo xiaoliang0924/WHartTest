@@ -24,6 +24,8 @@ _FAIL_HINTS = (
     "命令执行失败",
     "syntaxerror",
     "timeout",
+    "playwright exec timed out",
+    "浏览器已重置",
     "err_blocked_by_client",
     "already been declared",
     "strict mode violation",
@@ -38,15 +40,54 @@ _REPORT_TEMPLATE_MARKERS = (
     "| 1 | … |",
 )
 _RESULT_FAIL_RE = re.compile(r"RESULT=FAIL[:：]?\s*(.+)", re.IGNORECASE)
+_HELPER_FAIL_LINE_RE = re.compile(
+    r"^RESULT=FAIL[:：]\s*(.+)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_HELPER_STEP_RESULT_RE = re.compile(
+    r"RESULT=(PASS|FAIL)\b[:：]?\s*步骤\s*(\d+)",
+    re.IGNORECASE,
+)
+_AUTO_RESUME_STEP_RE = re.compile(
+    r"\[AUTO_RESUME\]\s*强制执行步骤\s*(\d+)\s*/",
+    re.IGNORECASE,
+)
+_INSTRUCTIONAL_FAIL_RE = re.compile(
+    r"console\.log|process\.exit|禁止\s*`?throw|通过则|不要杀进程|\.\.\.\)",
+    re.IGNORECASE,
+)
 _NON_EXECUTION_RESULT_FAIL_RE = re.compile(
-    r"RESULT=FAIL\s*(?:时立即判不通过，禁止自行补截图或改报通过|必须停止，禁止改报通过)[。.]?",
+    r"RESULT=FAIL\s*(?:"
+    r"时立即判不通过，禁止自行补截图或改报通过|"
+    r"必须停止，禁止改报通过|"
+    r"[:：][^\n]*?(?:禁止\s*`?throw|通过则\s*`?RESULT=PASS|process\.exit|console\.log)"
+    r")[^\n]*",
+    re.IGNORECASE,
+)
+# Skill 文档 / 提示词里的 RESULT=FAIL 示例（非真实 helper 输出）
+_SKILL_DOC_RESULT_FAIL_RE = re.compile(
+    r"(?m)^[^\n]*RESULT=FAIL[^\n]*(?:"
+    r"禁止\s*(?:throw|`throw`)|"
+    r"通过则|"
+    r"process\.exit|"
+    r"console\.log|"
+    r"\.\.\.\)[`']?\s*\+\s*截图"
+    r")[^\n]*\n?",
     re.IGNORECASE,
 )
 _FILE_MISSING_RE = re.compile(r"文件不存在[:：]?\s*(.+)")
 _COMMAND_FAIL_RE = re.compile(r"命令执行失败[^\n]*")
-_TIMEOUT_RE = re.compile(r"(TimeoutError|Timeout \d+ms exceeded)[^\n]*", re.IGNORECASE)
+_TIMEOUT_RE = re.compile(
+    r"(TimeoutError|Timeout \d+ms exceeded|Playwright exec timed out after \d+ms)[^\n]*",
+    re.IGNORECASE,
+)
 _STEP_RE = re.compile(r"(?:步骤|step)\s*(\d+)", re.IGNORECASE)
 _CASE_STEP_RE = re.compile(r"case_\d+_step(\d+)", re.IGNORECASE)
+_CASE_SCREENSHOT_PATH_RE = re.compile(
+    r"\[(?:CASE_SCREENSHOT|SCREENSHOT_SAVED|AUTO_UPLOAD)\][^\n]*?"
+    r"((?:[A-Za-z]:)?[^\s<>\"'`|]*case_\d+_step\d+\.png)",
+    re.IGNORECASE,
+)
 _DATA_USE_ACTION_RE = re.compile(
     r"fillFilterField|clickRowAction|queryTicketInList|runTicketDetailCaseStep|"
     r"runClaimableTicketCaseStep|WHARTTEST_TICKET_NO|\[PRE_DATA\]\s*ticketNo=|"
@@ -229,12 +270,23 @@ def _testcase_steps(testcase) -> list:
     return list(steps)
 
 
+def _strip_instructional_result_fail(text: str) -> str:
+    """Remove RESULT=FAIL examples from skill docs / prompts, keep real helper fails."""
+    cleaned = _NON_EXECUTION_RESULT_FAIL_RE.sub("", text or "")
+    cleaned = _SKILL_DOC_RESULT_FAIL_RE.sub("", cleaned)
+    return cleaned
+
+
 def _extract_fail_context(transcript: str) -> dict[str, Any]:
-    text = _NON_EXECUTION_RESULT_FAIL_RE.sub("", transcript or "")
+    text = _strip_instructional_result_fail(_normalize_execution_transcript(transcript or ""))
     reason = ""
-    fail_match = _RESULT_FAIL_RE.search(text)
+    fail_match = None
+    for match in _HELPER_FAIL_LINE_RE.finditer(text):
+        if _INSTRUCTIONAL_FAIL_RE.search(match.group(0)):
+            continue
+        fail_match = match
     if fail_match:
-        reason = fail_match.group(0).strip()
+        reason = (fail_match.group(1) or "").strip().strip("`| ").strip()
     elif _FILE_MISSING_RE.search(text):
         reason = _FILE_MISSING_RE.search(text).group(0).strip()
     elif _COMMAND_FAIL_RE.search(text):
@@ -329,6 +381,18 @@ def collect_checkpoint_execution_transcript(
         return ""
 
 
+def _normalize_execution_transcript(text: str) -> str:
+    """Turn JSON-escaped helper output back into line-oriented evidence."""
+    if not text:
+        return ""
+    return (
+        str(text)
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+    )
+
+
 def build_step_results_from_execution_evidence(
     testcase,
     transcript: str,
@@ -336,25 +400,106 @@ def build_step_results_from_execution_evidence(
     fail_reason: str,
 ) -> list[dict[str, Any]]:
     """Derive per-step status from Playwright helper output (RESULT=PASS/FAIL + step screenshots)."""
-    text = transcript or ""
+    text = _strip_instructional_result_fail(_normalize_execution_transcript(transcript or ""))
     if not text.strip():
         return []
 
     case_id = int(getattr(testcase, "id", 0) or 0)
     step_outcomes: dict[int, str] = {}
-    for match in re.finditer(
-        rf"case[_-]{case_id}_step(\d+)[\s\S]{{0,5000}}?RESULT=(PASS|FAIL)",
-        text,
-        flags=re.IGNORECASE,
-    ):
-        step_outcomes[int(match.group(1))] = match.group(2).lower()
+    for match in _HELPER_STEP_RESULT_RE.finditer(text):
+        step_outcomes[int(match.group(2))] = match.group(1).lower()
 
-    for match in re.finditer(
-        r"正在执行步骤\s*(\d+)[\s\S]{0,5000}?RESULT=(PASS|FAIL)",
-        text,
-        flags=re.IGNORECASE,
-    ):
-        step_outcomes.setdefault(int(match.group(1)), match.group(2).lower())
+    auto_parts = re.split(r"\[AUTO_RESUME\]\s*强制执行步骤\s*(\d+)\s*/\d+", text)
+    auto_idx = 1
+    while auto_idx + 1 < len(auto_parts):
+        try:
+            step_no = int(auto_parts[auto_idx])
+        except (TypeError, ValueError):
+            auto_idx += 2
+            continue
+        block = auto_parts[auto_idx + 1]
+        last = None
+        for result_match in re.finditer(
+            r"^RESULT=(PASS|FAIL)\b",
+            block,
+            flags=re.IGNORECASE | re.MULTILINE,
+        ):
+            last = result_match.group(1).lower()
+        if last:
+            step_outcomes[step_no] = last
+        auto_idx += 2
+
+    # 截图行 + 随后 RESULT，补上未写成「步骤N」的 helper 输出
+    try:
+        matches = list(
+            re.finditer(
+                rf"(?:\[(?:CASE_SCREENSHOT|SCREENSHOT_SAVED)\].*?case[_-]{case_id}_step(\d+)|\b正在执行步骤\s*(\d+))"
+                rf"[\s\S]{{0,2500}}?RESULT=(PASS|FAIL)\b",
+                text,
+                flags=re.IGNORECASE | re.MULTILINE,
+            )
+        )
+    except re.error:
+        logger.exception(
+            "build_step_results_from_execution_evidence regex failed case=%s",
+            case_id,
+        )
+        matches = []
+    progress_markers = list(re.finditer(r"正在执行步骤\s*(\d+)", text))
+    progress_blocks: dict[int, str] = {}
+    for idx, match in enumerate(progress_markers):
+        step_no = int(match.group(1))
+        block_start = match.start()
+        block_end = (
+            progress_markers[idx + 1].start()
+            if idx + 1 < len(progress_markers)
+            else len(text)
+        )
+        progress_blocks[step_no] = text[block_start:block_end]
+
+    for match in matches:
+        step_no = int(match.group(1) or match.group(2))
+        block = progress_blocks.get(step_no) or ""
+        if block:
+            last_in_block = None
+            for result_match in re.finditer(
+                r"^RESULT=(PASS|FAIL)\b",
+                block,
+                flags=re.IGNORECASE | re.MULTILINE,
+            ):
+                last_in_block = result_match.group(1).lower()
+            if last_in_block:
+                step_outcomes[step_no] = last_in_block
+                continue
+        step_outcomes[step_no] = match.group(3).lower()
+
+    # Authoritative per-step outcome: last RESULT=PASS/FAIL within that step's block only.
+    for step_no, window in progress_blocks.items():
+        last_result = None
+        for result_match in re.finditer(
+            r"^RESULT=(PASS|FAIL)\b",
+            window,
+            flags=re.IGNORECASE | re.MULTILINE,
+        ):
+            last_result = result_match.group(1).lower()
+        if last_result:
+            step_outcomes[step_no] = last_result
+        timed_out = bool(
+            re.search(
+                r"Playwright exec timed out|浏览器已重置",
+                window,
+                flags=re.IGNORECASE,
+            )
+        )
+        has_pass = bool(
+            re.search(
+                rf"RESULT=PASS[:：]?\s*步骤\s*{step_no}\b",
+                window,
+                flags=re.IGNORECASE,
+            )
+        )
+        if timed_out and not has_pass:
+            step_outcomes[step_no] = "fail"
 
     if not step_outcomes:
         return []
@@ -676,17 +821,155 @@ def _append_missing_message_note(summary: str, missing_texts: list[str]) -> str:
 
 def list_missing_step_screenshots(testcase: TestCase) -> list[int]:
     """Steps that have no uploaded screenshot on the testcase detail page."""
-    step_count = testcase.steps.count()
-    if step_count <= 0:
+    expected = [
+        int(number)
+        for number in testcase.steps.values_list("step_number", flat=True)
+        if number
+    ]
+    if not expected:
         return []
     from testcases.models import TestCaseScreenshot
 
-    present = set(
-        TestCaseScreenshot.objects.filter(test_case_id=testcase.id).values_list(
-            "step_number", flat=True
-        )
+    present = {
+        int(number)
+        for number in TestCaseScreenshot.objects.filter(
+            test_case_id=testcase.id,
+            step_number__isnull=False,
+        ).values_list("step_number", flat=True)
+        if number
+    }
+    return [number for number in sorted(set(expected)) if number not in present]
+
+
+def runtime_screenshot_dir(testcase: TestCase) -> str:
+    from django.conf import settings
+
+    return os.path.join(
+        settings.MEDIA_ROOT,
+        "skill_runtime",
+        "screenshots",
+        str(testcase.project_id),
+        str(testcase.id),
     )
-    return [n for n in range(1, step_count + 1) if n not in present]
+
+
+def runtime_step_screenshot_path(testcase: TestCase, step_number: int) -> str:
+    return os.path.join(
+        runtime_screenshot_dir(testcase),
+        f"case_{testcase.id}_step{step_number}.png",
+    )
+
+
+def runtime_last_screenshot_path(testcase: TestCase) -> str:
+    return os.path.join(runtime_screenshot_dir(testcase), "last.png")
+
+
+def attach_testcase_step_screenshot(
+    *,
+    testcase_id: int,
+    step_number: int,
+    filepath: str,
+    title: str = "",
+    uploader_id: Optional[int] = None,
+) -> bool:
+    """Persist a local step screenshot onto the testcase detail page."""
+    if int(step_number or 0) <= 0 or not filepath or not os.path.isfile(filepath):
+        return False
+    try:
+        if os.path.getsize(filepath) <= 0:
+            return False
+    except OSError:
+        return False
+
+    from django.core.files import File
+
+    from testcases.models import TestCaseScreenshot
+
+    try:
+        existing = TestCaseScreenshot.objects.filter(
+            test_case_id=testcase_id,
+            step_number=int(step_number),
+        )
+        for old in existing:
+            if old.screenshot and os.path.isfile(old.screenshot.path):
+                try:
+                    os.remove(old.screenshot.path)
+                except OSError:
+                    pass
+            old.delete()
+
+        shot = TestCaseScreenshot(
+            test_case_id=testcase_id,
+            step_number=int(step_number),
+            title=title or f"步骤{step_number}",
+            uploader_id=uploader_id,
+        )
+        with open(filepath, "rb") as handle:
+            shot.screenshot.save(os.path.basename(filepath), File(handle), save=True)
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Failed to attach step %s screenshot for testcase %s from %s: %s",
+            step_number,
+            testcase_id,
+            filepath,
+            exc,
+        )
+        return False
+
+
+def backfill_missing_step_screenshots(
+    testcase: TestCase,
+    *,
+    transcript: str = "",
+    uploader_id: Optional[int] = None,
+) -> list[int]:
+    """Attach any missing step screenshots that already exist on disk."""
+    missing = list_missing_step_screenshots(testcase)
+    if not missing:
+        return []
+
+    declared: dict[int, str] = {}
+    for match in _CASE_SCREENSHOT_PATH_RE.findall(transcript or ""):
+        step_match = re.search(r"step(\d+)", os.path.basename(match), flags=re.IGNORECASE)
+        if not step_match:
+            continue
+        declared[int(step_match.group(1))] = match
+
+    still_missing: list[int] = []
+    last_missing = missing[-1]
+    last_png = runtime_last_screenshot_path(testcase)
+    for step_number in missing:
+        candidates = []
+        declared_path = declared.get(step_number)
+        if declared_path:
+            candidates.append(declared_path)
+        named_path = runtime_step_screenshot_path(testcase, step_number)
+        if (
+            step_number == last_missing
+            and os.path.isfile(last_png)
+            and not os.path.isfile(named_path)
+        ):
+            try:
+                os.makedirs(os.path.dirname(named_path), exist_ok=True)
+                shutil.copyfile(last_png, named_path)
+            except OSError:
+                candidates.append(last_png)
+        candidates.append(named_path)
+        attached = False
+        for candidate in candidates:
+            if attach_testcase_step_screenshot(
+                testcase_id=testcase.id,
+                step_number=step_number,
+                filepath=candidate,
+                title=f"步骤{step_number}",
+                uploader_id=uploader_id,
+            ):
+                attached = True
+                break
+        if not attached:
+            still_missing.append(step_number)
+    return still_missing
 
 
 def _append_screenshot_gap_note(summary: str, missing_steps: list[int]) -> str:
@@ -696,7 +979,7 @@ def _append_screenshot_gap_note(summary: str, missing_steps: list[int]) -> str:
     note = (
         f"\n\n### 截图校验\n"
         f"- 用例详情缺少 {labels} 的自动上传截图。"
-        f"通常表示该步未执行 `runClaimableTicketCaseStep` / 未产生 `[CASE_SCREENSHOT]`，"
+        f"通常表示该步未执行固定 helper / 未产生 `[CASE_SCREENSHOT]`，"
         f"对话中的「通过」不可信，请重新逐步执行。\n"
     )
     if "测试执行结果: 通过" in summary or "测试执行结果：通过" in summary:
@@ -758,6 +1041,15 @@ def start_testcase_run_record(
     except TestCase.DoesNotExist:
         logger.warning("Skip run record: testcase %s not found", testcase_id)
         return None
+
+    existing = (
+        TestCaseRunRecord.objects.filter(session_id=session_id)
+        .only("id", "status")
+        .first()
+    )
+    if existing and existing.status == "running":
+        # Do not wipe step screenshots that this running session already uploaded.
+        return TestCaseRunRecord.objects.get(pk=existing.pk)
 
     _cleanup_testcase_screenshots(testcase_id)
 
@@ -849,7 +1141,11 @@ def finalize_testcase_run_record(
         stopped=stopped,
         error_message=error_message,
     )
-    missing_shots = list_missing_step_screenshots(record.testcase)
+    missing_shots = backfill_missing_step_screenshots(
+        record.testcase,
+        transcript=combined,
+        uploader_id=int(record.executor_id) if record.executor_id else None,
+    )
     if missing_shots and outcome.get("status") == "pass":
         outcome["status"] = "fail"
         outcome["summary"] = _append_screenshot_gap_note(

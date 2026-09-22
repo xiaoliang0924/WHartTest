@@ -843,7 +843,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
         # 验证文件类型和大小
         allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/gif"]
-        max_size = 5 * 1024 * 1024  # 5MB
+        max_size = 20 * 1024 * 1024  # 20MB
 
         for file in uploaded_files:
             if file.content_type not in allowed_types:
@@ -856,7 +856,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
             if file.size > max_size:
                 return Response(
-                    {"error": f"文件 {file.name} 大小超过5MB限制"},
+                    {"error": f"文件 {file.name} 大小超过20MB限制"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 

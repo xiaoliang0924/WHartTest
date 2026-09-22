@@ -234,6 +234,24 @@ def _format_retry_after_hint(
     return "".join(parts) or "稍后"
 
 
+def _is_llm_timeout_error(exc: Exception) -> bool:
+    """Whether the exception represents an LLM HTTP read/connect timeout."""
+    timeout_types = ("APITimeoutError", "ReadTimeout", "ConnectTimeout", "TimeoutError")
+    if type(exc).__name__ in timeout_types:
+        return True
+    error_text = str(exc).lower()
+    return any(
+        hint in error_text
+        for hint in (
+            "request timed out",
+            "timed out",
+            "timeout",
+            "read timeout",
+            "connect timeout",
+        )
+    )
+
+
 def get_user_friendly_llm_error(
     exc: Exception, error_field: str = "llm_interaction"
 ) -> Optional[Dict[str, Any]]:
@@ -258,6 +276,21 @@ def get_user_friendly_llm_error(
     if reset_seconds is None and not reset_time:
         reset_seconds, reset_time = _extract_retry_after_metadata(exc)
     error_text = str(exc).lower()
+
+    if _is_llm_timeout_error(exc):
+        message = (
+            "模型服务响应超时（可能在重试中）。请检查 LLM API 地址与网络，"
+            "或在「LLM 配置」中增大「请求超时(秒)」后重试。"
+        )
+        return {
+            "status_code": 504,
+            "message": message,
+            "errors": {error_field: [message]},
+            "error_code": "llm_timeout",
+            "model": model,
+            "reset_seconds": None,
+            "reset_time": None,
+        }
 
     is_model_cooldown = (
         error_code in _MODEL_COOLDOWN_ERROR_CODES or "cooling down" in error_text
@@ -390,6 +423,40 @@ def _build_model_retry_failure_handler(
         )
 
     return _on_failure
+
+
+_MODEL_CALL_FAILURE_RE = re.compile(
+    r"Model call failed after \d+ attempts with (\w+)",
+    flags=re.IGNORECASE,
+)
+
+
+def extract_llm_failure_message_from_text(text: str) -> Optional[str]:
+    """
+    Parse assistant text returned when ModelRetryMiddleware exhausts retries.
+    Returns a user-facing message, or None if the text is not a model failure.
+    """
+    if not text or not isinstance(text, str):
+        return None
+
+    match = _MODEL_CALL_FAILURE_RE.search(text)
+    if match:
+        exc_name = match.group(1)
+        synthetic = Exception(f"{exc_name}: Request timed out.")
+        synthetic.__class__.__name__ = exc_name
+        friendly = get_user_friendly_llm_error(synthetic)
+        if friendly:
+            return friendly["message"]
+        return (
+            "模型调用失败（多次重试后仍不可用）。请检查 LLM 服务状态或更换模型后重试。"
+        )
+
+    lowered = text.lower()
+    if "apitimeouterror" in lowered or "request timed out" in lowered:
+        return get_user_friendly_llm_error(Exception("APITimeoutError: Request timed out."))[
+            "message"
+        ]
+    return None
 
 
 def _is_unreliable_default_detected_limit(

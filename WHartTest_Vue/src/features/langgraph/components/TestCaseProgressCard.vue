@@ -3,7 +3,7 @@
     <div class="progress-card-main">
       <div class="progress-title">测试步骤（{{ currentStep ? `${currentStep}/${totalSteps}` : `准备中/${totalSteps}` }}）</div>
       <div class="progress-summary">
-        <span :class="{ waiting: state === 'pending' }">{{ stateLabel }}</span>
+        <span :class="{ waiting: state === 'pending', 'waiting-llm': state === 'waiting_llm' }">{{ stateLabel }}</span>
         <span>已完成 {{ completedSteps }}</span>
         <span>待开始 {{ pendingSteps }}</span>
       </div>
@@ -24,7 +24,7 @@ const props = withDefaults(defineProps<{
   currentStep: number;
   totalSteps: number;
   startedAt?: number;
-  state?: 'pending' | 'running' | 'completed';
+  state?: 'pending' | 'running' | 'completed' | 'waiting_llm';
   message?: string;
 }>(), {
   startedAt: 0,
@@ -43,7 +43,8 @@ const completedSteps = computed(() => props.state === 'completed'
 const pendingSteps = computed(() => Math.max(0, safeTotal.value - completedSteps.value - (props.state === 'running' ? 1 : 0)));
 const percent = computed(() => Math.round((completedSteps.value / safeTotal.value) * 100));
 const stateLabel = computed(() => {
-  if (props.state === 'running') return '进行中 1';
+  if (props.state === 'running') return '浏览器执行中';
+  if (props.state === 'waiting_llm') return '等待模型响应';
   if (props.state === 'completed') return '正在确认下一步';
   return '等待浏览器任务';
 });
@@ -64,6 +65,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); });
 .progress-title { color: #25313d; font-size: 15px; font-weight: 600; }
 .progress-summary { display: flex; gap: 12px; color: #9099a5; font-size: 12px; }
 .progress-summary span:first-child { color: #36a867; }
+.progress-summary span.waiting-llm { color: #d48806; }
 .progress-summary span.waiting { color: #9099a5; }
 .progress-message { margin-top: 7px; color: #6b7785; font-size: 12px; }
 .progress-card-time { position: absolute; right: 58px; top: 14px; color: #6b7785; font-variant-numeric: tabular-nums; }

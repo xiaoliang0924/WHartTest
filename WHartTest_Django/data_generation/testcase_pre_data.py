@@ -31,6 +31,46 @@ logger = logging.getLogger(__name__)
 _LEGACY_CLAIMABLE_TEMPLATE_KEY = 'biz_create_claimable_pending'
 _CLAIMABLE_AUTO_SOURCE = 'claimable-auto'
 _CLAIMABLE_MANUAL_SOURCE = 'manual-fixture'
+# 带 initialMessage 的创建接口会把发起人锁进沟通会话，领取时返回 INITIATOR_LOCKED。
+# 领取类造数必须改用「无初始沟通消息」接口。
+_CLAIMABLE_CREATE_INTERFACE_NAME = '创建工单-无初始沟通消息'
+_DEFAULT_CREATE_INTERFACE_IDS = (445,)
+# admin as initiator often hits INITIATOR_LOCKED during claim.
+# Claimable pre-data creates tickets as env noCommonToken user instead.
+_CLAIMABLE_CREATOR_TOKEN_VAR = 'noCommonToken'
+
+
+def _inject_unlocked_creator_token(exec_params, *, environment_id):
+    """Override accessToken so claimable tickets are not created by a locked initiator."""
+    params = dict(exec_params or {})
+    if not environment_id:
+        return params
+    try:
+        from api_environments.models import ApiEnvironment
+
+        env = ApiEnvironment.objects.filter(id=int(environment_id)).first()
+        if env is None:
+            return params
+        variables = env.get_all_variables()
+        if not isinstance(variables, dict):
+            return params
+        token = str(variables.get(_CLAIMABLE_CREATOR_TOKEN_VAR) or '').strip()
+        if not token:
+            logger.warning(
+                'Claimable pre-data: env var %s missing; create may hit INITIATOR_LOCKED',
+                _CLAIMABLE_CREATOR_TOKEN_VAR,
+            )
+            return params
+        params['accessToken'] = token
+        params['adminToken'] = token
+        logger.info(
+            'Claimable pre-data: create auth overridden with %s to avoid INITIATOR_LOCKED',
+            _CLAIMABLE_CREATOR_TOKEN_VAR,
+        )
+    except Exception:
+        logger.exception('Claimable pre-data: failed to inject unlocked creator token')
+    return params
+
 
 _TICKET_CONTEXT_KEYWORDS = (
     '工单',
@@ -366,6 +406,11 @@ def extract_manual_ticket_fixture(params: Any) -> Dict[str, Any]:
         return {}
     if 'ticketId' not in snapshot and snapshot.get('work_order_id') not in (None, ''):
         snapshot['ticketId'] = snapshot['work_order_id']
+    # Keep assignment facts so claim login can resolve browser credentials
+    # when the case uses a manual/pool fixture instead of a data-generation run.
+    assignment = params.get('autoAssignment')
+    if isinstance(assignment, dict) and assignment:
+        snapshot['autoAssignment'] = assignment
     return snapshot
 
 
@@ -544,36 +589,161 @@ def _ticket_row_supports_claim(row: dict[str, Any]) -> bool:
     return status == 'pending_process' and assignee not in (None, '', 0)
 
 
+def _build_claimable_steps_without_initial_chat(plan: DataGenerationPlan) -> Optional[list]:
+    """Force claimable creation onto the no-initial-message create interface.
+
+    Tickets created with a non-empty ``initialMessage`` leave the initiator in an
+    active chat lock. Claim then returns HTTP 409 ``INITIATOR_LOCKED`` and the UI
+    confirm button appears to "do nothing".
+    """
+    from copy import deepcopy
+
+    from api_interfaces.models import ApiInterface
+    from .template_resolver import resolve_template_steps
+
+    no_chat = (
+        ApiInterface.objects.filter(
+            project_id=plan.project_id,
+            name=_CLAIMABLE_CREATE_INTERFACE_NAME,
+        )
+        .order_by('id')
+        .first()
+    )
+    if no_chat is None:
+        logger.warning(
+            'Claimable pre-data: interface %s not found; keep default create binding',
+            _CLAIMABLE_CREATE_INTERFACE_NAME,
+        )
+        return None
+
+    raw_steps = plan.steps if isinstance(plan.steps, list) else []
+    resolved = resolve_template_steps(
+        deepcopy(raw_steps),
+        project_id=plan.project_id,
+        plan_bindings=plan.template_bindings if isinstance(plan.template_bindings, dict) else None,
+        default_environment_id=plan.default_environment_id,
+        template_key=plan.template_key or None,
+    )
+    changed = False
+    for step in resolved:
+        if not isinstance(step, dict) or (step.get('type') or '').strip() != 'api_call':
+            continue
+        interface_id = step.get('interface_id')
+        try:
+            interface_id_int = int(interface_id) if interface_id is not None else None
+        except (TypeError, ValueError):
+            interface_id_int = None
+        if interface_id_int in _DEFAULT_CREATE_INTERFACE_IDS or interface_id_int == no_chat.id:
+            if interface_id_int != no_chat.id:
+                step['interface_id'] = no_chat.id
+                changed = True
+            step_name = str(step.get('name') or '')
+            if '创建' in step_name and '无初始' not in step_name:
+                step['name'] = _CLAIMABLE_CREATE_INTERFACE_NAME
+                changed = True
+    if not changed:
+        # Fallback: first api_call step is usually create for TYPE_A plans.
+        for step in resolved:
+            if isinstance(step, dict) and (step.get('type') or '').strip() == 'api_call':
+                step['interface_id'] = no_chat.id
+                step['name'] = _CLAIMABLE_CREATE_INTERFACE_NAME
+                changed = True
+                break
+    return resolved if changed else None
+
+
+def _list_processing_creator_names(*, project_id: int, environment_id: int) -> set[str]:
+    """Initiators who currently have processing tickets are claim-locked."""
+    rows = _list_tickets_from_api(
+        project_id=project_id,
+        environment_id=int(environment_id),
+        query_path='/api/tickets?status=processing&page=1&pageSize=100',
+    )
+    names: set[str] = set()
+    for row in rows:
+        name = str(row.get('creatorName') or row.get('creator') or '').strip()
+        if name:
+            names.add(name)
+    return names
+
+
 def try_pick_claimable_ticket_from_pool(
     testcase: TestCase,
     *,
     environment_id: Optional[int],
 ) -> dict[str, Any]:
+    """Pick a pending assigned ticket whose initiator has no processing chat.
+
+    Do **not** soft-claim with the admin token to verify: admin claim itself
+    locks the initiator with the admin handler and recreates INITIATOR_LOCKED
+    for the assignee's UI claim.
+    """
     env_id = environment_id or getattr(testcase, 'pre_data_environment_id', None)
     if not env_id:
         return {}
-    queries = ('/api/tickets?currentStatus=pending_process&page=1&pageSize=50',)
+    locked_creators = _list_processing_creator_names(
+        project_id=testcase.project_id,
+        environment_id=int(env_id),
+    )
+    queries = (
+        '/api/tickets?currentStatus=pending_process&page=1&pageSize=100',
+        '/api/tickets?status=pending_process&page=1&pageSize=100',
+    )
+    rows: list[dict[str, Any]] = []
     for query in queries:
-        for row in _list_tickets_from_api(
+        rows = _list_tickets_from_api(
             project_id=testcase.project_id,
             environment_id=int(env_id),
             query_path=query,
-        ):
-            if not _ticket_row_supports_claim(row):
-                continue
-            ticket_id = row.get('id') or row.get('ticketId')
-            ticket_no = row.get('ticketNo')
-            if ticket_id in (None, '') or not ticket_no:
-                continue
-            return {
-                'ticketId': ticket_id,
-                'ticketNo': str(ticket_no),
-                'work_order_id': ticket_id,
-                'ticketStatus': row.get('status') or 'pending_process',
-                'autoAssignment': _assignment_snapshot_from_row(row),
-                'source': 'claimable-pool',
-            }
-    return {}
+        )
+        if rows:
+            break
+
+    # Prefer creators that are not currently processing with anyone.
+    ranked: list[dict[str, Any]] = []
+    for row in rows:
+        if not _ticket_row_supports_claim(row):
+            continue
+        ticket_id = row.get('id') or row.get('ticketId')
+        ticket_no = row.get('ticketNo')
+        if ticket_id in (None, '') or not ticket_no:
+            continue
+        creator = str(row.get('creatorName') or row.get('creator') or '').strip()
+        if creator and creator in locked_creators:
+            continue
+        ranked.append(row)
+
+    if not ranked:
+        return {}
+
+    # Prefer tickets whose creator differs from assignee (cross-user claim),
+    # then fall back to any unlocked pending ticket.
+    ranked.sort(
+        key=lambda row: (
+            0
+            if str(row.get('creatorName') or '') != str(row.get('assigneeName') or '')
+            else 1,
+            -(row.get('id') or row.get('ticketId') or 0),
+        )
+    )
+    candidate = ranked[0]
+    ticket_id = candidate.get('id') or candidate.get('ticketId')
+    ticket_no = candidate.get('ticketNo')
+    logger.info(
+        'Claimable pool: picked ticket_id=%s creator=%s assignee=%s locked_creators=%s',
+        ticket_id,
+        candidate.get('creatorName'),
+        candidate.get('assigneeName'),
+        sorted(locked_creators),
+    )
+    return {
+        'ticketId': ticket_id,
+        'ticketNo': str(ticket_no),
+        'work_order_id': ticket_id,
+        'ticketStatus': candidate.get('status') or 'pending_process',
+        'autoAssignment': _assignment_snapshot_from_row(candidate),
+        'source': 'claimable-pool',
+    }
 
 
 def validate_claimable_ticket_snapshot(
@@ -615,7 +785,7 @@ def validate_claimable_ticket_snapshot(
 
 
 def resolve_claimable_ticket_pre_data(testcase: TestCase) -> PreDataResolution:
-    """待领取类：默认自动 TYPE_A 造数；若用例配置了 pre_data_params 则优先手工工单。"""
+    """待领取类：手工 fixture > 已解锁领取池 > 自动 TYPE_A 造数。"""
     params = testcase.pre_data_params if isinstance(testcase.pre_data_params, dict) else {}
     manual = extract_manual_ticket_fixture(params)
     env_id = getattr(testcase, 'pre_data_environment_id', None)
@@ -624,6 +794,30 @@ def resolve_claimable_ticket_pre_data(testcase: TestCase) -> PreDataResolution:
             plan=None,
             template_key=None,
             input_params=manual,
+            default_environment_id=env_id,
+            source=_CLAIMABLE_MANUAL_SOURCE,
+            fail_fast=False,
+            skip_reason='',
+        )
+
+    pool = try_pick_claimable_ticket_from_pool(testcase, environment_id=env_id)
+    if pool.get('ticketNo'):
+        # Persist so helpers bind this ticket even without a DataGenerationRun.
+        try:
+            testcase.pre_data_params = {
+                **(params or {}),
+                'ticketId': pool.get('ticketId'),
+                'ticketNo': pool.get('ticketNo'),
+                'work_order_id': pool.get('work_order_id') or pool.get('ticketId'),
+                'autoAssignment': pool.get('autoAssignment') or {},
+            }
+            testcase.save(update_fields=['pre_data_params'])
+        except Exception:
+            logger.exception('Claimable pool: failed to persist fixture on testcase_id=%s', testcase.id)
+        return PreDataResolution(
+            plan=None,
+            template_key=None,
+            input_params=pool,
             default_environment_id=env_id,
             source=_CLAIMABLE_MANUAL_SOURCE,
             fail_fast=False,
@@ -830,7 +1024,17 @@ def get_pre_data_snapshot_for_execution(
     *,
     chat_session_id: Optional[str] = None,
 ) -> dict:
-    """Prefer the data run tied to the current case-management execution."""
+    """Resolve the ticket snapshot helpers should bind for this execution.
+
+    Manual/pool claimable fixtures live on ``testcase.pre_data_params`` and do
+    not create a ``DataGenerationRun``. Prefer that fixture over any older run
+    attached to the chat session, otherwise helpers claim a locked initiator.
+    """
+    params = testcase.pre_data_params if isinstance(testcase.pre_data_params, dict) else {}
+    manual = extract_manual_ticket_fixture(params)
+    if manual.get('ticketNo'):
+        return manual
+
     if chat_session_id:
         from testcases.models import TestCaseRunRecord
 
@@ -843,6 +1047,7 @@ def get_pre_data_snapshot_for_execution(
         run = getattr(record, 'data_generation_run', None) if record else None
         if run and isinstance(run.output_snapshot, dict) and run.output_snapshot.get('ticketNo'):
             return run.output_snapshot
+
     return _latest_pre_data_snapshot(testcase)
 
 
@@ -1373,12 +1578,26 @@ def run_testcase_pre_data(
                 exc,
             )
 
+    steps_override = None
+    if resolution.source == _CLAIMABLE_AUTO_SOURCE:
+        steps_override = _build_claimable_steps_without_initial_chat(plan)
+        if steps_override:
+            logger.info(
+                'Claimable pre-data: using %s to avoid INITIATOR_LOCKED',
+                _CLAIMABLE_CREATE_INTERFACE_NAME,
+            )
+        exec_params = _inject_unlocked_creator_token(
+            exec_params,
+            environment_id=env_id,
+        )
+
     run = execute_plan(
         plan,
         trigger_type=DataGenerationRun.TRIGGER_CASE_PRE,
         input_params=exec_params,
         triggered_by=triggered_by,
         default_environment_id=resolution.default_environment_id or plan.default_environment_id,
+        steps_override=steps_override,
     )
 
     if run.status != DataGenerationRun.STATUS_SUCCESS:

@@ -18,7 +18,7 @@ import mimetypes
 import re
 import signal
 import shlex
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Union
 
 from langchain_core.tools import tool as langchain_tool
 from django.conf import settings
@@ -832,20 +832,6 @@ def _auto_upload_case_screenshots(
     if not paths:
         return ""
 
-    try:
-        from skills.models import Skill
-
-        whart_skill = Skill.objects.filter(name="whart-test", is_active=True).first()
-        whart_dir = whart_skill.get_full_path() if whart_skill else ""
-        if not whart_dir or not os.path.isdir(whart_dir):
-            return ""
-    except Exception as exc:
-        logger.warning("[auto_upload_screenshots] whart-test unavailable: %s", exc)
-        return ""
-
-    upload_env = os.environ.copy()
-    upload_env.update({k: str(v) for k, v in env.items() if v is not None})
-
     notes: list[str] = []
     uploaded_steps: set[str] = set()
     for filepath in paths:
@@ -862,64 +848,279 @@ def _auto_upload_case_screenshots(
             alt = os.path.join(screenshot_dir, basename)
             if os.path.exists(alt):
                 resolved = alt
+        if not os.path.exists(resolved) and screenshot_dir:
+            last_png = os.path.join(screenshot_dir, "last.png")
+            named = os.path.join(screenshot_dir, basename)
+            if os.path.isfile(last_png):
+                try:
+                    shutil.copyfile(last_png, named)
+                    resolved = named
+                except OSError:
+                    resolved = last_png
         if not os.path.exists(resolved):
             notes.append(f"[AUTO_UPLOAD] 跳过：文件不存在 {basename}")
             continue
 
-        # 同一 case/step 只保留最新一张，避免重复累积
         try:
-            from testcases.models import TestCaseScreenshot
+            from testcases.run_record_service import attach_testcase_step_screenshot
 
-            existing = TestCaseScreenshot.objects.filter(
-                test_case_id=case_id, step_number=int(step_num)
+            saved = attach_testcase_step_screenshot(
+                testcase_id=int(case_id),
+                step_number=int(step_num),
+                filepath=resolved,
+                title=f"步骤{step_num}",
             )
-            for old in existing:
-                if old.screenshot and os.path.isfile(old.screenshot.path):
-                    try:
-                        os.remove(old.screenshot.path)
-                    except OSError:
-                        pass
-                old.delete()
-        except Exception as exc:
-            logger.warning("[AUTO_UPLOAD] 清理旧截图失败: %s", exc)
-
-        cmd = [
-            sys.executable,
-            "whart_tools.py",
-            "--action",
-            "upload_screenshot",
-            "--project_id",
-            str(project_id),
-            "--case_id",
-            str(case_id),
-            "--file_path",
-            resolved,
-            "--title",
-            f"步骤{step_num}",
-            "--step_number",
-            step_num,
-        ]
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=whart_dir,
-                env=upload_env,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            result_text = (proc.stdout or proc.stderr or "").strip()
-            if proc.returncode == 0:
-                uploaded_steps.add(step_num)
-                notes.append(f"[AUTO_UPLOAD] 步骤{step_num} 上传成功 ({basename})")
-            else:
-                notes.append(
-                    f"[AUTO_UPLOAD] 步骤{step_num} 失败 (code={proc.returncode}): {result_text[:240]}"
-                )
         except Exception as exc:
             notes.append(f"[AUTO_UPLOAD] 步骤{step_num} 异常: {exc}")
+            continue
+        if saved:
+            uploaded_steps.add(step_num)
+            notes.append(f"[AUTO_UPLOAD] 步骤{step_num} 上传成功 ({basename})")
+        else:
+            notes.append(f"[AUTO_UPLOAD] 步骤{step_num} 失败: 无法保存 {basename}")
 
     return "\n".join(notes)
+
+
+_HELPER_STEP_CALL_RE = re.compile(
+    r"helpers\.(run(?:ClaimableTicket|TicketDetail|Overview|Notification)CaseStep|"
+    r"screenshotCaseStep)\s*\(\s*page\s*,\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
+def infer_fixed_helper_call_template(messages) -> str:
+    """Infer the fixed helper call used by earlier steps, for auto-resume."""
+    for msg in reversed(list(messages or [])):
+        chunks: list[str] = []
+        content = getattr(msg, "content", None)
+        if isinstance(content, str):
+            chunks.append(content)
+        elif content is not None:
+            chunks.append(json.dumps(content, ensure_ascii=False))
+        for tool_call in getattr(msg, "tool_calls", None) or []:
+            if isinstance(tool_call, dict):
+                args = tool_call.get("args") or tool_call.get("arguments") or {}
+            else:
+                args = getattr(tool_call, "args", None) or {}
+            if isinstance(args, str):
+                chunks.append(args)
+            elif isinstance(args, dict):
+                chunks.append(str(args.get("command") or args.get("code") or ""))
+        text = "\n".join(chunks)
+        match = _HELPER_STEP_CALL_RE.search(text)
+        if match:
+            return f"await helpers.{match.group(1)}(page, {{step}});"
+    return "await helpers.runClaimableTicketCaseStep(page, {step});"
+
+
+def _playwright_exec_timeout_for_helper_code(helper_code: str) -> tuple[int, int]:
+    """Node PW_EXEC_TIMEOUT_MS and Python join timeout for a helper snippet.
+
+    Steps 3–7 of the claimable-ticket helper navigate, filter, retry, and
+    screenshot; the default 45s Node timeout kills them mid-run (no CASE_SCREENSHOT).
+    Step 1 login must stay short so a wedged Chromium cannot freeze the chat.
+    """
+    text = helper_code or ""
+    if re.search(
+        r"runClaimableTicketCaseStep\s*\(\s*page\s*,\s*[34567]\s*\)",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return 120000, 150
+    return 45000, 55
+
+
+def _format_persistent_helper_step_output(
+    cleaned_output: str,
+    *,
+    browser_session_id: str,
+    screenshots_dir: str,
+    step: int,
+    total_steps: int,
+    upload_notes: str = "",
+) -> str:
+    """Match execute_skill_script stdout so the chat renders the same yellow cards."""
+    body = (cleaned_output or "").strip() or "(无输出)"
+    if "[执行进度]" not in body:
+        body = f"[执行进度] 正在执行步骤 {step}/{total_steps}\n{body}"
+    result = (
+        f"[PERSISTENT_SESSION] session_id={browser_session_id}\n"
+        f"[SCREENSHOT_DIR] {screenshots_dir}\n"
+        f"{body}\n"
+        f'[提示] 后续步骤请继续使用 session_id="{browser_session_id}"；'
+        f"截图已保存在 {screenshots_dir}"
+    )
+    if upload_notes:
+        result = f"{result}\n{upload_notes}"
+    return result
+
+
+def auto_run_missing_testcase_helper_steps(
+    *,
+    test_case_id: int,
+    user_id: int,
+    project_id: int,
+    chat_session_id: str,
+    browser_session_id: str,
+    from_step: int,
+    to_step: int,
+    helper_call_template: str = "await helpers.runClaimableTicketCaseStep(page, {step});",
+    total_steps: Optional[int] = None,
+) -> Union[Dict[str, str], str]:
+    """Directly run remaining fixed helper steps on the live Playwright session.
+
+    Used when the model stops early after a non-final PASS and skips the last
+    screenshot step. Bypasses the LLM so step N always gets a real helper run.
+    Returns execute_skill_script-style JSON (text + screenshot artifacts) so the
+    chat can show the same step cards as a model-driven run.
+    """
+    from skills.models import Skill
+
+    if int(from_step) > int(to_step):
+        return ""
+
+    skill = Skill.objects.filter(name="playwright-skill", is_active=True).first()
+    if not skill:
+        return "[AUTO_RESUME] 错误: 未找到 playwright-skill"
+    skill_dir = skill.get_full_path()
+    if not skill_dir or not os.path.isdir(skill_dir):
+        return f"[AUTO_RESUME] 错误: Skill 目录不存在: {skill_dir}"
+
+    env = os.environ.copy()
+    backend_url = _resolve_skill_runtime_backend_url()
+    api_key, _key_source = _resolve_skill_runtime_api_key(int(user_id))
+    if backend_url:
+        env["WHARTTEST_BACKEND_URL"] = backend_url
+    if api_key:
+        env["WHARTTEST_API_KEY"] = api_key
+
+    screenshots_dir = _build_skill_screenshots_dir(
+        int(project_id), str(test_case_id)
+    )
+    os.makedirs(screenshots_dir, exist_ok=True)
+    env["SCREENSHOT_DIR"] = screenshots_dir
+    if project_id:
+        env["WHARTTEST_PROJECT_ID"] = str(project_id)
+    env["WHARTTEST_CASE_ID"] = str(test_case_id)
+    resolved_total = int(total_steps or to_step or from_step or 0) or int(to_step)
+    env["WHARTTEST_CASE_STEP_COUNT"] = str(resolved_total)
+
+    try:
+        from testcases.models import TestCase
+        from data_generation.testcase_pre_data import (
+            collect_testcase_text,
+            extract_login_credentials,
+            get_latest_pre_data_ticket_id,
+            get_latest_pre_data_ticket_no,
+            is_claimable_ticket_detail_case,
+            get_pre_data_snapshot_for_execution,
+            resolve_claim_login_credentials,
+        )
+
+        tc = (
+            TestCase.objects.prefetch_related("steps")
+            .filter(id=int(test_case_id))
+            .first()
+        )
+        if tc:
+            blob = collect_testcase_text(tc)
+            creds = extract_login_credentials(blob)
+            if creds.get("username"):
+                env["WHARTTEST_USERNAME"] = creds["username"]
+            if creds.get("password"):
+                env["WHARTTEST_PASSWORD"] = creds["password"]
+            if creds.get("login_url"):
+                env["WHARTTEST_LOGIN_URL"] = creds["login_url"]
+            if is_claimable_ticket_detail_case(tc):
+                env["WHARTTEST_CLAIMABLE_PENDING"] = "1"
+                ticket_no = get_latest_pre_data_ticket_no(
+                    tc, chat_session_id=chat_session_id
+                )
+                ticket_id = get_latest_pre_data_ticket_id(
+                    tc, chat_session_id=chat_session_id
+                )
+                if ticket_no:
+                    env["WHARTTEST_TICKET_NO"] = ticket_no
+                if ticket_id:
+                    env["WHARTTEST_TICKET_ID"] = ticket_id
+                snapshot = get_pre_data_snapshot_for_execution(
+                    tc, chat_session_id=chat_session_id
+                )
+                claim_credentials, _err = resolve_claim_login_credentials(tc, snapshot)
+                if claim_credentials:
+                    env["WHARTTEST_USERNAME"] = claim_credentials["username"]
+                    env["WHARTTEST_PASSWORD"] = claim_credentials["password"]
+                    if claim_credentials.get("login_url"):
+                        env["WHARTTEST_LOGIN_URL"] = claim_credentials["login_url"]
+                    env["WHARTTEST_CLAIM_ASSIGNEE_NAME"] = claim_credentials[
+                        "assignee_name"
+                    ]
+    except Exception as exc:
+        logger.warning("[AUTO_RESUME] preload case env failed: %s", exc)
+
+    session_key = (
+        f"{int(user_id)}_{int(project_id)}_{chat_session_id or 'default'}"
+        f"_{browser_session_id}"
+    )
+    manager = _get_playwright_session_manager()
+    notes: list[str] = []
+    template = helper_call_template or (
+        "await helpers.runClaimableTicketCaseStep(page, {step});"
+    )
+    artifacts_before = _snapshot_artifact_files(screenshots_dir)
+
+    for step in range(int(from_step), int(to_step) + 1):
+        code = template.format(step=step)
+        logger.info("[AUTO_RESUME] 强制执行步骤 %s/%s: %s", step, resolved_total, code)
+        pw_ms, py_sec = _playwright_exec_timeout_for_helper_code(code)
+        env["PW_EXEC_TIMEOUT_MS"] = str(pw_ms)
+        try:
+            output = manager.execute_run_js(
+                session_key=session_key,
+                skill_dir=skill_dir,
+                run_js_args=[code],
+                env=env,
+                timeout_seconds=py_sec,
+            )
+        except Exception as exc:
+            notes.append(f"[AUTO_RESUME] 步骤{step} 执行异常: {exc}")
+            break
+        cleaned = strip_terminal_control_sequences(output or "")
+        upload_notes = _auto_upload_case_screenshots(
+            cleaned,
+            project_id=int(project_id),
+            case_id=int(test_case_id),
+            env=env,
+        )
+        notes.append(
+            _format_persistent_helper_step_output(
+                cleaned,
+                browser_session_id=browser_session_id,
+                screenshots_dir=screenshots_dir,
+                step=step,
+                total_steps=resolved_total,
+                upload_notes=upload_notes,
+            )
+        )
+        if re.search(r"RESULT\s*=\s*FAIL\b", cleaned, flags=re.IGNORECASE) or re.search(
+            r"Playwright exec timed out|浏览器已重置",
+            cleaned,
+            flags=re.IGNORECASE,
+        ):
+            logger.info("[AUTO_RESUME] 步骤%s 返回 FAIL/超时，停止续跑", step)
+            break
+
+    combined = "\n".join(notes).strip()
+    if not combined:
+        return {"plain": "", "display": ""}
+    display = _finalize_skill_result(
+        combined,
+        skill_dir=skill_dir,
+        artifacts_dir=screenshots_dir,
+        artifacts_before=artifacts_before,
+    )
+    return {"plain": combined, "display": display}
 
 
 def _finalize_skill_result(
@@ -959,8 +1160,10 @@ def _get_playwright_session_manager() -> PlaywrightSessionManager:
                 max_concurrent = getattr(
                     settings, "PLAYWRIGHT_BROWSER_MAX_CONCURRENT_EXECUTIONS", 1
                 )
+                # 600s queue wait made the chat look frozen when another UI run held
+                # the single concurrency slot. Fail fast so the agent can report it.
                 exec_queue_timeout = getattr(
-                    settings, "PLAYWRIGHT_BROWSER_EXEC_QUEUE_TIMEOUT_SECONDS", 600
+                    settings, "PLAYWRIGHT_BROWSER_EXEC_QUEUE_TIMEOUT_SECONDS", 90
                 )
                 _playwright_session_manager = PlaywrightSessionManager(
                     idle_timeout_seconds=int(idle_timeout),
@@ -1351,14 +1554,12 @@ def get_skill_tools(
                                 "[execute_skill_script] claimable guard skipped: %s",
                                 guard_exc,
                             )
-                    exec_timeout_seconds = 60
-                    if re.search(
-                        r"runClaimableTicketCaseStep\s*\(\s*page\s*,\s*[345]\s*\)",
-                        helper_code,
-                        flags=re.IGNORECASE,
-                    ):
-                        env["PW_EXEC_TIMEOUT_MS"] = "120000"
-                        exec_timeout_seconds = 150
+                    # Step1 login must fail fast; never inherit a sticky long timeout
+                    # from a previous exec in the same Node process.
+                    pw_ms, exec_timeout_seconds = _playwright_exec_timeout_for_helper_code(
+                        helper_code
+                    )
+                    env["PW_EXEC_TIMEOUT_MS"] = str(pw_ms)
                     try:
                         manager = _get_playwright_session_manager()
                         output = manager.execute_run_js(
@@ -1471,6 +1672,16 @@ def get_skill_tools(
             result_output = _with_failure_reminder(
                 result_output, skill_name=skill_name
             )
+            auto_upload_notes = ""
+            if skill_name == "playwright-skill" and current_test_case_id:
+                auto_upload_notes = _auto_upload_case_screenshots(
+                    result_output,
+                    project_id=current_project_id,
+                    case_id=current_test_case_id,
+                    env=env,
+                )
+            if auto_upload_notes:
+                result_output = f"{result_output}\n{auto_upload_notes}"
 
             # playwright-skill 未带 session_id 时提醒：裸 JS 也会被规范化成 run.js，不能只检查原始 command
             if skill_name == "playwright-skill" and not session_id:

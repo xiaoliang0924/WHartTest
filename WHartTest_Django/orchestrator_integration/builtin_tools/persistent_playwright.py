@@ -585,8 +585,34 @@ class PlaywrightSessionManager:
                 "请等待其结束或减少并行用例。"
             )
 
+        watchdog: Optional[subprocess.Popen] = None
         try:
             entry.proc._start(env=env)
+
+            # Last-resort watchdog deliberately runs outside this Python
+            # process. A wedged CDP operation has survived both Node's
+            # Promise.race and Python's thread-based timer in production.
+            # The Node child is started in its own process group, so killing
+            # the group also reaps Chromium. Its stdout-reader then unblocks
+            # the pending RPC request with a process-exited error.
+            if os.name != "nt" and entry.proc._proc is not None:
+                node_pid = entry.proc._proc.pid
+                watchdog = subprocess.Popen(
+                    [
+                        "/bin/sh",
+                        "-c",
+                        (
+                            f"sleep {max(5, int(timeout_seconds)) + 2}; "
+                            # dash's kill builtin rejects "-- -<pgid>"; use
+                            # the external binary so the process-group kill
+                            # cannot silently become a no-op.
+                            f"/bin/kill -KILL -- -{node_pid} 2>/dev/null || true"
+                        ),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
 
             output = entry.proc.exec_run_js(
                 run_js_args=run_js_args,
@@ -594,6 +620,11 @@ class PlaywrightSessionManager:
                 timeout_seconds=int(timeout_seconds),
             )
         finally:
+            if watchdog is not None and watchdog.poll() is None:
+                try:
+                    watchdog.terminate()
+                except Exception:
+                    pass
             self._exec_semaphore.release()
 
         # 执行结束后再次更新时间戳

@@ -1398,20 +1398,22 @@ const finalizeSessionDisplayAfterRunEnd = (chatSessionId: string): Promise<void>
     if (viewingId !== chatSessionId) return;
 
     const localStream = activeStreams.value[chatSessionId];
-    // 部分终止路径（如前置数据校验失败）不会写入服务端对话历史。
-    // 在刷新历史前保留本地流文本，避免 applyChatHistoryResponse 把刚显示的
-    // 失败原因覆盖成空白页面。
+    const localToolCount = (localStream?.messages || []).filter((msg) => msg.type === 'tool').length;
     const terminalStreamContent = localStream?.isComplete
       ? stripExecutionReportFromText(localStream.content || '').trim()
       : '';
     if (localStream?.isComplete) {
       solidifyStreamContent();
     }
+    const solidifiedToolCount = messages.value.filter((msg) => msg.messageType === 'tool').length;
 
     try {
       const response = await getChatHistory(chatSessionId, projectStore.currentProjectId);
       if (response.status === 'success' && response.data) {
-        applyChatHistoryResponse(response.data);
+        const historyToolCount = (response.data.history || []).filter((item) => item.type === 'tool').length;
+        if (historyToolCount >= Math.max(localToolCount, solidifiedToolCount)) {
+          applyChatHistoryResponse(response.data);
+        }
       }
     } catch (error) {
       console.warn('执行结束后刷新会话历史失败:', error);

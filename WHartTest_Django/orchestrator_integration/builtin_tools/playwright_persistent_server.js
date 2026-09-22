@@ -119,9 +119,20 @@ function stripRedeclaredPlaywrightBindings(code) {
 
 const PERSISTENT_USER_CODE_PREFIX = `
 let { browser, context, page } = state;
-if (page && helpers && typeof helpers.dismissBlockingDialogs === 'function') {
-  try { await helpers.dismissBlockingDialogs(page); } catch (_) {}
+async function __wharttestMaybeDismissBlocking(page) {
+  if (!page || !helpers || typeof helpers.dismissBlockingDialogs !== 'function') {
+    return;
+  }
+  try {
+    if (typeof helpers.isClaimConfirmDialogOpen === 'function') {
+      if (await helpers.isClaimConfirmDialogOpen(page)) {
+        return;
+      }
+    }
+    await helpers.dismissBlockingDialogs(page);
+  } catch (_) {}
 }
+await __wharttestMaybeDismissBlocking(page);
 if (page && String(process.env.WHARTTEST_NOTIFICATION_CASE || '') === '1') {
   const __url = String(page.url() || '');
   if (__url && !/\\/login(?:\\?|$|\\/)/.test(__url) && !/\\/notifications(?:\\?|$|\\/)/.test(__url)) {
@@ -159,7 +170,15 @@ if (page && __screenshotDir) {
   };
   page.screenshot = async (opts = {}) => {
     const requested = opts && opts.path;
-    const basename = requested ? __path.basename(String(requested)) : 'last.png';
+    // 无 path 时调用方要的是 Buffer（空白检测、locator.screenshot 内部取帧）。
+    // 若强行改写成 last.png，步骤文件不会生成，用例详情就会缺最后一张图。
+    if (!requested) {
+      return __origScreenshot({
+        ...opts,
+        timeout: (opts && opts.timeout) || 8000,
+      });
+    }
+    const basename = __path.basename(String(requested));
     const savedPath = __path.join(__screenshotDir, basename);
     const onLogin = String(page.url() || '').includes('/login');
     if (!onLogin && String(process.env.WHARTTEST_NOTIFICATION_CASE || '') === '1'
@@ -218,9 +237,7 @@ if (page && __screenshotDir) {
 `;
 
 const PERSISTENT_USER_CODE_SUFFIX = `
-if (page && helpers && typeof helpers.dismissBlockingDialogs === 'function') {
-  try { await helpers.dismissBlockingDialogs(page); } catch (_) {}
-}
+await __wharttestMaybeDismissBlocking(page);
 state.browser = browser;
 state.context = context;
 state.page = page;
@@ -462,8 +479,8 @@ async function main() {
     return '';
   }
 
-  async function runUserCode(code) {
-    const captured = createCapturedConsole();
+  async function runUserCode(code, captured) {
+    captured = captured || createCapturedConsole();
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
     const safeProcess = Object.assign({}, process, {
@@ -545,7 +562,7 @@ async function main() {
           fs.mkdirSync(dir, { recursive: true });
           const requestedSteps = [
             ...String(code || '').matchAll(
-              /screenshotCaseStep\s*\(\s*page\s*,\s*(\d+)/gi,
+              /(?:screenshotCaseStep|runClaimableTicketCaseStep|runTicketDetailCaseStep)\s*\(\s*page\s*,\s*(\d+)/gi,
             ),
           ];
           if (requestedSteps.length === 0) {
@@ -681,7 +698,9 @@ async function main() {
         }
 
         if (method === 'exec') {
-          await ensureBrowserContextPage();
+          // ensureBrowserContextPage (launch/newPage) can hang forever; include it
+          // in the same hard timeout as user code so step1 never freezes the chat.
+          const execTimeoutMs = Number(process.env.PW_EXEC_TIMEOUT_MS || 45000);
           const code = resolveCodeFromArgs(params.args);
           if (!code) {
             send({
@@ -694,12 +713,15 @@ async function main() {
             return;
           }
 
-          const execTimeoutMs = Number(process.env.PW_EXEC_TIMEOUT_MS || 45000);
           let timer;
           let result;
+          const liveCapture = createCapturedConsole();
           try {
             result = await Promise.race([
-              runUserCode(code),
+              (async () => {
+                await ensureBrowserContextPage();
+                return runUserCode(code, liveCapture);
+              })(),
               new Promise((_, reject) => {
                 timer = setTimeout(() => {
                   reject(new Error(`Playwright exec timed out after ${execTimeoutMs}ms`));
@@ -709,17 +731,26 @@ async function main() {
           } catch (e) {
             const msg = e?.message || String(e);
             if (String(msg).includes('timed out')) {
-              serverLog('[exec] hard timeout, resetting browser');
-              await resetBrowserState().catch(() => {});
+              // CRITICAL: reply FIRST, then kill browser in background.
+              // Awaiting resetBrowserState here used to block the JSON response
+              // forever when Chromium/CDP was wedged — chat looked hung at step1.
+              serverLog('[exec] hard timeout, sending error then force-reset browser');
               send({
                 id,
                 ok: false,
                 error: msg,
-                stdout: [],
+                stdout: liveCapture.stdout.slice(),
                 stderr: [
+                  ...liveCapture.stderr,
                   msg,
                   '浏览器已重置。请先重新打开该步骤所在页面（登录/菜单/按钮），再做断言和截图，不要只重复同一段 waitFor。',
                 ],
+              });
+              try {
+                forceKillBrowserProcess(state.browser);
+              } catch (_) {}
+              setImmediate(() => {
+                resetBrowserState().catch(() => {});
               });
               return;
             }

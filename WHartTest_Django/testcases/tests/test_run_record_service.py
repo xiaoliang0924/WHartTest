@@ -1,18 +1,32 @@
 from types import SimpleNamespace
 
+import os
+import tempfile
+
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
+from PIL import Image
 
 from projects.models import Project
-from testcases.models import TestCase as TestCaseModel, TestCaseModule, TestCaseStep
+from testcases.models import (
+    TestCase as TestCaseModel,
+    TestCaseModule,
+    TestCaseScreenshot,
+    TestCaseStep,
+)
 from testcases.run_record_service import (
+    attach_testcase_step_screenshot,
     build_execution_result_report,
     build_pre_data_usage,
+    build_step_results_from_execution_evidence,
     ensure_execution_result_report,
     finalize_testcase_run_record,
     has_execution_result_report,
     is_filled_execution_result_report,
+    list_missing_step_screenshots,
     start_testcase_run_record,
+    _extract_fail_context,
 )
 
 
@@ -53,6 +67,92 @@ class ExecutionResultReportTests(SimpleTestCase):
         data_run = SimpleNamespace(output_snapshot={"ticketNo": "2026091570663010"})
         usage = build_pre_data_usage(data_run, "已进入工单列表，开始按状态筛选。")
         self.assertEqual(usage["status"], "not_confirmed")
+
+    def test_step_results_from_helper_evidence_does_not_raise_on_py311_flags(self):
+        case = _fake_case(
+            id=1402,
+            steps=[
+                SimpleNamespace(step_number=n, description=f"步骤{n}", expected_result="")
+                for n in range(1, 8)
+            ],
+        )
+        transcript = (
+            "5. 断言失败不要杀进程：`console.log('RESULT=FAIL: ...')` + 截图。通过则 `RESULT=PASS`。\n"
+            "[CASE_SCREENSHOT] /tmp/case_1402_step1.png\\n"
+            "RESULT=PASS: 步骤1登录成功 URL=https://example.test/work-order/my-tickets\\n"
+            "[AUTO_RESUME] 强制执行步骤 2/7: await helpers.runClaimableTicketCaseStep(page, 2);\n"
+            "[执行进度] 正在执行步骤 2/7\n"
+            "[CASE_SCREENSHOT] /tmp/case_1402_step2.png\n"
+            "RESULT=PASS: 步骤2已进入我的工单列表\n"
+            "[AUTO_RESUME] 强制执行步骤 7/7: await helpers.runClaimableTicketCaseStep(page, 7);\n"
+            "RESULT=FAIL: 列表中未找到状态为“处理中”的本次造数工单 2026092174132138\n"
+        )
+        results = build_step_results_from_execution_evidence(
+            case, transcript, fail_reason=""
+        )
+        by_step = {item["step_number"]: item for item in results}
+        self.assertEqual(by_step[1]["status"], "pass")
+        self.assertEqual(by_step[2]["status"], "pass")
+        self.assertEqual(by_step[7]["status"], "fail")
+        fail_ctx = _extract_fail_context(transcript)
+        self.assertIn("处理中", fail_ctx["reason"])
+        self.assertNotIn("console.log", fail_ctx["reason"])
+
+    def test_step_block_uses_last_result_not_first_pass(self):
+        case = _fake_case(
+            id=1402,
+            steps=[
+                SimpleNamespace(step_number=n, description=f"步骤{n}", expected_result="")
+                for n in range(1, 8)
+            ],
+        )
+        transcript = (
+            "[执行进度] 正在执行步骤 1/7\nRESULT=PASS: 步骤1登录成功\n"
+            "[执行进度] 正在执行步骤 2/7\nRESULT=PASS: 步骤2已进入我的工单列表\n"
+            "[执行进度] 正在执行步骤 3/7\nRESULT=PASS: 步骤3已找到造数工单\n"
+            "[执行进度] 正在执行步骤 4/7\n"
+            "RESULT=PASS: 详情页已展示工单号 2026092237247130\n"
+            "[CASE_SCREENSHOT] /tmp/case_1402_step4.png\n"
+            "RESULT=FAIL: 详情页未出现“领取工单”按钮，已保存详情页证据截图\n"
+        )
+        results = build_step_results_from_execution_evidence(
+            case, transcript, fail_reason=""
+        )
+        by_step = {item["step_number"]: item for item in results}
+        self.assertEqual(by_step[1]["status"], "pass")
+        self.assertEqual(by_step[2]["status"], "pass")
+        self.assertEqual(by_step[3]["status"], "pass")
+        self.assertEqual(by_step[4]["status"], "fail")
+        self.assertEqual(by_step[5]["status"], "skip")
+
+    def test_step7_playwright_timeout_is_fail_not_pass(self):
+        case = _fake_case(
+            id=1402,
+            steps=[
+                SimpleNamespace(step_number=n, description=f"步骤{n}", expected_result="")
+                for n in range(1, 8)
+            ],
+        )
+        transcript = (
+            "[CASE_SCREENSHOT] /tmp/case_1402_step6.png\n"
+            "RESULT=PASS: 步骤6已确认领取，详情页状态为“处理中”\n"
+            "步骤 7: 返回我的工单列表\n"
+            "[执行进度] 正在执行步骤 7/7\n"
+            "Playwright exec timed out after 45000ms\n"
+            "Playwright exec timed out after 45000ms\n"
+            "浏览器已重置。请先重新打开该步骤所在页面\n"
+        )
+        results = build_step_results_from_execution_evidence(
+            case, transcript, fail_reason=""
+        )
+        by_step = {item["step_number"]: item for item in results}
+        self.assertEqual(by_step[6]["status"], "pass")
+        self.assertEqual(by_step[7]["status"], "fail")
+        outcome = ensure_execution_result_report(case, transcript=transcript)
+        self.assertEqual(outcome["status"], "fail")
+        self.assertEqual(outcome["step_results"][6]["status"], "fail")
+        fail_ctx = _extract_fail_context(transcript)
+        self.assertIn("timed out", fail_ctx["reason"].lower())
 
     def test_detects_existing_report(self):
         self.assertTrue(has_execution_result_report("## 测试执行结果: 不通过\n### 基本信息\n- 测试用例ID: 1520"))
@@ -236,3 +336,119 @@ class FinalizeRunRecordReportTests(TestCase):
         self.assertEqual(len(record.step_results), 2)
         self.assertEqual(record.step_results[0]["status"], "fail")
         self.assertEqual(record.step_results[1]["status"], "skip")
+
+    def _write_step_png(self, directory, step_number):
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, f"case_{self.testcase.id}_step{step_number}.png")
+        Image.new("RGB", (16, 16), color=(20, 80, 20)).save(path, format="PNG")
+        return path
+
+    def test_finalize_backfills_runtime_screenshot_and_passes(self):
+        start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-backfill-pass",
+        )
+        runtime_dir = os.path.join(
+            settings.MEDIA_ROOT,
+            "skill_runtime",
+            "screenshots",
+            str(self.project.id),
+            str(self.testcase.id),
+        )
+        step1 = self._write_step_png(runtime_dir, 1)
+        step2 = self._write_step_png(runtime_dir, 2)
+        record = finalize_testcase_run_record(
+            session_id="sess-backfill-pass",
+            transcript=(
+                f"[CASE_SCREENSHOT] {step1}\nRESULT=PASS: 步骤1通过\n"
+                f"[CASE_SCREENSHOT] {step2}\nRESULT=PASS: 步骤2通过"
+            ),
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(record.status, "pass")
+        self.assertNotIn("截图校验", record.summary or "")
+        self.assertEqual(
+            TestCaseScreenshot.objects.filter(test_case=self.testcase).count(),
+            2,
+        )
+
+    def test_finalize_still_fails_when_step_screenshot_file_is_missing(self):
+        start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-missing-shot",
+        )
+        record = finalize_testcase_run_record(
+            session_id="sess-missing-shot",
+            transcript="RESULT=PASS: 步骤1通过\nRESULT=PASS: 步骤2通过",
+        )
+        self.assertEqual(record.status, "fail")
+        self.assertIn("截图校验", record.summary or "")
+
+    def test_start_does_not_wipe_screenshots_of_running_session(self):
+        start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-keep-shots",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_step_png(tmp, 1)
+            self.assertTrue(
+                attach_testcase_step_screenshot(
+                    testcase_id=self.testcase.id,
+                    step_number=1,
+                    filepath=path,
+                    uploader_id=self.user.id,
+                )
+            )
+        start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-keep-shots",
+        )
+        self.assertTrue(
+            TestCaseScreenshot.objects.filter(
+                test_case=self.testcase,
+                step_number=1,
+            ).exists()
+        )
+        self.assertEqual(
+            list_missing_step_screenshots(self.testcase),
+            [2],
+        )
+
+    def test_finalize_backfills_last_png_for_missing_final_step(self):
+        start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-last-png-step2",
+        )
+        runtime_dir = os.path.join(
+            settings.MEDIA_ROOT,
+            "skill_runtime",
+            "screenshots",
+            str(self.project.id),
+            str(self.testcase.id),
+        )
+        step1 = self._write_step_png(runtime_dir, 1)
+        os.makedirs(runtime_dir, exist_ok=True)
+        last_png = os.path.join(runtime_dir, "last.png")
+        Image.new("RGB", (24, 24), color=(80, 20, 20)).save(last_png, format="PNG")
+        record = finalize_testcase_run_record(
+            session_id="sess-last-png-step2",
+            transcript=(
+                f"[CASE_SCREENSHOT] {step1}\nRESULT=PASS: 步骤1通过\n"
+                f"[CASE_SCREENSHOT] {os.path.join(runtime_dir, f'case_{self.testcase.id}_step2.png')}\n"
+                "RESULT=PASS: 步骤2通过"
+            ),
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(record.status, "pass")
+        self.assertNotIn("截图校验", record.summary or "")
+        self.assertTrue(
+            TestCaseScreenshot.objects.filter(
+                test_case=self.testcase,
+                step_number=2,
+            ).exists()
+        )
