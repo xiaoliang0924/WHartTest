@@ -39,6 +39,30 @@ _DYNAMIC_GENERATORS = {
 }
 
 
+def _normalize_legacy_auth_header_placeholders(interface_data: Dict[str, Any]) -> None:
+    """Convert Postman-style ``$accessToken`` into ``{{accessToken}}`` for substitution."""
+    headers = interface_data.get('headers')
+    if not isinstance(headers, list):
+        return
+    replacements = (
+        ('$accessToken', '{{accessToken}}'),
+        ('$adminToken', '{{adminToken}}'),
+        ('$assigneeToken', '{{assigneeToken}}'),
+        ('$noCommonToken', '{{noCommonToken}}'),
+    )
+    for item in headers:
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get('value') or '')
+        if not value:
+            continue
+        updated = value
+        for old, new in replacements:
+            updated = updated.replace(old, new)
+        if updated != value:
+            item['value'] = updated
+
+
 def apply_params_schema_defaults(
     input_params: Optional[Dict[str, Any]],
     params_schema: Optional[Dict[str, Any]],
@@ -569,6 +593,7 @@ class PlanExecutor:
         interface_data['project_id'] = interface.project_id
         interface_data['trace_id'] = new_trace_id('data-gen')
         interface_data['body_source'] = 'data_generation_plan'
+        _normalize_legacy_auth_header_placeholders(interface_data)
 
         if environment:
             interface_data['base_url'] = environment.base_url or ''

@@ -191,7 +191,7 @@ def _update_ticket_detail_interface() -> None:
     headers = iface.headers if isinstance(iface.headers, list) else []
     for item in headers:
         if isinstance(item, dict) and item.get("key") == "Authorization":
-            item["value"] = "Bearer $adminToken"
+            item["value"] = "Bearer {{adminToken}}"
     iface.headers = headers
     iface.save(update_fields=["headers"])
     print("Updated interface 509: Authorization=adminToken")

@@ -47,6 +47,7 @@ def _inject_unlocked_creator_token(exec_params, *, environment_id):
         return params
     try:
         from api_environments.models import ApiEnvironment
+        from api_environments.token_refresh import refresh_environment_tokens
 
         env = ApiEnvironment.objects.filter(id=int(environment_id)).first()
         if env is None:
@@ -54,6 +55,14 @@ def _inject_unlocked_creator_token(exec_params, *, environment_id):
         variables = env.get_all_variables()
         if not isinstance(variables, dict):
             return params
+        variables = refresh_environment_tokens(
+            base_url=env.base_url,
+            variables=variables,
+            verify_ssl=getattr(env, 'verify_ssl', False),
+            environment_id=env.id,
+            persist=True,
+            force_token_vars=[_CLAIMABLE_CREATOR_TOKEN_VAR],
+        )
         token = str(variables.get(_CLAIMABLE_CREATOR_TOKEN_VAR) or '').strip()
         if not token:
             logger.warning(
