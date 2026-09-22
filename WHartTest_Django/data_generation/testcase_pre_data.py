@@ -790,15 +790,81 @@ def resolve_claimable_ticket_pre_data(testcase: TestCase) -> PreDataResolution:
     manual = extract_manual_ticket_fixture(params)
     env_id = getattr(testcase, 'pre_data_environment_id', None)
     if manual.get('ticketNo'):
-        return PreDataResolution(
-            plan=None,
-            template_key=None,
-            input_params=manual,
-            default_environment_id=env_id,
-            source=_CLAIMABLE_MANUAL_SOURCE,
-            fail_fast=False,
-            skip_reason='',
+        # Stale fixtures from a previous run often stick on the case after claim.
+        # Re-check the business system; if no longer claimable, drop and refresh.
+        still_ok = False
+        if env_id:
+            stale_reason = validate_claimable_ticket_snapshot(
+                manual,
+                project_id=testcase.project_id,
+                environment_id=env_id,
+            )
+            rows = _list_tickets_from_api(
+                project_id=testcase.project_id,
+                environment_id=int(env_id),
+                query_path=f'/api/tickets?ticketNo={manual.get("ticketNo")}&page=1&pageSize=5',
+            )
+            row = next(
+                (
+                    item
+                    for item in rows
+                    if str(item.get('ticketNo') or '') == str(manual.get('ticketNo') or '')
+                ),
+                None,
+            )
+            still_ok = bool(row and _ticket_row_supports_claim(row) and not stale_reason)
+            if still_ok and isinstance(row, dict):
+                # Refresh assignee facts so login matches the live ticket.
+                manual = {
+                    **manual,
+                    'ticketId': row.get('id') or manual.get('ticketId'),
+                    'work_order_id': row.get('id') or manual.get('work_order_id'),
+                    'ticketStatus': row.get('status') or manual.get('ticketStatus'),
+                    'autoAssignment': _assignment_snapshot_from_row(row),
+                }
+        else:
+            # Cannot revalidate without an API environment; keep prior fixture.
+            still_ok = True
+            stale_reason = ''
+        if still_ok:
+            return PreDataResolution(
+                plan=None,
+                template_key=None,
+                input_params=manual,
+                default_environment_id=env_id,
+                source=_CLAIMABLE_MANUAL_SOURCE,
+                fail_fast=False,
+                skip_reason='',
+            )
+        logger.info(
+            'Claimable fixture stale for testcase_id=%s ticketNo=%s reason=%s; refreshing',
+            testcase.id,
+            manual.get('ticketNo'),
+            stale_reason or 'not_claimable_or_missing',
         )
+        try:
+            cleared = {
+                k: v
+                for k, v in (params or {}).items()
+                if k
+                not in {
+                    'ticketNo',
+                    'ticketId',
+                    'work_order_id',
+                    'processingTicketId',
+                    'autoAssignment',
+                    'ticketStatus',
+                    'source',
+                }
+            }
+            testcase.pre_data_params = cleared
+            testcase.save(update_fields=['pre_data_params'])
+            params = cleared
+        except Exception:
+            logger.exception(
+                'Claimable fixture: failed to clear stale params on testcase_id=%s',
+                testcase.id,
+            )
 
     pool = try_pick_claimable_ticket_from_pool(testcase, environment_id=env_id)
     if pool.get('ticketNo'):
