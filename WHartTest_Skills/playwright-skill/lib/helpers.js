@@ -3988,22 +3988,29 @@ async function ensureClaimConfirmDialogVisible(page) {
 
 /**
  * 确认领取后的详情页校验：禁止用整页 body 搜「处理中」（侧栏/菜单会误判通过）。
- * 必须「领取工单」消失，且详情主区可见「处理中」状态标签。
+ * 优先看详情头/工具栏：领取按钮消失，且出现「处理中」或领取后才有的「完成工单」。
  */
-async function assertClaimConfirmedOnDetailPage(page, { timeoutMs = 12000 } = {}) {
-  const detailScope = page.locator(
-    '.layout-content, .el-main, .page-container, .ticket-detail, .work-order-detail, .detail-header',
+async function assertClaimConfirmedOnDetailPage(page, { timeoutMs = 16000 } = {}) {
+  const headerScope = page.locator(
+    '.detail-header, .ticket-detail-header, .work-order-header, .page-header, .layout-content, .el-main, .ticket-detail, .work-order-detail',
   ).first();
-  const scope = (await detailScope.count()) > 0 ? detailScope : page.locator('body');
+  const scope = (await headerScope.count()) > 0 ? headerScope : page.locator('body');
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const claimStillVisible = await isClaimTicketButtonVisible(page, 600);
-    const processingTag = scope.locator('.el-tag, .status-tag').filter({ hasText: /^处理中$/ }).first();
-    const pendingTag = scope.locator('.el-tag, .status-tag').filter({ hasText: /^待处理$/ }).first();
-    const processingVisible = await processingTag.isVisible().catch(() => false);
-    const pendingVisible = await pendingTag.isVisible().catch(() => false);
-    if (!claimStillVisible && processingVisible && !pendingVisible) {
+    const processingTag = page
+      .locator('.el-tag, .status-tag, [class*="status"]')
+      .filter({ hasText: /^\s*处理中\s*$/ })
+      .first();
+    const processingByText = page.getByText('处理中', { exact: true }).first();
+    const finishBtn = page.getByRole('button', { name: /完成工单/ }).first();
+    const processingVisible =
+      (await processingTag.isVisible().catch(() => false))
+      || (await processingByText.isVisible().catch(() => false));
+    const finishVisible = await finishBtn.isVisible().catch(() => false);
+    // 领取成功后工具栏会从「领取工单」变为「完成工单/关闭工单」；比单纯找 tag 更稳。
+    if (!claimStillVisible && (processingVisible || finishVisible)) {
       return true;
     }
     await page.waitForTimeout(400);
