@@ -325,7 +325,7 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
     {
         'template_key': 'biz_create_and_claim',
         'name': '创建并领取工单',
-        'description': '创建 TYPE_C 工单 → 分配给处理人 → 领取，适用于「我的工单」列表测试（需环境变量 assigneeToken）。',
+        'description': '创建 TYPE_C 工单 → 转派到处理人 → 领取，适用于「我的工单」/处理中/移交审批（需环境变量 assigneeToken）。',
         'target_type': 'both',
         'icon': 'user',
         'params_schema': {

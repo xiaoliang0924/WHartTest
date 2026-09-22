@@ -4778,6 +4778,583 @@ async function runClaimableTicketCaseStep(page, stepNumber, caseId) {
 }
 
 /**
+ * 转派 UI 固定流程（按钮可见性 / 弹窗选人填原因二次确认）。
+ * 每步只调用：await helpers.runTransferTicketCaseStep(page, <步骤号>);
+ *
+ * WHARTTEST_TRANSFER_FLOW=visibility → 4 步仅校验「转派工单」按钮
+ * WHARTTEST_TRANSFER_FLOW=dialog（默认，步数>4）→ 完整转派成功流程
+ */
+async function runTransferTicketCaseStep(page, stepNumber, caseId) {
+  const step = Number(stepNumber);
+  const cid = caseId || process.env.WHARTTEST_CASE_ID || 'unknown';
+  const pathMod = require('path');
+  const dir = process.env.SCREENSHOT_DIR || '.';
+  const target = pathMod.join(dir, `case_${cid}_step${step}.png`);
+  const ticketNo = getTicketNoFromEnv();
+  const expectedAssignee = String(process.env.WHARTTEST_CLAIM_ASSIGNEE_NAME || '').trim();
+  const transferTarget = String(
+    process.env.WHARTTEST_TRANSFER_TARGET_NAME || '黎沅欣',
+  ).trim();
+  const transferReason = String(
+    process.env.WHARTTEST_TRANSFER_REASON || '自动化测试转派',
+  ).trim();
+  const totalSteps = Number(process.env.WHARTTEST_CASE_STEP_COUNT || 9) || 9;
+  const flowHint = String(process.env.WHARTTEST_TRANSFER_FLOW || '').trim().toLowerCase();
+  const visibilityOnly =
+    flowHint === 'visibility' || (!flowHint && totalSteps <= 4);
+
+  console.log(`[执行进度] 正在执行步骤 ${step}/${totalSteps}`);
+
+  const waitForTicketListSettled = async () => {
+    const loading = page.locator('.el-loading-mask:visible, .el-table__loading:visible').first();
+    await loading.waitFor({ state: 'hidden', timeout: 12000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+  };
+
+  const transferDialog = () =>
+    page
+      .locator('.el-dialog:visible, [role="dialog"]:visible')
+      .filter({ hasText: /转派工单/ })
+      .last();
+
+  const selectUserDialog = () =>
+    page
+      .locator('.el-dialog:visible, [role="dialog"]:visible')
+      .filter({ hasText: /选择用户|选择对象|选择处理人/ })
+      .last();
+
+  const secondaryConfirm = () =>
+    page
+      .locator('.el-message-box:visible, .el-dialog:visible, [role="dialog"]:visible')
+      .filter({ hasText: /确认将工单|转派给/ })
+      .last();
+
+  const transferButton = () =>
+    page.getByRole('button', { name: /转派工单/ }).first();
+
+  const findTransferReadyRow = async () => {
+    if (!ticketNo) {
+      console.log('RESULT=FAIL: 缺少本次造数工单号，无法定位可转派工单');
+      return null;
+    }
+    await fillFilterField(page, '工单号', ticketNo);
+    await selectFormDropdownOption(page, '工单状态', '待处理').catch(() => false);
+    await clickPageButton(page, '查询');
+    await waitForTicketListSettled();
+    const row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
+    try {
+      await row.waitFor({ state: 'visible', timeout: 12000 });
+      return row;
+    } catch (_) {
+      console.log(`RESULT=FAIL: 我的工单列表未找到造数工单 ${ticketNo}`);
+      return null;
+    }
+  };
+
+  if (step === 1) {
+    let loginDone = false;
+    const loginWatchdog = (async () => {
+      await page.waitForTimeout(45000);
+      if (loginDone) return undefined;
+      console.log('RESULT=FAIL: 步骤1登录超过45秒未完成，已中止');
+      try {
+        await page.screenshot({ path: target, fullPage: false, timeout: 5000, plain: true });
+        declareCaseScreenshot(target);
+      } catch (_) {}
+      return null;
+    })();
+    try {
+      const result = await Promise.race([loginStep1(page, cid), loginWatchdog]);
+      loginDone = true;
+      return result;
+    } catch (e) {
+      loginDone = true;
+      throw e;
+    }
+  }
+
+  if (step >= 2 && !(await ensureClaimableCaseAuthenticated(page, cid))) {
+    return null;
+  }
+
+  if (step === 2) {
+    await navigateToMyTicketsPage(page);
+    await waitForPageBodyText(page, 80, 10000);
+    await screenshotCaseStep(page, step, cid);
+    console.log(`RESULT=PASS: 步骤2已进入我的工单列表 URL=${page.url()}`);
+    return target;
+  }
+
+  if (step === 3) {
+    if (detectWorkOrderPage(page) !== 'my-tickets') {
+      await navigateToMyTicketsPage(page);
+    }
+    await dismissBlockingDialogs(page);
+    const row = await findTransferReadyRow();
+    if (!row) {
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    const entered = await clickProcessInTableRow(page, row);
+    if (!entered || !(await waitForTicketDetailNavigation(page, 10000))) {
+      console.log(`RESULT=FAIL: 步骤3未能进入工单详情 URL=${page.url()}`);
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    if (!(await assertTicketNoOnDetailPage(page, ticketNo))) {
+      console.log(`RESULT=FAIL: 当前详情页不是本次造数工单 ${ticketNo}`);
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    await screenshotCaseStep(page, step, cid);
+    console.log(
+      `RESULT=PASS: 步骤3已进入详情 ${ticketNo}（处理人=${expectedAssignee || '当前登录用户'}）`,
+    );
+    return target;
+  }
+
+  if (step === 4) {
+    await dismissBlockingDialogs(page);
+    try {
+      await transferButton().waitFor({ state: 'visible', timeout: 10000 });
+    } catch (_) {
+      console.log('RESULT=FAIL: 详情页未出现「转派工单」按钮');
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    if (visibilityOnly) {
+      await screenshotCaseStep(page, step, cid);
+      console.log('RESULT=PASS: 步骤4已确认可见「转派工单」按钮');
+      return target;
+    }
+    try {
+      await transferButton().click({ timeout: 5000 });
+      await transferDialog().waitFor({ state: 'visible', timeout: 10000 });
+    } catch (err) {
+      console.log(
+        `RESULT=FAIL: 步骤4打开转派弹窗失败: ${String(err?.message || err).slice(0, 180)}`,
+      );
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    await screenshotCaseStep(page, step, cid);
+    console.log('RESULT=PASS: 步骤4已打开「转派工单」弹窗');
+    return target;
+  }
+
+  if (visibilityOnly) {
+    console.log(
+      `RESULT=FAIL: 不支持的转派工单步骤 ${step}，当前固定流程最多 ${totalSteps} 步`,
+    );
+    return null;
+  }
+
+  if (step === 5) {
+    const dialog = transferDialog();
+    try {
+      await dialog.waitFor({ state: 'visible', timeout: 8000 });
+      const trigger = dialog
+        .locator('.el-form-item, .form-item, div')
+        .filter({ hasText: /对象/ })
+        .getByText(/点击选择|选择/)
+        .first();
+      if ((await trigger.count()) > 0) {
+        await trigger.click({ timeout: 5000 });
+      } else {
+        await dialog.getByText(/点击选择/).first().click({ timeout: 5000 });
+      }
+      await selectUserDialog().waitFor({ state: 'visible', timeout: 10000 });
+    } catch (err) {
+      console.log(
+        `RESULT=FAIL: 步骤5打开选择用户弹窗失败: ${String(err?.message || err).slice(0, 180)}`,
+      );
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    await screenshotCaseStep(page, step, cid);
+    console.log('RESULT=PASS: 步骤5已打开「选择用户」弹窗');
+    return target;
+  }
+
+  if (step === 6) {
+    const userDialog = selectUserDialog();
+    try {
+      await userDialog.waitFor({ state: 'visible', timeout: 8000 });
+      const search = userDialog
+        .locator(
+          'input[placeholder*="搜索"], input[placeholder*="姓名"], input[placeholder*="用户"], input[type="text"]',
+        )
+        .first();
+      if ((await search.count()) > 0) {
+        await search.click({ timeout: 3000 }).catch(() => {});
+        await search.fill('');
+        await search.fill(transferTarget);
+        await page.waitForTimeout(400);
+        await search.press('Enter').catch(() => {});
+        const queryBtn = userDialog.getByRole('button', { name: /查询|搜索/ }).first();
+        if ((await queryBtn.count()) > 0) {
+          await queryBtn.click({ timeout: 3000 }).catch(() => {});
+        }
+        await page.waitForTimeout(800);
+      }
+
+      // 选择用户弹窗多为自定义列表（非 el-table），按姓名找可见行再点选。
+      const nameText = userDialog.getByText(transferTarget, { exact: false }).first();
+      await nameText.waitFor({ state: 'visible', timeout: 12000 });
+      const candidateRows = [
+        userDialog.locator('[class*="user"], [class*="member"], [class*="person"], [class*="item"]')
+          .filter({ hasText: transferTarget })
+          .first(),
+        userDialog.locator('.el-table__body tr, li, .el-checkbox, label')
+          .filter({ hasText: transferTarget })
+          .first(),
+        userDialog.locator('div')
+          .filter({ hasText: new RegExp(`${transferTarget}\\s*@`) })
+          .first(),
+        nameText,
+      ];
+      let selected = false;
+      for (const row of candidateRows) {
+        try {
+          if ((await row.count()) === 0) {
+            continue;
+          }
+          await row.scrollIntoViewIfNeeded().catch(() => {});
+          const radio = row.locator('.el-radio, .el-checkbox, input[type="radio"], input[type="checkbox"]').first();
+          if ((await radio.count()) > 0) {
+            await radio.click({ timeout: 3000 });
+          } else {
+            await row.click({ timeout: 3000 });
+          }
+          await page.waitForTimeout(400);
+          const footer = ((await userDialog.innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+          const confirmBtn = userDialog.getByRole('button', { name: /确定/ }).first();
+          const confirmEnabled = await confirmBtn.isEnabled().catch(() => false);
+          if (!footer.includes('尚未选择用户') || confirmEnabled) {
+            selected = true;
+            break;
+          }
+        } catch (_) {
+          // try next locator
+        }
+      }
+      if (!selected) {
+        // 最后兜底：直接点姓名文本
+        await nameText.click({ timeout: 3000 });
+        await page.waitForTimeout(400);
+      }
+
+      const footerAfter = ((await userDialog.innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+      const confirmBtn = userDialog.getByRole('button', { name: /确定/ }).first();
+      if (footerAfter.includes('尚未选择用户')) {
+        // 部分 UI 点行后仍短暂显示提示，再点一次姓名所在块
+        await userDialog
+          .locator('div')
+          .filter({ hasText: new RegExp(`${transferTarget}`) })
+          .first()
+          .click({ timeout: 3000 })
+          .catch(() => {});
+        await page.waitForTimeout(400);
+      }
+      try {
+        await confirmBtn.waitFor({ state: 'visible', timeout: 3000 });
+        if (!(await confirmBtn.isEnabled().catch(() => false))) {
+          throw new Error('确定按钮仍不可用，用户行可能未选中');
+        }
+        await confirmBtn.click({ timeout: 5000 });
+      } catch (confirmErr) {
+        throw new Error(
+          `选中或点击确定失败: ${String(confirmErr?.message || confirmErr).slice(0, 120)}`,
+        );
+      }
+      await userDialog.waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {});
+      // 选人弹窗关闭后对象栏是异步回填；等姓名出现在转派弹窗再校验。
+      const transferDlg = transferDialog();
+      await transferDlg.waitFor({ state: 'visible', timeout: 8000 });
+      try {
+        await transferDlg
+          .getByText(transferTarget, { exact: false })
+          .first()
+          .waitFor({ state: 'visible', timeout: 8000 });
+      } catch (_) {
+        await page.waitForTimeout(1000);
+      }
+      const objectItem = transferDlg
+        .locator('.el-form-item')
+        .filter({ hasText: /对象/ })
+        .first();
+      let objectText = '';
+      if ((await objectItem.count()) > 0) {
+        objectText = ((await objectItem.innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+      } else {
+        objectText = ((await transferDlg.innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+      }
+      if (!objectText.includes(transferTarget)) {
+        console.log(
+          `RESULT=FAIL: 选择用户后对象栏未显示「${transferTarget}」，实际=${objectText.slice(0, 120)}`,
+        );
+        await screenshotCaseStep(page, step, cid).catch(() => null);
+        return null;
+      }
+    } catch (err) {
+      console.log(
+        `RESULT=FAIL: 步骤6选择用户「${transferTarget}」失败: ${String(err?.message || err).slice(0, 180)}`,
+      );
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    await screenshotCaseStep(page, step, cid);
+    console.log(`RESULT=PASS: 步骤6已选择转派对象「${transferTarget}」`);
+    return target;
+  }
+
+  if (step === 7) {
+    const dialog = transferDialog();
+    try {
+      await dialog.waitFor({ state: 'visible', timeout: 8000 });
+      const reasonInput = dialog
+        .locator('.el-form-item, .form-item, div')
+        .filter({ hasText: /转派原因/ })
+        .locator('textarea, input')
+        .first();
+      await reasonInput.waitFor({ state: 'visible', timeout: 8000 });
+      await reasonInput.fill(transferReason);
+    } catch (err) {
+      console.log(
+        `RESULT=FAIL: 步骤7填写转派原因失败: ${String(err?.message || err).slice(0, 180)}`,
+      );
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    await screenshotCaseStep(page, step, cid);
+    console.log('RESULT=PASS: 步骤7已填写转派原因');
+    return target;
+  }
+
+  if (step === 8) {
+    const dialog = transferDialog();
+    try {
+      await dialog.waitFor({ state: 'visible', timeout: 8000 });
+      await dialog.getByRole('button', { name: /确认转派/ }).click({ timeout: 5000 });
+      const confirm = secondaryConfirm();
+      await confirm.waitFor({ state: 'visible', timeout: 10000 });
+      const text = ((await confirm.innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+      if (!/确认将工单/.test(text) || !text.includes(transferTarget)) {
+        console.log(
+          `RESULT=FAIL: 二次确认文案不正确 text=${text.slice(0, 120)}`,
+        );
+        await screenshotCaseStep(page, step, cid).catch(() => null);
+        return null;
+      }
+    } catch (err) {
+      console.log(
+        `RESULT=FAIL: 步骤8二次确认弹窗失败: ${String(err?.message || err).slice(0, 180)}`,
+      );
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    await screenshotCaseStep(page, step, cid);
+    console.log('RESULT=PASS: 步骤8已弹出二次确认框');
+    return target;
+  }
+
+  if (step === 9) {
+    try {
+      const confirm = secondaryConfirm();
+      await confirm.waitFor({ state: 'visible', timeout: 8000 });
+      await confirm.getByRole('button', { name: /确认转派|确定/ }).click({ timeout: 5000 });
+      await confirm.waitFor({ state: 'hidden', timeout: 12000 }).catch(() => {});
+      await transferDialog().waitFor({ state: 'hidden', timeout: 12000 }).catch(() => {});
+      await page.waitForTimeout(800);
+      const body = ((await page.locator('body').innerText().catch(() => '')) || '').replace(
+        /\s+/g,
+        ' ',
+      );
+      const successHint =
+        /转派成功|已转派/.test(body) ||
+        (await page.locator('.el-message--success:visible, .el-notification:visible').count()) > 0;
+      if (!successHint) {
+        console.log('RESULT=INFO: 未捕获明确成功 toast，以弹窗关闭且仍在详情页为准');
+      }
+      if (!(await isTicketDetailVisible(page))) {
+        console.log(`RESULT=FAIL: 转派后未停留在工单详情 URL=${page.url()}`);
+        await screenshotCaseStep(page, step, cid).catch(() => null);
+        return null;
+      }
+    } catch (err) {
+      console.log(
+        `RESULT=FAIL: 步骤9确认转派失败: ${String(err?.message || err).slice(0, 180)}`,
+      );
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    await screenshotCaseStep(page, step, cid);
+    console.log('RESULT=PASS: 步骤9转派成功，已返回工单处理页');
+    return target;
+  }
+
+  console.log(
+    `RESULT=FAIL: 不支持的转派工单步骤 ${step}，当前固定流程最多 ${totalSteps} 步`,
+  );
+  return null;
+}
+
+/**
+ * 处理中工单 → 移交审批按钮可见性（如用例 1434）。
+ * 每步只调用：await helpers.runProcessingHandoverCaseStep(page, <步骤号>);
+ *
+ * 与领取 helper 的关键差异：列表必须筛「处理中」（不是「待处理」），
+ * 造数结果已是 claimed/processing。
+ */
+async function runProcessingHandoverCaseStep(page, stepNumber, caseId) {
+  const step = Number(stepNumber);
+  const cid = caseId || process.env.WHARTTEST_CASE_ID || 'unknown';
+  const pathMod = require('path');
+  const dir = process.env.SCREENSHOT_DIR || '.';
+  const target = pathMod.join(dir, `case_${cid}_step${step}.png`);
+  const ticketNo = getTicketNoFromEnv();
+  const expectedAssignee = String(process.env.WHARTTEST_CLAIM_ASSIGNEE_NAME || '').trim();
+  const totalSteps = Number(process.env.WHARTTEST_CASE_STEP_COUNT || 4) || 4;
+
+  console.log(`[执行进度] 正在执行步骤 ${step}/${totalSteps}`);
+
+  const waitForTicketListSettled = async () => {
+    const loading = page.locator('.el-loading-mask:visible, .el-table__loading:visible').first();
+    await loading.waitFor({ state: 'hidden', timeout: 12000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+  };
+
+  const findProcessingRow = async () => {
+    if (!ticketNo) {
+      console.log('RESULT=FAIL: 缺少本次造数工单号，无法定位处理中工单');
+      return null;
+    }
+    await fillFilterField(page, '工单号', ticketNo);
+    const statusSelected = await selectFormDropdownOption(page, '工单状态', '处理中').catch(
+      () => false,
+    );
+    if (!statusSelected) {
+      console.log('RESULT=FAIL: 无法将工单状态筛为「处理中」');
+      return null;
+    }
+    await clickPageButton(page, '查询');
+    await waitForTicketListSettled();
+    let row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
+    try {
+      await row.waitFor({ state: 'visible', timeout: 12000 });
+      return row;
+    } catch (_) {
+      console.log(
+        `RESULT=INFO: 工单号+处理中未命中，改用仅工单号查询 ${ticketNo}`,
+      );
+      await fillFilterField(page, '工单号', ticketNo);
+      await clickPageButton(page, '查询');
+      await waitForTicketListSettled();
+      row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
+      try {
+        await row.waitFor({ state: 'visible', timeout: 12000 });
+        return row;
+      } catch (__) {
+        console.log(`RESULT=FAIL: 列表中未找到本次造数工单 ${ticketNo}`);
+        return null;
+      }
+    }
+  };
+
+  if (step === 1) {
+    let loginDone = false;
+    const loginWatchdog = (async () => {
+      await page.waitForTimeout(45000);
+      if (loginDone) return undefined;
+      console.log('RESULT=FAIL: 步骤1登录超过45秒未完成，已中止');
+      try {
+        await page.screenshot({ path: target, fullPage: false, timeout: 5000, plain: true });
+        declareCaseScreenshot(target);
+      } catch (_) {}
+      return null;
+    })();
+    try {
+      const result = await Promise.race([loginStep1(page, cid), loginWatchdog]);
+      loginDone = true;
+      return result;
+    } catch (e) {
+      loginDone = true;
+      throw e;
+    }
+  }
+
+  if (step >= 2 && !(await ensureClaimableCaseAuthenticated(page, cid))) {
+    return null;
+  }
+
+  if (step === 2) {
+    await navigateToMyTicketsPage(page);
+    await waitForPageBodyText(page, 80, 10000);
+    await screenshotCaseStep(page, step, cid);
+    console.log(`RESULT=PASS: 步骤2已进入我的工单列表 URL=${page.url()}`);
+    return target;
+  }
+
+  if (step === 3) {
+    if (detectWorkOrderPage(page) !== 'my-tickets') {
+      await navigateToMyTicketsPage(page);
+    }
+    await dismissBlockingDialogs(page);
+    const row = await findProcessingRow();
+    if (!row) {
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    const entered = await clickProcessInTableRow(page, row);
+    if (!entered || !(await waitForTicketDetailNavigation(page, 10000))) {
+      console.log(`RESULT=FAIL: 步骤3未能进入工单详情 URL=${page.url()}`);
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    if (!(await assertTicketNoOnDetailPage(page, ticketNo))) {
+      console.log(`RESULT=FAIL: 当前详情页不是本次造数工单 ${ticketNo}`);
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    await screenshotCaseStep(page, step, cid);
+    console.log(
+      `RESULT=PASS: 步骤3已进入处理中详情 ${ticketNo}（处理人=${expectedAssignee || '当前登录用户'}）`,
+    );
+    return target;
+  }
+
+  if (step === 4) {
+    await dismissBlockingDialogs(page);
+    const handoverBtn = page.getByRole('button', { name: /移交审批/ }).first();
+    const approvalDetailBtn = page.getByRole('button', { name: /审批详情/ }).first();
+    let handoverVisible = false;
+    try {
+      await handoverBtn.waitFor({ state: 'visible', timeout: 10000 });
+      handoverVisible = true;
+    } catch (_) {
+      handoverVisible = false;
+    }
+    const approvalDetailVisible = await approvalDetailBtn.isVisible().catch(() => false);
+    await screenshotCaseStep(page, step, cid).catch(() => null);
+    if (!handoverVisible) {
+      console.log('RESULT=FAIL: 详情页未出现「移交审批」按钮');
+      return null;
+    }
+    if (approvalDetailVisible) {
+      console.log('RESULT=FAIL: 详情页不应展示「审批详情」按钮（审批状态应为空）');
+      return null;
+    }
+    console.log('RESULT=PASS: 步骤4已确认「移交审批」可见且无「审批详情」');
+    return target;
+  }
+
+  console.log(
+    `RESULT=FAIL: 不支持的处理中/移交审批步骤 ${step}，当前固定流程最多 ${totalSteps} 步`,
+  );
+  return null;
+}
+
+/**
  * 按字段筛选并点查询。字段标签由调用方传入。
  */
 async function filterByFields(page, filters = {}) {
@@ -5387,6 +5964,8 @@ module.exports = {
   captureTicketDetailView,
   runTicketDetailCaseStep,
   runClaimableTicketCaseStep,
+  runTransferTicketCaseStep,
+  runProcessingHandoverCaseStep,
   filterTicketList,
   handleCookieBanner,
   retryWithBackoff,

@@ -12,7 +12,7 @@ CASES = [
         'expect_steps': 6,
         'expect_step_names': ['创建工单', '分配给当前处理人', '当前处理人领取工单', '转派工单'],
         'expect_mode': 'template',
-        'expect_params': {'assigneeName': '李亮', 'ticketType': 'TYPE_C'},
+        'expect_params': {'assigneeName': '李亮', 'ticketType': 'TYPE_A'},
     },
     {
         'id': 2,

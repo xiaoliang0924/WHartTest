@@ -104,6 +104,35 @@ CLAIMABLE_PENDING_EXECUTION_HINT = """
 
 """
 
+TRANSFER_UI_EXECUTION_HINT = """
+
+## 【转派 UI — 强制专用 helper】
+
+当用例名称含「转派按钮可见性」或「转派弹窗」时：
+
+1. **每一步只允许一行脚本**：`await helpers.runTransferTicketCaseStep(page, <步骤号>);`
+2. **禁止**改用 `runClaimableTicketCaseStep`（那是领取流程，最多 5 步，无法覆盖转派弹窗 9 步）。
+3. **禁止**手写筛选/点处理/弹窗选人脚本；helper 会注入造数工单号与转派目标姓名。
+4. 按钮可见性用例只跑到步骤4；弹窗成功流程跑完选择对象→填原因→二次确认。
+5. `RESULT=FAIL` 必须停止，禁止改报通过。
+6. **截图纪律**：每一步都必须单独执行 `runTransferTicketCaseStep` 一次；缺任一步截图 **不得** 在报告中写通过。
+
+"""
+
+PROCESSING_HANDOVER_EXECUTION_HINT = """
+
+## 【处理中工单→移交审批 — 强制专用 helper】
+
+当用例名称/步骤含「处理中 + 移交审批」时：
+
+1. **每一步只允许一行脚本**：`await helpers.runProcessingHandoverCaseStep(page, <步骤号>);`
+2. **禁止**改用 `runClaimableTicketCaseStep`（会按「待处理」筛选，找不到已是「处理中」的造数工单）。
+3. **禁止**手写筛选/点处理；helper 会注入造数工单号并按「处理中」筛选。
+4. 步骤4 校验「移交审批」可见且无「审批详情」。
+5. `RESULT=FAIL` 必须停止，禁止改报通过。
+
+"""
+
 OVERVIEW_SLA_DETAIL_EXECUTION_HINT = """
 
 ## 【工单总览-SLA进详情 — 强制专用 helper】

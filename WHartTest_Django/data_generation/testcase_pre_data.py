@@ -1055,6 +1055,42 @@ def is_ticket_detail_boundary_case(testcase: TestCase) -> bool:
     )
 
 
+def is_transfer_ready_ticket_case(testcase: TestCase) -> bool:
+    """Pending ticket for UI transfer probes (button/dialog), not already-transferred fixtures."""
+    from .intent_router import _needs_transfer_ready_pending_ticket
+
+    return _needs_transfer_ready_pending_ticket(collect_testcase_text(testcase))
+
+
+def is_transfer_ui_helper_case(testcase: TestCase) -> bool:
+    """Whether a case uses the deterministic transfer UI helper (button / dialog)."""
+    name = (getattr(testcase, 'name', '') or '').strip()
+    return any(
+        marker in name
+        for marker in (
+            '转派按钮可见性',
+            '转派弹窗',
+        )
+    )
+
+
+def is_processing_handover_case(testcase: TestCase) -> bool:
+    """Processing ticket detail → 移交审批 button visibility helper."""
+    name = (getattr(testcase, 'name', '') or '').strip()
+    blob = collect_testcase_text(testcase)
+    if '移交审批' in name:
+        return True
+    return '移交审批' in blob and '处理中' in blob
+
+
+def transfer_ui_helper_flow(testcase: TestCase) -> str:
+    """visibility = button-only; dialog = select user + reason + double confirm."""
+    name = (getattr(testcase, 'name', '') or '').strip()
+    if '转派按钮可见性' in name:
+        return 'visibility'
+    return 'dialog'
+
+
 def is_claimable_ticket_detail_case(testcase: TestCase) -> bool:
     """Whether a case belongs to the deterministic claim lifecycle helper.
 
@@ -1328,6 +1364,53 @@ def build_testcase_navigation_hint(testcase: TestCase) -> str:
             '- helper 返回 null 或输出 RESULT=FAIL 时立即判不通过，禁止自行补截图或改报通过。',
         ])
         return '\n'.join(lines)
+    if is_transfer_ui_helper_case(testcase):
+        flow = transfer_ui_helper_flow(testcase)
+        step_count = testcase.steps.count()
+        lines = [
+            '',
+            '【转派 UI — 固定 Playwright 脚本，禁止改写】',
+            '全程 session_id 不变；每步只执行下面一行 JavaScript：',
+        ]
+        for step in testcase.steps.order_by('step_number'):
+            lines.append(
+                f'- 步骤{step.step_number}: `await helpers.runTransferTicketCaseStep(page, {step.step_number});`'
+            )
+        if flow == 'visibility':
+            lines.append(
+                '- helper 以自动分配处理人登录，从「我的工单」进详情，校验橙色「转派工单」按钮可见。'
+            )
+        else:
+            lines.append(
+                '- helper 以自动分配处理人登录，打开转派弹窗，选择目标用户、填写原因并完成二次确认。'
+            )
+        lines.extend(
+            [
+                '- helper 返回 null 或输出 RESULT=FAIL 时立即判不通过，禁止自行补截图或改报通过。',
+                f'- 本用例共 {step_count} 步，禁止改用 runClaimableTicketCaseStep 或自行拼装步骤。',
+            ]
+        )
+        return '\n'.join(lines)
+    if is_processing_handover_case(testcase):
+        step_count = testcase.steps.count()
+        lines = [
+            '',
+            '【处理中工单→移交审批 — 固定 Playwright 脚本，禁止改写】',
+            '全程 session_id 不变；每步只执行下面一行 JavaScript：',
+        ]
+        for step in testcase.steps.order_by('step_number'):
+            lines.append(
+                f'- 步骤{step.step_number}: `await helpers.runProcessingHandoverCaseStep(page, {step.step_number});`'
+            )
+        lines.extend(
+            [
+                '- helper 使用造数工单号，在「我的工单」按「处理中」筛选后点处理进详情。',
+                '- 禁止改用 runClaimableTicketCaseStep（那会按「待处理」筛选，必然找不到已领取工单）。',
+                '- helper 返回 null 或输出 RESULT=FAIL 时立即判不通过，禁止自行补截图或改报通过。',
+                f'- 本用例共 {step_count} 步。',
+            ]
+        )
+        return '\n'.join(lines)
     if not is_ticket_detail_boundary_case(testcase):
         return ''
     step_count = testcase.steps.count()
@@ -1523,11 +1606,24 @@ def _resolve_transfer_assignee_params(
 ) -> Dict[str, Any]:
     """解析转派造数里的当前处理人与转派目标的 userId。"""
     from .assignee_resolver import AssigneeResolutionError, resolve_assignee_params
+    from .intent_router import (
+        _DEFAULT_TRANSFER_SOURCE_NAME,
+        _pick_distinct_transfer_target,
+    )
 
     params = dict(input_params or {})
     env_id = environment_id
 
+    source_name = str(params.get('sourceAssigneeName') or '').strip()
     target_name = str(params.get('assigneeName') or '').strip()
+    if not source_name:
+        source_name = _DEFAULT_TRANSFER_SOURCE_NAME
+        params['sourceAssigneeName'] = source_name
+    if not target_name or target_name == source_name:
+        target_name = _pick_distinct_transfer_target(source_name)
+        params['assigneeName'] = target_name
+        params.pop('assigneeUserId', None)
+
     if target_name:
         params = resolve_assignee_params(
             params,
@@ -1535,7 +1631,6 @@ def _resolve_transfer_assignee_params(
             environment_id=env_id,
         )
 
-    source_name = str(params.get('sourceAssigneeName') or '').strip()
     if source_name:
         source_seed = {
             'assigneeName': source_name,
@@ -1559,6 +1654,14 @@ def _resolve_transfer_assignee_params(
         )
         params['sourceAssigneeRole'] = resolved.get('assigneeRole') or params.get('sourceAssigneeRole')
 
+    source_id = params.get('sourceAssigneeUserId')
+    target_id = params.get('assigneeUserId')
+    if source_id not in (None, '') and target_id not in (None, '') and str(source_id) == str(target_id):
+        raise DataGenerationError(
+            f'转派造数当前处理人与目标相同（{params.get("sourceAssigneeName")}），'
+            f'请在用例中指定不同的转派对象，避免 TRANSFER_TO_SELF'
+        )
+
     return params
 
 
@@ -1566,17 +1669,24 @@ def _normalize_assignment_workflow_ticket_type(
     template_key: Optional[str],
     input_params: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Keep assignment workflows on a ticket type accepted by the target API.
+    """Normalize ticket types for assignment-related pre-data templates.
 
-    A testcase or module may contain legacy ``ticketType=TYPE_C`` parameters.
-    Those parameters override the template default at execution time, but a newly
-    created TYPE_C ticket cannot be assigned in the business system.  Assignment
-    and transfer templates therefore always need TYPE_A, regardless of an old
-    saved override.
+    - assign / transfer / resolve: force TYPE_A (manual assign path).
+    - claim / 处理中 / 移交审批: force TYPE_C so auto-assign lands on a holder
+      whose API login works (e.g. 林业丰), then transfer+claim to the target.
+      TYPE_A often lands on 张岩, whose UI password may not work on /api/auth/login.
     """
     params = dict(input_params or {})
-    if template_key in {'biz_create_and_assign', 'biz_create_and_transfer'}:
+    if template_key in {
+        'biz_create_and_assign',
+        'biz_create_and_transfer',
+        'biz_create_assign_resolve',
+    }:
         params['ticketType'] = 'TYPE_A'
+    elif template_key == 'biz_create_and_claim':
+        # TYPE_A 常被自动分给张岩，而其 API 登录不可用；TYPE_C 会落到可登录的
+        # 林业丰等处理人，再经转派+领取落到目标处理人（如李亮）。
+        params['ticketType'] = 'TYPE_C'
     return params
 
 
@@ -1654,13 +1764,15 @@ def run_testcase_pre_data(
             )
 
     steps_override = None
-    if resolution.source == _CLAIMABLE_AUTO_SOURCE:
-        steps_override = _build_claimable_steps_without_initial_chat(plan)
-        if steps_override:
-            logger.info(
-                'Claimable pre-data: using %s to avoid INITIATOR_LOCKED',
-                _CLAIMABLE_CREATE_INTERFACE_NAME,
-            )
+    transfer_ready = is_transfer_ready_ticket_case(testcase)
+    if resolution.source == _CLAIMABLE_AUTO_SOURCE or transfer_ready:
+        if resolution.source == _CLAIMABLE_AUTO_SOURCE:
+            steps_override = _build_claimable_steps_without_initial_chat(plan)
+            if steps_override:
+                logger.info(
+                    'Claimable pre-data: using %s to avoid INITIATOR_LOCKED',
+                    _CLAIMABLE_CREATE_INTERFACE_NAME,
+                )
         exec_params = _inject_unlocked_creator_token(
             exec_params,
             environment_id=env_id,
@@ -1694,14 +1806,15 @@ def run_testcase_pre_data(
     env_id = resolution.default_environment_id or plan.default_environment_id
     case_text = collect_testcase_text(testcase)
     needs_assigned_claim = resolution.source == _CLAIMABLE_AUTO_SOURCE
-    if (uses_automatic_assignment(case_text) or needs_assigned_claim) and isinstance(run.output_snapshot, dict):
+    needs_auto_login = needs_assigned_claim or is_transfer_ready_ticket_case(testcase)
+    if (uses_automatic_assignment(case_text) or needs_auto_login) and isinstance(run.output_snapshot, dict):
         enriched_snapshot = (
             _wait_for_assigned_claim_snapshot(
                 run.output_snapshot,
                 project_id=testcase.project_id,
                 environment_id=env_id,
             )
-            if needs_assigned_claim
+            if needs_assigned_claim or is_transfer_ready_ticket_case(testcase)
             else _enrich_auto_assignment_snapshot(
                 run.output_snapshot,
                 project_id=testcase.project_id,
@@ -1712,7 +1825,7 @@ def run_testcase_pre_data(
             run.output_snapshot = enriched_snapshot
             run.save(update_fields=['output_snapshot'])
 
-    if needs_assigned_claim:
+    if needs_auto_login:
         snapshot = run.output_snapshot if isinstance(run.output_snapshot, dict) else {}
         assignment = snapshot.get('autoAssignment') if isinstance(snapshot, dict) else None
         if not isinstance(assignment, dict) or not assignment.get('assigneeUserId'):

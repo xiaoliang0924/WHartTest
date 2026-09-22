@@ -453,7 +453,10 @@ class IntentRouterStateTests(DjangoTestCase):
         )
 
     def test_ticket_row_already_assigned_detects_pending_process(self):
-        from data_generation.services import _ticket_row_is_already_assigned
+        from data_generation.services import (
+            _assignee_matches_desired,
+            _ticket_row_is_already_assigned,
+        )
 
         self.assertTrue(
             _ticket_row_is_already_assigned(
@@ -463,6 +466,20 @@ class IntentRouterStateTests(DjangoTestCase):
         self.assertFalse(
             _ticket_row_is_already_assigned(
                 {'status': 'pending_assign', 'assigneeUserId': None},
+            )
+        )
+        self.assertTrue(
+            _assignee_matches_desired(
+                {'assigneeUserId': 46, 'assigneeName': '李亮'},
+                desired_user_id=46,
+                desired_name='李亮',
+            )
+        )
+        self.assertFalse(
+            _assignee_matches_desired(
+                {'assigneeUserId': 3, 'assigneeName': '张岩'},
+                desired_user_id=46,
+                desired_name='李亮',
             )
         )
 
@@ -485,6 +502,13 @@ class IntentRouterStateTests(DjangoTestCase):
                 {'ticketType': 'TYPE_C'},
             )['ticketType'],
             'TYPE_A',
+        )
+        self.assertEqual(
+            _normalize_assignment_workflow_ticket_type(
+                'biz_create_and_claim',
+                {'ticketType': 'TYPE_A'},
+            )['ticketType'],
+            'TYPE_C',
         )
 
     def test_approval_ticket_uses_approval_processing_template(self):
@@ -510,6 +534,82 @@ class IntentRouterStateTests(DjangoTestCase):
             '尝试访问工单总览页面'
         )
         self.assertIsNone(infer_business_template_key(text))
+
+    def test_transfer_button_visibility_uses_assign_not_transfer_api(self):
+        from data_generation.intent_router import (
+            build_input_params,
+            extract_transfer_target_name,
+            infer_business_template_key,
+        )
+
+        text = (
+            '待处理工单详情页-转派按钮可见性验证-正常流程\n'
+            '使用李亮账号(802714/000000)登录系统\n'
+            '存在一条当前处理人为李亮，状态为「待处理」的测试工单\n'
+            '可见橙色「转派工单」按钮'
+        )
+        self.assertEqual(infer_business_template_key(text), 'biz_create_type_a')
+        params = build_input_params(text, {'input_params': {}, 'steps': []})
+        self.assertNotIn('assigneeName', params)
+        self.assertEqual(params.get('ticketType'), 'TYPE_A')
+
+    def test_transfer_dialog_success_flow_does_not_pre_transfer(self):
+        from data_generation.intent_router import (
+            build_input_params,
+            extract_transfer_target_name,
+            infer_business_template_key,
+        )
+
+        text = (
+            '转派弹窗-选择对象与填写原因-二次确认-转派成功-正常流程\n'
+            '使用李亮账号登录\n'
+            '存在一条当前处理人为李亮，状态为「待处理」的测试工单\n'
+            '系统中存在用户黎沅欣(802434)可被选择为转派目标\n'
+            '确认将工单 {工单号} 转派给 {姓名}？'
+        )
+        self.assertEqual(infer_business_template_key(text), 'biz_create_type_a')
+        self.assertEqual(extract_transfer_target_name(text), '黎沅欣')
+        params = build_input_params(text, {'input_params': {}, 'steps': []})
+        self.assertNotIn('assigneeName', params)
+        self.assertNotEqual(params.get('assigneeName'), '{姓名}？')
+
+    def test_completed_transfer_fixture_keeps_distinct_parties(self):
+        from data_generation.intent_router import (
+            build_input_params,
+            infer_business_template_key,
+        )
+
+        text = (
+            '转派成功-原处理人我的工单列表-工单不可见-数据隔离\n'
+            '使用李亮账号登录\n'
+            '已按正常流程发起转派给黎沅欣，且转派成功'
+        )
+        self.assertEqual(infer_business_template_key(text), 'biz_create_and_transfer')
+        params = build_input_params(text, {'input_params': {}, 'steps': []})
+        self.assertEqual(params.get('sourceAssigneeName'), '李亮')
+        self.assertEqual(params.get('assigneeName'), '黎沅欣')
+
+        text_after = (
+            '被转派人-列表可见\n'
+            '已有一条李亮处理的待处理工单已成功转派给黎沅欣\n'
+            '使用黎沅欣账号登录'
+        )
+        self.assertEqual(infer_business_template_key(text_after), 'biz_create_and_transfer')
+        params_after = build_input_params(text_after, {'input_params': {}, 'steps': []})
+        self.assertEqual(params_after.get('sourceAssigneeName'), '李亮')
+        self.assertEqual(params_after.get('assigneeName'), '黎沅欣')
+
+    def test_create_and_transfer_description_still_uses_transfer_template(self):
+        from data_generation.intent_router import (
+            build_input_params,
+            infer_business_template_key,
+        )
+
+        text = '创建 TYPE_C 工单并转派给李亮'
+        self.assertEqual(infer_business_template_key(text), 'biz_create_and_transfer')
+        params = build_input_params(text, {'input_params': {}, 'steps': []})
+        self.assertEqual(params.get('assigneeName'), '李亮')
+        self.assertNotEqual(params.get('sourceAssigneeName'), params.get('assigneeName'))
 
 
 class TestcasePreDataResolverTests(DjangoTestCase):
@@ -549,6 +649,51 @@ class TestcasePreDataResolverTests(DjangoTestCase):
         resolution = resolve_pre_data_for_testcase(testcase)
         self.assertEqual(resolution.source, 'inferred')
         self.assertEqual(resolution.template_key, 'biz_create_type_a')
+
+    def test_transfer_ui_helper_navigation_hint(self):
+        from data_generation.testcase_pre_data import (
+            build_testcase_navigation_hint,
+            is_transfer_ui_helper_case,
+            transfer_ui_helper_flow,
+        )
+
+        visibility = ManualTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='待处理工单详情页-转派按钮可见性验证-正常流程',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=visibility,
+            step_number=4,
+            description='查看页面右上角按钮区域',
+            expected_result='可见橙色「转派工单」按钮',
+            creator=self.user,
+        )
+        self.assertTrue(is_transfer_ui_helper_case(visibility))
+        self.assertEqual(transfer_ui_helper_flow(visibility), 'visibility')
+        hint_vis = build_testcase_navigation_hint(visibility)
+        self.assertIn('runTransferTicketCaseStep', hint_vis)
+
+        dialog = ManualTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='转派弹窗-选择对象与填写原因-二次确认-转派成功-正常流程',
+            creator=self.user,
+        )
+        for n in range(1, 10):
+            TestCaseStep.objects.create(
+                test_case=dialog,
+                step_number=n,
+                description=f'步骤{n}',
+                expected_result='ok',
+                creator=self.user,
+            )
+        self.assertTrue(is_transfer_ui_helper_case(dialog))
+        self.assertEqual(transfer_ui_helper_flow(dialog), 'dialog')
+        hint_dlg = build_testcase_navigation_hint(dialog)
+        self.assertIn('runTransferTicketCaseStep(page, 9)', hint_dlg)
+        self.assertNotIn('runClaimableTicketCaseStep', hint_dlg)
 
     def test_approval_processing_case_inference(self):
         from data_generation.testcase_pre_data import resolve_pre_data_for_testcase

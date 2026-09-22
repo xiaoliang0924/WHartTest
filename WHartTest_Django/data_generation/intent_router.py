@@ -19,8 +19,14 @@ _INVALID_ASSIGNEE_NAMES = frozenset(
         '登录用户',
         '当前用户',
         '当前处理人',
+        '姓名',
+        '工单号',
     }
 )
+_PLACEHOLDER_NAME_PATTERN = re.compile(r'[{}？?]|姓名|工单号')
+# 造数里转派双方不能相同；模板默认亦按此区分。
+_DEFAULT_TRANSFER_SOURCE_NAME = '李清云'
+_DEFAULT_TRANSFER_TARGET_NAME = '李亮'
 
 _CREATE_ONLY_KEYWORDS = ('仅创建', '只创建', '仅生成', '不要分配', '无需分配', '不分配', '不要指派', '无需指派')
 _AUTO_ASSIGN_KEYWORDS = ('自动分配', '自动派单', '自动派发', '自动指派')
@@ -135,15 +141,85 @@ def _needs_unassigned_pending_ticket(text: str) -> bool:
 
 
 # Ordered rules: first match wins (more specific keywords before generic ones).
+# 「转派」不在此表：需区分「仅准备可转派待处理工单」与「前置已完成转派」。
 _INTENT_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (('审批工单', 'approval'), 'biz_create_approval_processing'),
-    (('转派',), 'biz_create_and_transfer'),
     (('完成工单', '工单完成', '闭环', 'resolve', '已完成', '已关闭'), 'biz_create_assign_resolve'),
     (('领取', 'claimed'), 'biz_create_and_claim'),
     (('处理中',), 'biz_create_and_claim'),
     (('待处理', 'pending_process', '我的工单'), 'biz_create_and_assign'),
     (('待分配', 'pending_assign'), 'biz_create_type_a'),
 )
+
+
+def _is_valid_person_name(name: Optional[str]) -> bool:
+    value = str(name or '').strip().strip('"\'「」')
+    if not value or value in _INVALID_ASSIGNEE_NAMES:
+        return False
+    if _PLACEHOLDER_NAME_PATTERN.search(value):
+        return False
+    if len(value) > 20:
+        return False
+    return True
+
+
+def _needs_completed_transfer_fixture(text: str) -> bool:
+    """Whether pre-data must call the transfer API (ticket already transferred).
+
+    Visibility / dialog-validation cases only need a pending ticket owned by the
+    login user; calling transfer would change state or hit TRANSFER_TO_SELF.
+
+    Case titles like「…二次确认-转派成功-正常流程」describe the expected UI
+    outcome, not a precondition — those must stay on the assign-only path.
+    """
+    if '转派' not in (text or ''):
+        return False
+
+    # 前置已写明「已转派」：必须走转派接口造数。
+    if any(
+        keyword in text
+        for keyword in (
+            '已成功转派',
+            '已按正常流程发起转派',
+            '已转派给',
+            '拒收转派',
+            '转派系统消息',
+            '原处理人我的工单',
+            '被转派人我的工单',
+        )
+    ):
+        return True
+
+    first_line = (text.splitlines()[0] if text else '').strip()
+    if first_line.startswith('转派成功') or first_line.startswith('被转派人'):
+        return True
+
+    # 造数描述「创建并转派给某人」需要接口转派；UI 弹窗/按钮类除外。
+    ui_transfer_probe = any(
+        keyword in text
+        for keyword in (
+            '转派按钮',
+            '转派弹窗',
+            '确认转派',
+            '可被选择为转派目标',
+            '未填写转派原因',
+            '未选择转派对象',
+        )
+    )
+    if ui_transfer_probe:
+        return False
+
+    if '并转派给' in text or re.search(r'(?:创建|生成).{0,30}转派给', text):
+        return True
+
+    return False
+
+
+def _needs_transfer_ready_pending_ticket(text: str) -> bool:
+    """Pending ticket assigned to operator so UI can show/use 转派."""
+    if '转派' not in (text or ''):
+        return False
+    return not _needs_completed_transfer_fixture(text)
 
 
 def infer_ticket_type(description: str, fallback: str = 'TYPE_C') -> str:
@@ -162,7 +238,7 @@ def extract_assignee_name(description: str) -> Optional[str]:
         match = pattern.search(text)
         if match:
             name = match.group(1).strip()
-            if name and name not in _INVALID_ASSIGNEE_NAMES:
+            if _is_valid_person_name(name):
                 return name
     return None
 
@@ -173,26 +249,56 @@ def extract_login_operator_name(description: str) -> Optional[str]:
     match = re.search(r'使用\s*([^\s(（]+)\s*账号', text)
     if match:
         name = match.group(1).strip()
-        if name and name not in _INVALID_ASSIGNEE_NAMES:
+        if _is_valid_person_name(name):
             return name
     return None
 
 
-def extract_transfer_target_name(description: str) -> Optional[str]:
-    """转派目标处理人（如「转派给李清云」「可用处理人"李清云"」）。"""
+def extract_current_processor_name(description: str) -> Optional[str]:
+    """提取造数前的当前处理人（转派发起方），避免与登录后的被转派人混淆。"""
     text = description or ''
     patterns = (
-        re.compile(r'转派给\s*([^\s，,。.；;」"\']+)'),
-        re.compile(r'可用处理人[“"\']([^”"\']+)'),
-        re.compile(r'转派[^"\n]*[给至]\s*([^\s，,。.；;]+)'),
+        re.compile(r'当前处理人为\s*([^\s，,。.；;」"\']+)'),
+        re.compile(r'处理人为\s*([^\s，,。.；;」"\']+)\s*[，,]?\s*(?:状态为)?「?待处理'),
+        re.compile(r'已有一条\s*([^\s，,。.；;]+)处理的'),
+        re.compile(r'一条\s*([^\s，,。.；;]+)处理的待处理工单'),
     )
     for pattern in patterns:
         match = pattern.search(text)
         if match:
             name = match.group(1).strip().strip('"\'「」')
-            if name and name not in _INVALID_ASSIGNEE_NAMES:
+            if _is_valid_person_name(name):
                 return name
     return None
+
+
+def extract_transfer_target_name(description: str) -> Optional[str]:
+    """转派目标处理人（如「转派给黎沅欣」「用户黎沅欣…可被选择为转派目标」）。"""
+    text = description or ''
+    patterns = (
+        re.compile(r'已成功转派给\s*([^\s，,。.；;」"\']+)'),
+        re.compile(r'发起转派给\s*([^\s，,。.；;」"\']+)'),
+        re.compile(r'转派给\s*([^\s，,。.；;」"\']+)'),
+        re.compile(r'用户\s*([^\s(（]+)[^。\n]{0,40}转派目标'),
+        re.compile(r'系统中存在用户\s*([^\s(（]+)'),
+        re.compile(r'可用处理人[“"\']([^”"\']+)'),
+    )
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match:
+            name = match.group(1).strip().strip('"\'「」')
+            if _is_valid_person_name(name):
+                return name
+    return None
+
+
+def _pick_distinct_transfer_target(source_name: str) -> str:
+    source = str(source_name or '').strip()
+    if source and source != _DEFAULT_TRANSFER_TARGET_NAME:
+        return _DEFAULT_TRANSFER_TARGET_NAME
+    if source and source != _DEFAULT_TRANSFER_SOURCE_NAME:
+        return _DEFAULT_TRANSFER_SOURCE_NAME
+    return '黎沅欣'
 
 
 def infer_business_template_key(description: str) -> Optional[str]:
@@ -220,6 +326,13 @@ def infer_business_template_key(description: str) -> Optional[str]:
     if _wants_create_only(text):
         ticket_type = infer_ticket_type(text, fallback='TYPE_A')
         return 'biz_create_type_b' if ticket_type == 'TYPE_B' else 'biz_create_type_a'
+
+    # 转派：按钮/弹窗类只造「可转派的待处理」；需已转派结果的才走转派接口。
+    if _needs_completed_transfer_fixture(text):
+        return 'biz_create_and_transfer'
+    if _needs_transfer_ready_pending_ticket(text):
+        # TYPE_A 创建后由系统自动分配；执行时按自动分配结果登录，不强制改派到文案里的人名。
+        return 'biz_create_type_a'
 
     for keywords, template_key in _INTENT_RULES:
         if any(keyword in text or keyword in text.lower() for keyword in keywords):
@@ -278,16 +391,36 @@ def build_input_params(description: str, llm_payload: Dict[str, Any]) -> Dict[st
     else:
         params.setdefault('ticketType', ticket_type)
 
-    if '转派' in (description or ''):
-        # TYPE_C 新建后无法分配；转派造数与状态筛选样本一致走 TYPE_A。
+    text = description or ''
+    if '转派' in text:
+        # TYPE_C 新建后无法分配；转派相关造数统一 TYPE_A。
         params['ticketType'] = 'TYPE_A'
         params.setdefault('summary', '转派测试工单')
-        operator = extract_login_operator_name(description)
-        target = extract_transfer_target_name(description) or extract_assignee_name(description)
-        if operator:
-            params['sourceAssigneeName'] = operator
-        if target:
+        current_processor = extract_current_processor_name(text)
+        login_operator = extract_login_operator_name(text)
+        target = extract_transfer_target_name(text)
+
+        if _needs_completed_transfer_fixture(text):
+            # 发起方优先取「当前处理人/李亮处理的」，避免用被转派人登录账号当 source。
+            source = current_processor or login_operator
+            if (
+                target
+                and login_operator
+                and login_operator == target
+                and not current_processor
+            ):
+                source = None
+            source = source or _DEFAULT_TRANSFER_SOURCE_NAME
+            if not target or target == source:
+                target = _pick_distinct_transfer_target(source)
+            params['sourceAssigneeName'] = source
             params['assigneeName'] = target
+        else:
+            # 仅准备可转派待处理工单：TYPE_A 交给系统自动分配，不指定处理人。
+            params.pop('assigneeName', None)
+            params.pop('assigneeUserId', None)
+            params.pop('sourceAssigneeName', None)
+            params.pop('sourceAssigneeUserId', None)
     else:
         assignee_name = extract_assignee_name(description)
         if assignee_name and not claimable_pending:
@@ -299,7 +432,11 @@ def build_input_params(description: str, llm_payload: Dict[str, Any]) -> Dict[st
     elif automatic_assignment:
         params['ticketType'] = 'TYPE_A'
         params.setdefault('summary', '自动分配测试工单')
-    elif '转派' not in (description or '') and '待处理' in description and 'summary' not in params:
+    elif '移交审批' in text or '处理中' in text:
+        # 领取/处理中类：TYPE_C 自动分配到可登录处理人，再转派到目标人。
+        params['ticketType'] = 'TYPE_C'
+        params.setdefault('summary', '处理中测试工单')
+    elif '转派' not in text and '待处理' in text and 'summary' not in params:
         params.setdefault('summary', f'{ticket_type}待处理测试工单')
 
     # 被测环境 summary 上限 20 字（创建工单校验）。

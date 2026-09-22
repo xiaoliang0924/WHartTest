@@ -53,6 +53,8 @@ from .playwright_instructions import (
     MANUAL_TESTCASE_EXECUTION_HINT,
     OVERVIEW_SLA_DETAIL_EXECUTION_HINT,
     PLAYWRIGHT_SCRIPT_INSTRUCTION,
+    PROCESSING_HANDOVER_EXECUTION_HINT,
+    TRANSFER_UI_EXECUTION_HINT,
 )
 from .stop_signal import should_stop, clear_stop_signal
 from langgraph_integration.models import ChatSession, LLMConfig
@@ -769,6 +771,22 @@ async def _run_and_stream_remaining_helper_steps(
     )
 
     template = infer_fixed_helper_call_template(messages)
+    try:
+        from testcases.models import TestCase as _HelperCase
+        from data_generation.testcase_pre_data import (
+            is_processing_handover_case,
+            is_transfer_ui_helper_case,
+        )
+
+        _tc = await sync_to_async(
+            _HelperCase.objects.filter(id=int(test_case_id)).first
+        )()
+        if _tc and await sync_to_async(is_transfer_ui_helper_case)(_tc):
+            template = "await helpers.runTransferTicketCaseStep(page, {step});"
+        elif _tc and await sync_to_async(is_processing_handover_case)(_tc):
+            template = "await helpers.runProcessingHandoverCaseStep(page, {step});"
+    except Exception:
+        pass
     step_names = await sync_to_async(_get_testcase_step_names)(int(test_case_id))
     chunks: list[str] = []
     last_step = int(from_step)
@@ -922,7 +940,7 @@ def _extract_testcase_step_from_tool_call(tool_call: Any) -> Optional[int]:
     if re.search(r"\bloginStep1\s*\(", command, flags=re.IGNORECASE):
         return 1
     patterns = (
-        r"run(?:ClaimableTicket|TicketDetail)?CaseStep\s*\(\s*page\s*,\s*(\d+)",
+        r"run(?:ClaimableTicket|TransferTicket|TicketDetail|Overview|Notification)?CaseStep\s*\(\s*page\s*,\s*(\d+)",
         r"screenshotCaseStep\s*\(\s*page\s*,\s*(\d+)",
         r"case[_-]\d+_step(\d+)",
     )
@@ -1787,6 +1805,8 @@ class AgentLoopStreamAPIView(View):
                 from data_generation.testcase_pre_data import (
                     is_claimable_ticket_detail_case,
                     is_overview_sla_detail_case,
+                    is_processing_handover_case,
+                    is_transfer_ui_helper_case,
                 )
                 from testcases.models import TestCase as ManualTestCaseModel
 
@@ -1803,12 +1823,28 @@ class AgentLoopStreamAPIView(View):
                     sla_case
                     and await sync_to_async(is_claimable_ticket_detail_case)(sla_case)
                 )
+                is_transfer_ui = bool(
+                    sla_case
+                    and await sync_to_async(is_transfer_ui_helper_case)(sla_case)
+                )
+                is_processing_handover = bool(
+                    sla_case
+                    and await sync_to_async(is_processing_handover_case)(sla_case)
+                )
                 if is_sla_detail:
                     effective_prompt = (effective_prompt or "") + OVERVIEW_SLA_DETAIL_EXECUTION_HINT
                     if nav_hint:
                         effective_prompt = effective_prompt + nav_hint
                 elif is_claimable:
                     effective_prompt = (effective_prompt or "") + CLAIMABLE_PENDING_EXECUTION_HINT
+                    if nav_hint:
+                        effective_prompt = effective_prompt + nav_hint
+                elif is_transfer_ui:
+                    effective_prompt = (effective_prompt or "") + TRANSFER_UI_EXECUTION_HINT
+                    if nav_hint:
+                        effective_prompt = effective_prompt + nav_hint
+                elif is_processing_handover:
+                    effective_prompt = (effective_prompt or "") + PROCESSING_HANDOVER_EXECUTION_HINT
                     if nav_hint:
                         effective_prompt = effective_prompt + nav_hint
 

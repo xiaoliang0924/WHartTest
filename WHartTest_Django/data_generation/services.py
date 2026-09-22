@@ -26,7 +26,7 @@ from ui_automation.models import UiPublicData
 from .exceptions import DataGenerationError
 from .models import DataGenerationPlan, DataGenerationRun
 from .template_resolver import resolve_template_steps
-from .templates import REF_ASSIGN_TICKET, get_template_by_key
+from .templates import REF_ASSIGN_TICKET, REF_CLAIM_TICKET, get_template_by_key
 from .sql_utils import execute_sql_step, extract_sql_result
 
 logger = logging.getLogger(__name__)
@@ -197,6 +197,43 @@ def _ticket_row_is_already_assigned(row: Dict[str, Any]) -> bool:
     if assignee in (None, '', 0):
         return False
     return status in {'pending_process', 'processing', 'claimed'}
+
+
+def _ticket_row_assignee_id(row: Dict[str, Any]) -> str:
+    assignee_obj = row.get('assignee') if isinstance(row.get('assignee'), dict) else {}
+    value = row.get('assigneeUserId')
+    if value in (None, '', 0):
+        value = assignee_obj.get('id')
+    return str(value).strip() if value not in (None, '', 0) else ''
+
+
+def _ticket_row_assignee_name(row: Dict[str, Any]) -> str:
+    assignee_obj = row.get('assignee') if isinstance(row.get('assignee'), dict) else {}
+    value = (
+        row.get('assigneeName')
+        or assignee_obj.get('name')
+        or assignee_obj.get('username')
+        or ''
+    )
+    return str(value).strip()
+
+
+def _assignee_matches_desired(
+    row: Dict[str, Any],
+    *,
+    desired_user_id: Any = None,
+    desired_name: Any = None,
+) -> bool:
+    """Whether the ticket is already assigned to the intended person."""
+    current_id = _ticket_row_assignee_id(row)
+    current_name = _ticket_row_assignee_name(row)
+    wanted_id = str(desired_user_id).strip() if desired_user_id not in (None, '', 0) else ''
+    wanted_name = str(desired_name or '').strip()
+    if wanted_id and current_id:
+        return wanted_id == current_id
+    if wanted_name and current_name:
+        return wanted_name == current_name or wanted_name in current_name or current_name in wanted_name
+    return False
 
 
 def _query_ticket_rows_for_plan(
@@ -556,11 +593,37 @@ class PlanExecutor:
             self.context['assigneeName'] = assignee_name
         self.context['ticketStatus'] = row.get('status') or 'pending_process'
 
+    def _desired_assign_target(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        step_variables = substitute_templates(step.get('variables') or {}, self.context)
+        if not isinstance(step_variables, dict):
+            step_variables = {}
+        return {
+            'assigneeUserId': step_variables.get('assigneeUserId', self.context.get('assigneeUserId')),
+            'assigneeName': step_variables.get('assigneeName', self.context.get('assigneeName')),
+        }
+
     def _maybe_skip_manual_assign_api_call(self, step: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not self._is_manual_assign_api_step(step):
             return None
         row = self._find_ticket_row_for_context()
         if row is None or not _ticket_row_is_already_assigned(row):
+            return None
+        desired = self._desired_assign_target(step)
+        # TYPE_A 创建后常被自动分给其他人；只有目标处理人一致时才能跳过手动分配，
+        # 否则登录账号与造数工单会对不上（如李亮登录却分给了张岩）。
+        if not _assignee_matches_desired(
+            row,
+            desired_user_id=desired.get('assigneeUserId'),
+            desired_name=desired.get('assigneeName'),
+        ):
+            logger.info(
+                'Keep manual assign API: ticket assigned to someone else '
+                'ticketNo=%s current=%s desired=%s/%s',
+                row.get('ticketNo') or self.context.get('ticketNo'),
+                _ticket_row_assignee_name(row) or _ticket_row_assignee_id(row),
+                desired.get('assigneeName'),
+                desired.get('assigneeUserId'),
+            )
             return None
         self._merge_assign_context_from_ticket_row(row)
         logger.info(
@@ -576,10 +639,743 @@ class PlanExecutor:
             'assigneeUserId': self.context.get('assigneeUserId'),
         }
 
+    def _lookup_user_login_username(
+        self,
+        *,
+        display_name: str,
+        environment: ApiEnvironment,
+        access_token: str,
+        preferred_role: Optional[str] = None,
+    ) -> str:
+        import requests
+
+        from projects.models import ProjectCredential
+
+        name = str(display_name or '').strip()
+        if not name:
+            raise DataGenerationError('缺少处理人姓名，无法查询登录账号')
+
+        # 项目凭据里 user_role 常填姓名（如张岩→802576），优先走本地映射。
+        credential = (
+            ProjectCredential.objects.filter(project_id=self.plan.project_id)
+            .exclude(username='')
+            .filter(user_role__iexact=name)
+            .first()
+        )
+        if credential is not None and str(credential.username or '').strip():
+            return str(credential.username).strip()
+
+        # transfer-candidates 的 role 必填且枚举有限；sales/空 role 会直接 400。
+        # TYPE_A 自动分配常见 assigneeRole=test（张岩）。
+        roles: list[str] = []
+        for role in (
+            preferred_role,
+            self.context.get('assigneeRole'),
+            'customer_service',
+            'product',
+            'test',
+        ):
+            normalized = str(role or '').strip()
+            if normalized and normalized not in roles:
+                roles.append(normalized)
+
+        last_error = None
+        for role in roles:
+            try:
+                response = requests.get(
+                    environment.base_url.rstrip('/') + '/api/users/transfer-candidates',
+                    headers={'Authorization': f'Bearer {access_token}'},
+                    params={
+                        'keyword': name,
+                        'role': role,
+                        'page': 1,
+                        'pageSize': 100,
+                    },
+                    verify=environment.verify_ssl,
+                    timeout=30,
+                )
+                if response.status_code >= 400:
+                    last_error = f'HTTP {response.status_code} role={role}'
+                    continue
+                payload = response.json()
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                continue
+            candidates = payload.get('data') if isinstance(payload, dict) else None
+            if not isinstance(candidates, list):
+                last_error = '返回格式无效'
+                continue
+            exact = [
+                row
+                for row in candidates
+                if isinstance(row, dict)
+                and (
+                    str(row.get('name') or '').strip() == name
+                    or str(row.get('username') or '').strip() == name
+                )
+            ]
+            if not exact:
+                continue
+            username = (
+                str(exact[0].get('username') or '').strip()
+                or str(exact[0].get('wecomUserId') or '').strip()
+            )
+            if username:
+                return username
+            last_error = f'处理人“{name}”缺少登录用户名'
+        detail = f'；详情: {last_error}' if last_error else ''
+        raise DataGenerationError(f'未找到处理人“{name}”的登录账号{detail}')
+
+    def _resolve_login_password_for_username(
+        self,
+        *,
+        username: str,
+        environment: ApiEnvironment,
+        fallback_password: str,
+        display_name: str = '',
+    ) -> List[str]:
+        """Return candidate passwords for a username (credential / self / fallback)."""
+        from projects.models import ProjectCredential
+
+        passwords: list[str] = []
+        user = str(username or '').strip()
+        name = str(display_name or '').strip()
+
+        def _add(value: Any) -> None:
+            text = str(value or '').strip()
+            if text and text not in passwords:
+                passwords.append(text)
+
+        if user:
+            for credential in ProjectCredential.objects.filter(
+                project_id=self.plan.project_id,
+            ).exclude(password='').filter(username__iexact=user):
+                _add(credential.password)
+        if name:
+            for credential in ProjectCredential.objects.filter(
+                project_id=self.plan.project_id,
+            ).exclude(password='').filter(user_role__iexact=name):
+                _add(credential.password)
+        # 业务侧常见「账号=密码」账号（如张岩 802576/802576）
+        _add(user)
+        env_variables = environment.get_all_variables()
+        if isinstance(env_variables, dict):
+            for key in ('assigneePassword', 'noCommonPassword', 'adminPassword'):
+                _add(env_variables.get(key))
+        _add(fallback_password)
+        return passwords
+
+    def _login_any_username(
+        self,
+        *,
+        usernames: List[str],
+        environment: ApiEnvironment,
+        fallback_password: str,
+        display_name: str = '',
+    ) -> tuple[str, str]:
+        errors: list[str] = []
+        for username in usernames:
+            passwords = self._resolve_login_password_for_username(
+                username=username,
+                environment=environment,
+                fallback_password=fallback_password,
+                display_name=display_name,
+            )
+            for password in passwords:
+                try:
+                    token = self._login_user_token(
+                        environment=environment,
+                        username=username,
+                        password=password,
+                    )
+                    return username, token
+                except DataGenerationError as exc:
+                    errors.append(f'{username}/{password[:2]}***: {exc}')
+        detail = '；'.join(errors[:4]) if errors else '无可用账号'
+        raise DataGenerationError(f'处理人登录失败（{detail}）')
+
+    def _lookup_user_login_candidates(
+        self,
+        *,
+        display_name: str,
+        environment: ApiEnvironment,
+        access_token: str,
+        preferred_role: Optional[str] = None,
+    ) -> List[str]:
+        """Return possible login usernames for a display name (credential + API)."""
+        import requests
+
+        from projects.models import ProjectCredential
+
+        name = str(display_name or '').strip()
+        usernames: list[str] = []
+        if not name:
+            return usernames
+
+        for credential in ProjectCredential.objects.filter(
+            project_id=self.plan.project_id,
+        ).exclude(username='').filter(user_role__iexact=name):
+            username = str(credential.username or '').strip()
+            if username and username not in usernames:
+                usernames.append(username)
+
+        # 环境变量里常见「通用处理人」账号（林业丰 / noCommonUsername）
+        env_vars = environment.get_all_variables() if environment is not None else {}
+        if isinstance(env_vars, dict):
+            common_user = str(env_vars.get('noCommonUsername') or '').strip()
+            common_name = str(
+                env_vars.get('noCommonName')
+                or env_vars.get('noCommonDisplayName')
+                or ''
+            ).strip()
+            if common_user and (
+                not common_name or common_name == name or name in ('林业丰', '林业务')
+            ):
+                if common_user not in usernames:
+                    usernames.append(common_user)
+
+        roles: list[str] = []
+        for role in (
+            preferred_role,
+            self.context.get('assigneeRole'),
+            'customer_service',
+            'product',
+            'test',
+        ):
+            normalized = str(role or '').strip()
+            if normalized and normalized not in roles:
+                roles.append(normalized)
+
+        for role in roles:
+            try:
+                response = requests.get(
+                    environment.base_url.rstrip('/') + '/api/users/transfer-candidates',
+                    headers={'Authorization': f'Bearer {access_token}'},
+                    params={
+                        'keyword': name,
+                        'role': role,
+                        'page': 1,
+                        'pageSize': 100,
+                    },
+                    verify=environment.verify_ssl,
+                    timeout=30,
+                )
+                if response.status_code >= 400:
+                    continue
+                payload = response.json()
+            except Exception:  # noqa: BLE001
+                continue
+            candidates = payload.get('data') if isinstance(payload, dict) else None
+            if not isinstance(candidates, list):
+                continue
+            for row in candidates:
+                if not isinstance(row, dict):
+                    continue
+                if (
+                    str(row.get('name') or '').strip() != name
+                    and str(row.get('username') or '').strip() != name
+                ):
+                    continue
+                username = (
+                    str(row.get('username') or '').strip()
+                    or str(row.get('wecomUserId') or '').strip()
+                )
+                if username and username not in usernames:
+                    usernames.append(username)
+        return usernames
+
+    def _adopt_existing_ticket_for_desired_assignee(
+        self,
+        desired: Dict[str, Any],
+        *,
+        statuses: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Reuse a ticket already owned by the desired person when reassign is impossible."""
+        env_id = self.default_environment_id
+        if not env_id:
+            return None
+        desired_name = str(desired.get('assigneeName') or '').strip()
+        desired_user_id = desired.get('assigneeUserId')
+        if not desired_name and desired_user_id in (None, '', 0):
+            return None
+
+        status_list = statuses or ['processing', 'pending_process']
+        for status in status_list:
+            query = f'/api/tickets?status={status}&page=1&pageSize=50'
+            if desired_user_id not in (None, '', 0):
+                query += f'&assigneeUserId={desired_user_id}'
+            rows = _query_ticket_rows_for_plan(
+                project_id=self.plan.project_id,
+                environment_id=int(env_id),
+                query_path=query,
+            )
+            for row in rows:
+                if not _assignee_matches_desired(
+                    row,
+                    desired_user_id=desired_user_id,
+                    desired_name=desired_name,
+                ):
+                    continue
+                # 移交审批按钮要求未提交审批。
+                approval = str(row.get('approvalStatus') or 'none').strip().lower()
+                if approval not in ('', 'none', 'null', 'nil'):
+                    continue
+                self._merge_assign_context_from_ticket_row(row)
+                ticket_no = row.get('ticketNo')
+                ticket_id = row.get('id') or row.get('ticketId')
+                if ticket_no:
+                    self.context['ticketNo'] = ticket_no
+                if ticket_id:
+                    self.context['ticketId'] = ticket_id
+                    self.context['processingTicketId'] = ticket_id
+                self.context['ticketStatus'] = row.get('status') or status
+                logger.info(
+                    'Adopt existing ticket for desired assignee ticketNo=%s status=%s assignee=%s',
+                    ticket_no,
+                    row.get('status'),
+                    desired_name or desired_user_id,
+                )
+                return {
+                    'skipped': True,
+                    'reason': 'adopted_existing_desired_assignee_ticket',
+                    'ticketNo': ticket_no,
+                    'assigneeUserId': self.context.get('assigneeUserId'),
+                    'ticketStatus': self.context.get('ticketStatus'),
+                }
+        return None
+
+    def _is_claim_api_step(self, step: Dict[str, Any]) -> bool:
+        step_name = str(step.get('name') or '').strip()
+        if step_name == '领取工单':
+            return True
+        if step.get('interface_ref') == REF_CLAIM_TICKET:
+            return True
+        interface_id = step.get('interface_id')
+        if not interface_id:
+            return False
+        interface = ApiInterface.objects.filter(
+            id=interface_id,
+            project_id=self.plan.project_id,
+        ).first()
+        return bool(interface and '领取' in str(interface.name or ''))
+
+    def _maybe_skip_claim_api_call(self, step: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not self._is_claim_api_step(step):
+            return None
+        row = self._find_ticket_row_for_context()
+        if row is None:
+            return None
+        status = str(row.get('status') or '').strip()
+        if status in {'processing', 'claimed'}:
+            self._merge_assign_context_from_ticket_row(row)
+            self.context['ticketStatus'] = status
+            logger.info(
+                'Skip claim API: ticket already %s ticketNo=%s',
+                status,
+                row.get('ticketNo') or self.context.get('ticketNo'),
+            )
+            return {
+                'skipped': True,
+                'reason': 'ticket_already_claimed_or_processing',
+                'ticketNo': row.get('ticketNo'),
+                'ticketStatus': status,
+            }
+        return None
+
+    def _login_user_token(
+        self,
+        *,
+        environment: ApiEnvironment,
+        username: str,
+        password: str,
+    ) -> str:
+        from api_environments.token_refresh import _login_for_token
+
+        try:
+            return _login_for_token(
+                environment.base_url,
+                username,
+                password,
+                verify_ssl=environment.verify_ssl,
+            )
+        except Exception as exc:
+            raise DataGenerationError(f'登录账号 {username} 失败: {exc}') from exc
+
+    def _reassign_if_wrong_assignee(self, step: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """When TYPE_A auto-assign lands on the wrong person, move it to the desired assignee.
+
+        1) cancel-assign + continue normal assign
+        2) else transfer from current holder -> desired, then accept as desired
+           (so the ticket becomes a normal pending ticket owned by the target)
+        """
+        if not self._is_manual_assign_api_step(step):
+            return None
+        row = self._find_ticket_row_for_context()
+        if row is None or not _ticket_row_is_already_assigned(row):
+            return None
+        desired = self._desired_assign_target(step)
+        if _assignee_matches_desired(
+            row,
+            desired_user_id=desired.get('assigneeUserId'),
+            desired_name=desired.get('assigneeName'),
+        ):
+            return None
+
+        ticket_id = row.get('id') or row.get('ticketId') or self.context.get('ticketId')
+        current_name = _ticket_row_assignee_name(row) or _ticket_row_assignee_id(row)
+        desired_label = desired.get('assigneeName') or desired.get('assigneeUserId')
+        desired_user_id = desired.get('assigneeUserId')
+        environment = self._resolve_environment(step)
+        if environment is None:
+            raise DataGenerationError('缺少 API 环境，无法将自动分配工单改派给目标处理人')
+        if not ticket_id:
+            raise DataGenerationError('工单已被其他人领取/分配，但缺少 ticketId，无法改派')
+        if desired_user_id in (None, '', 0):
+            raise DataGenerationError(f'缺少目标处理人 ID，无法从 {current_name} 改派给 {desired_label}')
+
+        # 1) Try cancel assign.
+        unassign_error = None
+        iface = ApiInterface.objects.filter(
+            project_id=self.plan.project_id,
+            name='取消分配工单',
+        ).first()
+        if iface is not None:
+            try:
+                self._run_named_ticket_mutation(
+                    interface=iface,
+                    environment=environment,
+                    ticket_id=ticket_id,
+                    step=step,
+                    trace_prefix='data-gen-unassign',
+                    force_empty_json_body=True,
+                )
+                logger.info(
+                    'Unassigned auto-assignee before reassign ticketId=%s from=%s to=%s',
+                    ticket_id,
+                    current_name,
+                    desired_label,
+                )
+                return None
+            except DataGenerationError as exc:
+                unassign_error = str(exc)
+                logger.warning('Cancel assign failed, will try transfer+accept: %s', exc)
+
+        # 2) Transfer current holder -> desired, then accept as desired.
+        from api_environments.token_refresh import refresh_environment_tokens
+
+        env_variables = environment.get_all_variables()
+        if not isinstance(env_variables, dict):
+            env_variables = {}
+        refreshed = refresh_environment_tokens(
+            base_url=environment.base_url,
+            variables=env_variables,
+            verify_ssl=environment.verify_ssl,
+            environment_id=environment.id,
+            persist=True,
+        )
+        if isinstance(refreshed, dict):
+            env_variables.update(refreshed)
+        access_token = str(
+            env_variables.get('accessToken') or env_variables.get('adminToken') or ''
+        ).strip()
+        if not access_token:
+            raise DataGenerationError('API 环境缺少管理员令牌，无法查询处理人登录账号')
+
+        default_password = str(
+            env_variables.get('assigneePassword')
+            or env_variables.get('noCommonPassword')
+            or '000000'
+        )
+        holder_role = str(row.get('assigneeRole') or '').strip() or None
+        try:
+            holder_usernames = self._lookup_user_login_candidates(
+                display_name=str(current_name),
+                environment=environment,
+                access_token=access_token,
+                preferred_role=holder_role,
+            )
+            if not holder_usernames:
+                raise DataGenerationError(f'未找到处理人“{current_name}”的登录账号')
+            _holder_username, holder_token = self._login_any_username(
+                usernames=holder_usernames,
+                environment=environment,
+                fallback_password=default_password,
+                display_name=str(current_name),
+            )
+        except DataGenerationError as exc:
+            adopted = self._adopt_existing_ticket_for_desired_assignee(desired)
+            if adopted is not None:
+                return adopted
+            raise DataGenerationError(
+                f'工单已被自动分配给 {current_name}，无法改派给 {desired_label}：{exc}'
+                + (f'；取消分配错误: {unassign_error}' if unassign_error else '')
+            ) from exc
+
+        transfer_iface = ApiInterface.objects.filter(
+            project_id=self.plan.project_id,
+            name='转派工单',
+        ).first()
+        if transfer_iface is None:
+            adopted = self._adopt_existing_ticket_for_desired_assignee(desired)
+            if adopted is not None:
+                return adopted
+            raise DataGenerationError(
+                f'工单已被自动分配给 {current_name}，项目未配置「转派工单」接口，无法改派给 {desired_label}'
+                + (f'；取消分配错误: {unassign_error}' if unassign_error else '')
+            )
+        try:
+            self._run_named_ticket_mutation(
+                interface=transfer_iface,
+                environment=environment,
+                ticket_id=ticket_id,
+                step=step,
+                trace_prefix='data-gen-reassign-transfer',
+                extra_variables={
+                    'assigneeToken': holder_token,
+                    'targetUserId': desired_user_id,
+                    'targetRole': self.context.get('assigneeRole') or 'customer_service',
+                    'reason': self.context.get('transferReason') or '自动化测试改派到目标处理人',
+                },
+            )
+        except DataGenerationError:
+            adopted = self._adopt_existing_ticket_for_desired_assignee(desired)
+            if adopted is not None:
+                return adopted
+            raise
+
+        # 业务侧转派可直接落处理人，无需再 accept；accept 常 404。
+        post_transfer = self._find_ticket_row_for_context()
+        if post_transfer is not None and _assignee_matches_desired(
+            post_transfer,
+            desired_user_id=desired_user_id,
+            desired_name=desired.get('assigneeName'),
+        ):
+            self.context['assigneeUserId'] = desired_user_id
+            if desired.get('assigneeName'):
+                self.context['assigneeName'] = desired.get('assigneeName')
+            self.context['processingTicketId'] = ticket_id
+            self.context.setdefault('ticketId', ticket_id)
+            self.context['ticketStatus'] = (
+                post_transfer.get('status') or 'pending_process'
+            )
+            logger.info(
+                'Reassigned via transfer (accept skipped) ticketId=%s from=%s to=%s',
+                ticket_id,
+                current_name,
+                desired_label,
+            )
+            return {
+                'skipped': True,
+                'reason': 'reassigned_via_transfer',
+                'ticketNo': post_transfer.get('ticketNo') or self.context.get('ticketNo'),
+                'assigneeUserId': desired_user_id,
+            }
+
+        desired_name = str(desired.get('assigneeName') or desired_label).strip()
+        try:
+            desired_usernames = self._lookup_user_login_candidates(
+                display_name=desired_name,
+                environment=environment,
+                access_token=access_token,
+                preferred_role=str(self.context.get('assigneeRole') or 'customer_service'),
+            )
+            if not desired_usernames:
+                raise DataGenerationError(f'未找到处理人“{desired_name}”的登录账号')
+            _desired_username, desired_token = self._login_any_username(
+                usernames=desired_usernames,
+                environment=environment,
+                fallback_password=default_password,
+                display_name=desired_name,
+            )
+        except DataGenerationError:
+            adopted = self._adopt_existing_ticket_for_desired_assignee(desired)
+            if adopted is not None:
+                return adopted
+            raise
+
+        accept_iface = ApiInterface.objects.filter(
+            project_id=self.plan.project_id,
+            name='接受转派',
+        ).first()
+        if accept_iface is None:
+            # 转派已成功且无 accept 接口时，仍可继续领取。
+            self.context['assigneeUserId'] = desired_user_id
+            if desired.get('assigneeName'):
+                self.context['assigneeName'] = desired.get('assigneeName')
+            self.context['processingTicketId'] = ticket_id
+            self.context.setdefault('ticketId', ticket_id)
+            self.context['ticketStatus'] = 'pending_process'
+            logger.info(
+                'Reassigned via transfer (no accept iface) ticketId=%s from=%s to=%s',
+                ticket_id,
+                current_name,
+                desired_label,
+            )
+            return {
+                'skipped': True,
+                'reason': 'reassigned_via_transfer_no_accept',
+                'ticketNo': row.get('ticketNo') or self.context.get('ticketNo'),
+                'assigneeUserId': desired_user_id,
+            }
+        try:
+            self._run_named_ticket_mutation(
+                interface=accept_iface,
+                environment=environment,
+                ticket_id=ticket_id,
+                step=step,
+                trace_prefix='data-gen-reassign-accept',
+                force_empty_json_body=True,
+                url_override=f'/api/tickets/{ticket_id}/transfer/accept',
+                extra_variables={'assigneeToken': desired_token, 'accessToken': desired_token},
+            )
+        except DataGenerationError as exc:
+            # accept 404/已处理：若工单已在目标人名下则视为成功。
+            verify_row = self._find_ticket_row_for_context()
+            if verify_row is not None and _assignee_matches_desired(
+                verify_row,
+                desired_user_id=desired_user_id,
+                desired_name=desired.get('assigneeName'),
+            ):
+                logger.warning(
+                    'Accept transfer failed but assignee already desired, continue: %s',
+                    exc,
+                )
+            else:
+                adopted = self._adopt_existing_ticket_for_desired_assignee(desired)
+                if adopted is not None:
+                    return adopted
+                raise
+
+        self.context['assigneeUserId'] = desired_user_id
+        if desired.get('assigneeName'):
+            self.context['assigneeName'] = desired.get('assigneeName')
+        self.context['processingTicketId'] = ticket_id
+        self.context.setdefault('ticketId', ticket_id)
+        self.context['ticketStatus'] = 'pending_process'
+        logger.info(
+            'Reassigned via transfer+accept ticketId=%s from=%s to=%s',
+            ticket_id,
+            current_name,
+            desired_label,
+        )
+        return {
+            'skipped': True,
+            'reason': 'reassigned_via_transfer_accept',
+            'ticketNo': row.get('ticketNo') or self.context.get('ticketNo'),
+            'assigneeUserId': desired_user_id,
+        }
+
+    def _run_named_ticket_mutation(
+        self,
+        *,
+        interface: ApiInterface,
+        environment: ApiEnvironment,
+        ticket_id: Any,
+        step: Dict[str, Any],
+        trace_prefix: str,
+        extra_variables: Optional[Dict[str, Any]] = None,
+        force_empty_json_body: bool = False,
+        url_override: Optional[str] = None,
+    ) -> None:
+        interface_data = interface.get_interface_data()
+        interface_data['project_id'] = self.plan.project_id
+        interface_data['trace_id'] = new_trace_id(trace_prefix)
+        interface_data['body_source'] = 'data_generation_plan'
+        _normalize_legacy_auth_header_placeholders(interface_data)
+        interface_data['base_url'] = environment.base_url or ''
+        interface_data['verify'] = environment.verify_ssl
+        if url_override:
+            interface_data['url'] = url_override
+            interface_data['path'] = url_override
+        if force_empty_json_body:
+            interface_data['body'] = {'type': 'none', 'content': ''}
+        # 接受转派等接口可能存了硬编码 JWT；改派时强制走变量令牌。
+        if extra_variables and (
+            extra_variables.get('assigneeToken') or extra_variables.get('accessToken')
+        ):
+            token_expr = (
+                '$assigneeToken'
+                if extra_variables.get('assigneeToken')
+                else '$accessToken'
+            )
+            headers = interface_data.get('headers')
+            if not isinstance(headers, list):
+                headers = []
+            replaced = False
+            new_headers = []
+            for item in headers:
+                if not isinstance(item, dict):
+                    continue
+                row = dict(item)
+                if str(row.get('key') or '').lower() == 'authorization':
+                    row['value'] = f'Bearer {token_expr}'
+                    row['enabled'] = True
+                    replaced = True
+                new_headers.append(row)
+            if not replaced:
+                new_headers.append(
+                    {
+                        'key': 'Authorization',
+                        'value': f'Bearer {token_expr}',
+                        'enabled': True,
+                    }
+                )
+            interface_data['headers'] = new_headers
+
+        runner = InterfaceRunner(interface_data)
+        runner.variables = {}
+        from api_environments.token_refresh import refresh_environment_tokens
+
+        env_variables = environment.get_all_variables()
+        if not isinstance(env_variables, dict):
+            env_variables = {}
+        refreshed_variables = refresh_environment_tokens(
+            base_url=environment.base_url,
+            variables=env_variables,
+            verify_ssl=environment.verify_ssl,
+            environment_id=environment.id,
+            persist=True,
+            force_token_vars=_collect_force_refresh_token_vars(interface_data),
+        )
+        if isinstance(refreshed_variables, dict):
+            runner.variables.update(refreshed_variables)
+        runner.variables.update(
+            {
+                k: v
+                for k, v in self.context.items()
+                if not isinstance(v, (dict, list))
+            }
+        )
+        if extra_variables:
+            runner.variables.update(extra_variables)
+        runner.variables['ticketId'] = ticket_id
+
+        runner.run_interface({})
+        response_data = runner.get_response()
+        status_code = response_data.get('status_code') or 0
+        if status_code >= 400 or not response_data.get('success'):
+            error_detail = (
+                (response_data.get('response') or {}).get('content')
+                or (response_data.get('response') or {}).get('error')
+                or response_data.get('error')
+                or f'HTTP {status_code}'
+            )
+            raise DataGenerationError(f'接口 [{interface.name}] 调用失败: {error_detail}')
+
+    def _unassign_ticket_before_reassign(self, step: Dict[str, Any]) -> None:
+        # Kept for compatibility; reassignment is handled by _reassign_if_wrong_assignee.
+        return
+
     def _run_api_call(self, step: Dict[str, Any]) -> Dict[str, Any]:
         skipped = self._maybe_skip_manual_assign_api_call(step)
         if skipped is not None:
             return skipped
+        reassigned = self._reassign_if_wrong_assignee(step)
+        if reassigned is not None:
+            return reassigned
+        claim_skipped = self._maybe_skip_claim_api_call(step)
+        if claim_skipped is not None:
+            return claim_skipped
 
         interface_id = step.get('interface_id')
         if not interface_id:
@@ -650,7 +1446,16 @@ class PlanExecutor:
             error_text = str(error_detail)
             if self._is_manual_assign_api_step(step) and 'TICKET_STATUS_INVALID' in error_text:
                 row = self._find_ticket_row_for_context()
-                if row is not None and _ticket_row_is_already_assigned(row):
+                desired = self._desired_assign_target(step)
+                if (
+                    row is not None
+                    and _ticket_row_is_already_assigned(row)
+                    and _assignee_matches_desired(
+                        row,
+                        desired_user_id=desired.get('assigneeUserId'),
+                        desired_name=desired.get('assigneeName'),
+                    )
+                ):
                     self._merge_assign_context_from_ticket_row(row)
                     logger.info(
                         'Treat assign API failure as success: ticket already assigned ticketNo=%s',
