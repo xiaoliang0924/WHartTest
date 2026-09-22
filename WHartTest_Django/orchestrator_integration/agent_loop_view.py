@@ -1670,6 +1670,41 @@ class AgentLoopStreamAPIView(View):
                         session_id=session_id,
                         reason=pre_data_result.block_message,
                     )
+
+                    # 造数失败时 agent/checkpointer 不会落消息；直接写入 ChatMessage，
+                    # 避免前端刷新历史后只剩本地用户气泡、助手内容空白。
+                    def _persist_pre_data_failure_messages() -> None:
+                        import uuid
+
+                        from langgraph_integration.models import ChatMessage
+
+                        ChatMessage.objects.get_or_create(
+                            session=chat_session,
+                            user=request.user,
+                            message_id=f"predata-fail-human-{session_id}",
+                            defaults={
+                                "role": "human",
+                                "content": display_message or user_message,
+                                "metadata": {"source": "pre_data_blocked"},
+                            },
+                        )
+                        ChatMessage.objects.update_or_create(
+                            session=chat_session,
+                            user=request.user,
+                            message_id=f"predata-fail-ai-{session_id}",
+                            defaults={
+                                "role": "ai",
+                                "content": terminal_message,
+                                "metadata": {
+                                    "source": "pre_data_blocked",
+                                    "run_record_id": getattr(record, "id", None),
+                                    "uuid": str(uuid.uuid4()),
+                                },
+                            },
+                        )
+
+                    await sync_to_async(_persist_pre_data_failure_messages)()
+
                     yield create_sse_data(
                         {
                             "type": "start",
