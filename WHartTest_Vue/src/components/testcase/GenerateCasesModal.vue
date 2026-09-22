@@ -631,6 +631,11 @@ const fetchPrompts = async () => {
     const response = await getUserPrompts({ prompt_type: 'general' });
     if (response.status === 'success') {
        prompts.value = toArray<UserPrompt>((response.data as UserPromptListResponseData)?.results ?? response.data);
+       const smartPrompt = prompts.value.find((prompt) =>
+         ['智能用例生成', 'Intelligent Test Case Generation'].includes(prompt.name)
+       );
+       const defaultPrompt = prompts.value.find((prompt) => prompt.is_default);
+       formState.promptId = smartPrompt?.id ?? defaultPrompt?.id ?? prompts.value[0]?.id ?? null;
     } else {
       Message.error(response.message || pageText.value.loadPromptsFailed);
       prompts.value = [];

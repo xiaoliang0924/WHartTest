@@ -10,17 +10,25 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import { useThemeStore } from '@/store/themeStore'
 import TestCaseReports from '../components/testcases/TestCaseReports.vue'
 
 const props = defineProps<{ id: string | number }>()
 const router = useRouter()
+const route = useRoute()
 const themeStore = useThemeStore()
 const isDarkTheme = computed(() => themeStore.isBlack)
 
+const buildTestCasesBackQuery = (): LocationQueryRaw => {
+  const query: LocationQueryRaw = { ...route.query, tab: 'testcases' }
+  delete query.returnTo
+  delete query.testcaseId
+  return query
+}
+
 const handleBack = () => {
-  router.push({ path: '/api-testing', query: { tab: 'testcases' } })
+  router.push({ path: '/api-testing', query: buildTestCasesBackQuery() })
 }
 
 const handleViewReport = (report: { id: number }) => {
@@ -28,6 +36,7 @@ const handleViewReport = (report: { id: number }) => {
     name: 'ApiTestReportDetail',
     params: { id: report.id },
     query: {
+      ...route.query,
       tab: 'testcases',
       returnTo: 'testcaseReports',
       testcaseId: String(props.id)

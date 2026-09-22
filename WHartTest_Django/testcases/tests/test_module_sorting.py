@@ -78,6 +78,8 @@ class TestCaseModuleSortingTests(APITestCase):
 
         self.assertEqual(self.child1_2.order, 1)
         self.assertEqual(self.child1_1.order, 2)
+        self.assertEqual(self.child1_2.sort_order, 1)
+        self.assertEqual(self.child1_1.sort_order, 2)
         self.assertEqual(self.child1_2.parent, self.root1)
         self.assertEqual(self.child1_1.parent, self.root1)
 
@@ -98,6 +100,22 @@ class TestCaseModuleSortingTests(APITestCase):
 
         self.assertEqual(self.child1_2.order, 1)
         self.assertEqual(self.child1_1.order, 2)
+        self.assertEqual(self.child1_2.sort_order, 1)
+        self.assertEqual(self.child1_1.sort_order, 2)
+
+    def test_move_api_direction_updates_both_order_fields(self):
+        """The legacy up/down controls remain compatible with v2.5 ordering."""
+        url = f'/api/projects/{self.project.id}/testcase-modules/{self.child1_2.id}/move/'
+
+        response = self.client.post(url, {'direction': 'up'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.child1_1.refresh_from_db()
+        self.child1_2.refresh_from_db()
+        self.assertEqual(self.child1_2.order, 1)
+        self.assertEqual(self.child1_2.sort_order, 1)
+        self.assertEqual(self.child1_1.order, 2)
+        self.assertEqual(self.child1_1.sort_order, 2)
 
     def test_move_api_into_parent(self):
         """测试通过 API 移动模块到其他父模块下"""
@@ -113,6 +131,7 @@ class TestCaseModuleSortingTests(APITestCase):
         self.child1_2.refresh_from_db()
         self.assertEqual(self.child1_2.parent, self.root2)
         self.assertEqual(self.child1_2.level, 2)
+        self.assertEqual(self.child1_2.order, self.child1_2.sort_order)
 
     def test_move_api_circular_reference_protection(self):
         """测试循环引用保护：禁止移动到自己的子模块下"""
@@ -127,17 +146,13 @@ class TestCaseModuleSortingTests(APITestCase):
         self.assertIn("无法移动模块到自身或其子模块下", response.data['error'])
 
     def test_move_api_depth_limit_protection(self):
-        """测试5级深度保护"""
-        # Create a deep tree structure to reach level 5
-        # root1 (level 1) -> child1_1 (2) -> child1_1_1 (3)
+        """测试6级深度保护"""
+        # root1 (1) -> child1_1 (2) -> child1_1_1 (3)
         child4 = TestCaseModule.objects.create(project=self.project, name='Child 4', parent=self.child1_1_1, creator=self.user) # level 4
         child5 = TestCaseModule.objects.create(project=self.project, name='Child 5', parent=child4, creator=self.user) # level 5
+        TestCaseModule.objects.create(project=self.project, name='Child 6', parent=child5, creator=self.user) # level 6
 
-        # Try to move child5 under a new parent at level 5 (which would exceed 5)
-        # Or try to move child4 under root2 (target is root2 level 1, child4 has subtree depth 2. Level of child4 under root2 would be 2, deep child5 would be 3. That is OK).
-        # But if we try to move child4 under child5 (cannot do circular).
-        # Let's try to move root1 (depth 5) under root2 (level 1).
-        # Moved root1 level would become 2. Child 5 level would become 6. That should be blocked!
+        # Move root1 (subtree depth 6) under root2 (level 1) would make deepest child level 7.
         url = f'/api/projects/{self.project.id}/testcase-modules/{self.root1.id}/move/'
         data = {
             'target_id': self.root2.id,
@@ -146,4 +161,4 @@ class TestCaseModuleSortingTests(APITestCase):
 
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("将超过5级限制", response.data['error'])
+        self.assertIn("将超过6级限制", response.data['error'])

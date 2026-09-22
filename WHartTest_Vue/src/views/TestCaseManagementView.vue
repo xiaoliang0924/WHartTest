@@ -22,11 +22,12 @@
           :module-tree="moduleTreeForForm"
           @add-test-case="showAddTestCaseForm"
           @generate-test-cases="showGenerateCasesModal"
-          @open-task-queue="isExecutionQueueVisible = true"
           @edit-test-case="showEditTestCaseForm"
           @view-test-case="showViewTestCaseDetail"
           @execute-test-case="handleExecuteTestCase"
+          @view-execution-report="handleViewExecutionReport"
           @test-case-deleted="handleTestCaseDeleted"
+@test-cases-moved="handleTestCaseDeleted"
           @test-case-copied="handleTestCaseCopied"
           @module-filter-change="handleModuleSelected"
           @request-optimization="handleRequestOptimization"
@@ -46,7 +47,6 @@
           @view-case="showViewTestCaseDetail"
           @update-case-module="handleMindmapUpdateCaseModule"
           @update-module-parent="handleMindmapUpdateModuleParent"
-          @move-module="handleMindmapMoveModule"
           @rename-case="handleMindmapRenameCase"
           @rename-module="handleMindmapRenameModule"
           @create-module="handleMindmapCreateModule"
@@ -102,24 +102,21 @@
       :test-case-module-tree="moduleTreeForForm"
       @submit="handleGenerateCasesSubmit"
     />
-    
+
     <ExecuteTestCaseModal
       v-model:visible="isExecuteModalVisible"
       :test-case="pendingExecuteTestCase"
       @confirm="handleExecuteConfirm"
     />
 
-    <AiDiagnosisDrawer
-      v-model:visible="isAiDiagnosisVisible"
-      :test-case="currentDiagnosingCase"
-      :diagnosis="aiDiagnosisResult"
-      :loading="loadingDiagnosis"
-      @healing-applied="handleHealingApplied"
-    />
-
-    <TestCaseExecutionQueueDrawer
-      v-model="isExecutionQueueVisible"
-      @view-diagnosis="handleViewDiagnosisFromQueue"
+    <TestCaseExecutionResultDrawer
+      v-model:visible="isExecutionResultDrawerVisible"
+      :project-id="currentProjectId"
+      :test-case="executionResultTestCase"
+      :session-id="executionSessionId"
+      :preparing="executionPreparing"
+      ref="executionResultDrawerRef"
+      @finished="handleExecutionFinished"
     />
 
     <OptimizationSuggestionModal
@@ -135,13 +132,12 @@ import { h, ref, computed, watch, onMounted, inject } from 'vue';
 import { useRouter } from 'vue-router';
 import { useProjectStore } from '@/store/projectStore';
 import { useAppI18n } from '@/composables/useAppI18n';
-import type { TestCase, AiDiagnosisResult } from '@/services/testcaseService';
+import type { TestCase } from '@/services/testcaseService';
 import type { TestCaseModule } from '@/services/testcaseModuleService';
 import type { TreeNodeData } from '@arco-design/web-vue';
-import { 
+import {
   getTestCaseModules,
   updateTestCaseModule,
-  moveTestCaseModule,
   createTestCaseModule,
   deleteTestCaseModule
 } from '@/services/testcaseModuleService';
@@ -154,33 +150,26 @@ import TestCaseDetail from '@/components/testcase/TestCaseDetail.vue';
 import TestCaseMindmap from '@/components/testcase/TestCaseMindmap.vue';
 import GenerateCasesModal from '@/components/testcase/GenerateCasesModal.vue';
 import ExecuteTestCaseModal from '@/components/testcase/ExecuteTestCaseModal.vue';
-import type { ExecuteConfirmOptions } from '@/components/testcase/ExecuteTestCaseModal.vue';
-import AiDiagnosisDrawer from '@/components/testcase/AiDiagnosisDrawer.vue';
-import TestCaseExecutionQueueDrawer from '@/components/testcase/TestCaseExecutionQueueDrawer.vue';
+import TestCaseExecutionResultDrawer from '@/components/testcase/TestCaseExecutionResultDrawer.vue';
 import OptimizationSuggestionModal from '@/components/testcase/OptimizationSuggestionModal.vue';
 import {
-  useTestCaseExecutionQueue,
-  type ExecutionTask,
-} from '@/composables/useTestCaseExecutionQueue';
-import {
-  sendChatMessageStream,
-  activeStreams,
+  sendChatMessageStream
 } from '@/features/langgraph/services/chatService';
+import {
+  openLangGraphChatInCurrentPage,
+  openLangGraphChatInNewWindow,
+} from '@/features/langgraph/utils/openLangGraphChat';
+import { storeExecCaseSessionContext } from '@/features/langgraph/utils/execCaseSessionBridge';
+import { getUserPrompts } from '@/features/prompts/services/promptService';
 import type { ChatRequest } from '@/features/langgraph/types/chat';
-import { 
+import {
   updateTestCaseReviewStatus,
   getTestCaseList,
   updateTestCase,
   createTestCase,
-  getTestCaseDetail,
   deleteTestCase,
-  bindUiTestCase,
-  diagnoseTestCaseFailure,
-  applyHealingSuggestion,
+  getLatestTestCaseRunRecord
 } from '@/services/testcaseService';
-import { uiWebSocket, UiSocketEnum } from '@/features/ui-automation/services/websocket';
-import { envConfigApi, actuatorApi } from '@/features/ui-automation/api';
-import { extractResponseData } from '@/features/ui-automation/types';
 
 // 测试类型提示词映射
 const TEST_TYPE_PROMPTS: Record<string, string> = {
@@ -214,6 +203,79 @@ const TEST_TYPE_PROMPTS: Record<string, string> = {
 - 原则：确保用户在不同环境下的体验一致性`
 };
 
+const CASE_STEP_DETAIL_PROMPT = `【前置条件与步骤粒度（必须遵守）】
+前置条件必须写成编号列表，至少包含：
+1. 使用哪个账号登录：姓名/用户名/密码，以及系统完整 URL
+2. 需要准备的业务数据与状态（例如：存在状态为“待处理”的工单，当前处理人为当前登录用户）
+3. 如涉及转派、通知、权限对比，必须写明其他账号
+
+【登录不要拆步】
+- 需登录的功能/展示/权限用例：前置条件写清账号，步骤第 1 步再写一次登录
+- 登录只能是 1 步，例如：“使用账号17670400361/000000登录系统(URL)” / “登录成功进入系统”
+- 禁止拆成：打开登录地址、输入用户名、输入密码、点击登录
+
+业务步骤禁止写成“进入页面 / 查看按钮 / 尝试访问”这类概括句。
+每一步必须是一个可单独执行的界面或接口操作，并且必须有可判定的预期结果。
+
+业务步骤最低拆分（登录后算起，一条用例原则上不少于 3 步）：
+- 进入具体业务页面（写清菜单路径）
+- 点击具体按钮 / 打开具体弹窗
+- 填写或选择具体字段（写字段名和填什么；空值必须写“保持为空”）
+- 点击确认 / 提交
+- 断言提示语、状态、列表是否出现该数据
+
+禁止示例：
+- 把登录拆成 4 步（打开URL、输入账号、输入密码、点击登录）
+- 进入工单系统流程任务页面 / 页面正常加载
+- 查看一键绑定按钮 / 按钮不可见或禁用
+
+正确示例：
+前置条件：
+1. 使用李亮账号(admin/admin123)登录系统(http://test.bot.by56.com/work-order/login)
+2. 存在状态为“待处理”的工单，当前处理人为当前登录用户
+步骤：
+1. 在左侧进入该工单详情页，点击“转派” / 弹出转派弹窗
+2. 选择转派目标 / 选择成功
+3. 转派原因保持为空 / 交接说明字段为空
+4. 点击确认转派 / 系统提示“请填写：转派原因”，转派失败
+5. 使用目标账号登录后查看“我的工单” / 该工单不出现在列表中`;
+
+const EXECUTION_RESULT_REPORT = `【结束报告（必须遵守）】
+无论通过、失败，还是脚本报错无法继续，结束前必须在对话中输出完整报告，禁止沉默结束：
+
+## 测试执行结果: 通过/不通过
+
+### 基本信息
+- 测试用例ID:
+- 名称:
+- 优先级:
+
+### 执行过程与结果
+| 步骤 | 操作 | 结果 | 状态 |
+|------|------|------|------|
+| 1 | … | 符合预期 / 失败原因 | ✅ 通过 / ❌ 失败 / ⏭ 未执行 |
+
+### 问题分析
+下面三行必须逐行写出，不能省略、不能压缩成一句「无失败步骤」：
+- 失败步骤：全部通过写「无」，否则写「步骤N」
+- 失败原因：全部通过写「各步骤均满足预期，功能符合需求。」，否则写清原因
+- 建议：全部通过写「无需处理。」，否则写具体建议
+
+### 结论
+只写一句话，套用固定句式：
+- 全部通过：本次测试执行全部 N 个步骤均通过，测试通过。
+- 有失败：本次测试执行在步骤 N 失败，未完成全部步骤，测试不通过。
+未执行的步骤必须标「未执行」，不得标通过。`;
+
+const EXECUTION_STEP_DISCIPLINE = `【步骤执行纪律（必须遵守）】
+- 严格按用例步骤编号逐步执行，禁止跳步、合并或省略。
+- 筛选步只做选条件、查询、验收、截图；不要在同一步点进详情。
+- 普通下拉用 selectFormDropdownOption；选完必须看筛选框显示的值，禁止用列表里的「待处理」文案代替已筛选。弹窗多选用 selectDialogMultiSelect(page, 字段标签, 选项名)；禁止 getByText 点表格里的状态文字。
+- 断言区块/字段用 helpers.assertPageShows(page, ['基本信息', '工单类型'])；禁止 getByText('工单类型*')，必填星号是独立节点。
+- 筛选未生效必须判定该步失败并停止，不得虚报通过。
+- 每步只用 screenshotCaseStep(page, N)，系统自动上传；禁止 upload_screenshot。
+- ${EXECUTION_RESULT_REPORT}`;
+
 // 根据测试类型列表生成提示词片段
 const getTestTypePrompt = (testTypes: string[]): string => {
   if (!testTypes || testTypes.length === 0) {
@@ -246,10 +308,12 @@ const taskText = computed(() => (
         knowledgeGenerationStarted: 'Knowledge generation started',
         knowledgeGenerationStartedContent: 'Knowledge-based case generation task has started processing in the background.',
         viewGenerationProgress: 'Click to view generation progress',
-        executionStarted: 'Execution started',
-        executionStartedContent: 'Case execution task has started processing in the background.',
-        executionStartedWithGenerationContent: 'Case execution task has started processing in the background. UI automation case generation will continue after execution is completed.',
+        executionStarted: 'Execution started (preparing test data automatically)',
+        executionStartedContent: 'Preparing prerequisite data and starting case execution.',
+        executionStartedWithGenerationContent: 'Preparing prerequisite data and starting case execution. UI automation generation will continue after execution completes.',
         viewExecutionProgress: 'Click to view execution progress',
+        openChatCurrentPage: 'Open on this page',
+        openChatNewWindow: 'Open in new window',
         optimizationStarted: 'Optimization started',
         optimizationStartedContent: 'Case optimization task has started processing in the background.',
         viewOptimizationProgress: 'Click to view optimization progress',
@@ -268,10 +332,12 @@ const taskText = computed(() => (
         knowledgeGenerationStarted: '知识生成已开始',
         knowledgeGenerationStartedContent: '用例知识生成任务已在后台开始处理。',
         viewGenerationProgress: '点此查看生成过程',
-        executionStarted: '执行已开始',
-        executionStartedContent: '测试用例执行任务已在后台开始处理。',
-        executionStartedWithGenerationContent: '测试用例执行任务已在后台开始处理，执行完成后将继续生成 UI 自动化用例。',
+        executionStarted: '执行已开始（系统将自动准备测试数据）',
+        executionStartedContent: '正在准备前置数据并启动用例执行，请稍候。',
+        executionStartedWithGenerationContent: '正在准备前置数据并启动用例执行，完成后将继续生成 UI 自动化用例。',
         viewExecutionProgress: '点此查看执行进度',
+        openChatCurrentPage: '当前页打开',
+        openChatNewWindow: '打开新窗口',
         optimizationStarted: '优化已开始',
         optimizationStartedContent: '用例优化任务已在后台开始处理。',
         viewOptimizationProgress: '点此查看优化过程',
@@ -289,21 +355,15 @@ const currentEditingTestCaseId = ref<number | null>(null);
 const currentViewingTestCaseId = ref<number | null>(null);
 const isGenerateCasesModalVisible = ref(false);
 const isExecuteModalVisible = ref(false);
-const isExecutionQueueVisible = ref(false);
+const isExecutionResultDrawerVisible = ref(false);
+const executionResultTestCase = ref<TestCase | null>(null);
+const executionSessionId = ref<string | null>(null);
+const executionPreparing = ref(false);
+const executionResultDrawerRef = ref<InstanceType<typeof TestCaseExecutionResultDrawer> | null>(null);
 const isOptimizationModalVisible = ref(false);
 const pendingExecuteTestCase = ref<TestCase | null>(null);
 const pendingOptimizationTestCase = ref<TestCase | null>(null);
 const testCaseIdsForNavigation = ref<number[]>([]); // 用于编辑页面导航的用例ID列表
-
-const { addTask, updateTask, addStepLog, finishTask } = useTestCaseExecutionQueue();
-
-const reviewSubagentInstruction = `
-【生成后复核要求】
-- 在保存、补全或优化测试用例前，优先调用项目子代理“功能测试用例审批”进行审查。
-- 审查重点包括：是否符合需求文档、是否覆盖真实业务场景、步骤与预期结果是否合理可执行、是否存在臆造或遗漏。
-- 如果审查结论为“需修改”或“不合理”，必须先修订，再调用保存或更新工具。
-- 如果当前运行时未注入该子代理，则你必须按同样标准自行复核，并在最终说明中明确指出本次未能调用子代理审查。
-`.trim();
 
 const modulePanelRef = ref<InstanceType<typeof ModuleManagementPanel> | null>(null);
 const testCaseListRef = ref<InstanceType<typeof TestCaseList> | null>(null);
@@ -312,64 +372,254 @@ const testCaseListRef = ref<InstanceType<typeof TestCaseList> | null>(null);
 const allModules = ref<TestCaseModule[]>([]);
 const moduleTreeForForm = ref<TreeNodeData[]>([]); // 用于表单的模块树
 
+const extractExecutionFailReason = (summary?: string) => {
+  if (!summary) {
+    return isEnglish.value
+      ? 'The case did not pass. Open the result drawer for details.'
+      : '用例未通过，请查看右侧执行结果了解失败步骤和原因。';
+  }
+  const reasonMatch = summary.match(/失败原因[:：]\s*([\s\S]+?)(?:\n\s*\n|###|结论|$)/);
+  const text = (reasonMatch?.[1] || summary).replace(/[#|*`-]/g, ' ').replace(/\s+/g, ' ').trim();
+  return text || (isEnglish.value ? 'The case did not pass.' : '用例未通过，请查看执行结果。');
+};
+
+const notifyExecutionOutcome = async (
+  caseId: number,
+  sessionId: string,
+  payload?: Record<string, unknown>,
+) => {
+  const eventRun = payload?.test_case_run;
+  const eventResult = eventRun && typeof eventRun === 'object'
+    ? eventRun as Record<string, unknown>
+    : null;
+  let status = typeof eventResult?.status === 'string' ? eventResult.status : '';
+  let summary = typeof eventResult?.summary === 'string' ? eventResult.summary : '';
+  if (currentProjectId.value && !status) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await getLatestTestCaseRunRecord(currentProjectId.value, caseId, sessionId);
+      if (response.success && response.data?.status && response.data.status !== 'running') {
+        status = response.data.status;
+        summary = response.data.summary || '';
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+  }
+
+  if (status === 'fail' || status === 'error') {
+    const preDataFailed = summary.startsWith('测试数据准备失败');
+    let failNotificationReturn: { close?: () => void } | undefined;
+    failNotificationReturn = Notification.error({
+      title: preDataFailed
+        ? (isEnglish.value ? 'Test data preparation failed' : '测试数据准备失败，未执行用例步骤')
+        : (isEnglish.value ? 'Case execution failed' : '用例执行失败'),
+      // 完整保留失败原因；长文本在固定高度区域内滚动，避免通知无限撑高或被截断。
+      content: () => h(
+        'div',
+        {
+          style: 'max-width: 520px; max-height: 220px; overflow-y: auto; overflow-wrap: anywhere; line-height: 1.55; padding-right: 4px;',
+        },
+        extractExecutionFailReason(summary),
+      ),
+      // 失败原因较长时保留足够阅读时间，同时避免提示长期遮挡执行结果。
+      duration: 10000,
+      closable: true,
+      id: `exec-case-fail-${caseId}`,
+      footer: () => h(
+        'div',
+        { style: 'display: flex; justify-content: flex-end; margin-top: 8px;' },
+        [
+          h(
+            'a',
+            {
+              href: 'javascript:;',
+              style: EXEC_CASE_LINK_STYLE,
+              onClick: () => failNotificationReturn?.close?.(),
+            },
+            isEnglish.value ? 'Close' : '关闭',
+          ),
+        ],
+      ),
+    });
+    return;
+  }
+  if (status === 'pass') {
+    Message.success(isEnglish.value ? 'Case passed. See result drawer.' : '用例执行通过，请查看右侧执行结果。');
+    return;
+  }
+  Message.info(isEnglish.value ? 'Execution finished. See result drawer.' : '用例执行已结束，请查看右侧执行结果。');
+};
+
+const EXECUTION_PENDING_NOTIFICATION_ID = 'exec-case-pending';
+const EXEC_CASE_LINK_STYLE = 'color: rgb(var(--primary-6)); cursor: pointer; font-size: 13px;';
+
+const resolveExecCaseSessionId = (): string | null => {
+  const sessionId = executionSessionId.value;
+  if (typeof sessionId === 'string' && sessionId.trim()) {
+    return sessionId.trim();
+  }
+  // 勿回退 langgraph_session_id：那是 LLM 页上次打开的会话，会导致「打开新窗口」进旧对话。
+  return null;
+};
+
+const openExecCaseChatInCurrentPage = (close?: () => void) => {
+  const sessionId = resolveExecCaseSessionId();
+  if (!sessionId) {
+    Message.info(isEnglish.value ? 'Preparing execution, please wait...' : '正在准备前置数据，请稍候...');
+    return;
+  }
+  openLangGraphChatInCurrentPage(router, sessionId, currentProjectId.value);
+  close?.();
+};
+
+const openExecCaseChatInNewWindow = (close?: () => void) => {
+  const sessionId = resolveExecCaseSessionId();
+  if (!sessionId) {
+    Message.info(isEnglish.value ? 'Preparing execution, please wait...' : '正在准备前置数据，请稍候...');
+    return;
+  }
+  openLangGraphChatInNewWindow(router, sessionId, currentProjectId.value);
+  close?.();
+};
+
+const renderExecCaseNotificationFooter = (close?: () => void) => () => h(
+  'div',
+  { style: 'display:flex; justify-content:flex-end; gap:16px; margin-top:12px;' },
+  [
+    h(
+      'a',
+      {
+        href: 'javascript:;',
+        style: EXEC_CASE_LINK_STYLE,
+        onClick: () => openExecCaseChatInCurrentPage(close),
+      },
+      taskText.value.openChatCurrentPage,
+    ),
+    h(
+      'a',
+      {
+        href: 'javascript:;',
+        style: EXEC_CASE_LINK_STYLE,
+        onClick: () => openExecCaseChatInNewWindow(close),
+      },
+      taskText.value.openChatNewWindow,
+    ),
+  ],
+);
+
+const showExecCaseStartedNotification = (content: string) => {
+  let notificationReturn: { close?: () => void } | undefined;
+  notificationReturn = Notification.info({
+    id: EXECUTION_PENDING_NOTIFICATION_ID,
+    title: taskText.value.executionStarted,
+    content,
+    duration: 0,
+    footer: renderExecCaseNotificationFooter(() => notificationReturn?.close?.()),
+  });
+};
+
+const showExecutionProgressNotification = (
+  sessionId: string,
+  notificationTitle: string,
+  notificationContent: string,
+  notificationIdPrefix: string,
+  footerLinkText: string,
+  dualChatLinks = false,
+) => {
+  if (dualChatLinks) {
+    // 用例执行场景下，「执行已开始」占位通知与这条进度通知讲的是同一件事
+    // （标题、内容、底部链接都相同）。这里复用占位通知的 id，让 arco 原地更新，
+    // 而不是「先 remove 旧的、再新建一条」，否则右上角会出现同标题通知弹出两次。
+    let notificationReturn: { close?: () => void } | undefined;
+    notificationReturn = Notification.info({
+      id: EXECUTION_PENDING_NOTIFICATION_ID,
+      title: notificationTitle,
+      content: notificationContent,
+      duration: 0,
+      footer: renderExecCaseNotificationFooter(() => notificationReturn?.close?.()),
+    });
+    return;
+  }
+
+  Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
+
+  const notificationReturn = Notification.info({
+    title: notificationTitle,
+    content: notificationContent,
+    footer: () => h(
+      'div',
+      { style: 'text-align: right; margin-top: 12px;' },
+      [
+        h(
+          'a',
+          {
+            href: 'javascript:;',
+            style: EXEC_CASE_LINK_STYLE,
+            onClick: () => {
+              openLangGraphChatInNewWindow(
+                router,
+                sessionId,
+                currentProjectId.value,
+              );
+              notificationReturn?.close();
+            },
+          },
+          footerLinkText,
+        ),
+      ],
+    ),
+    duration: 0,
+    id: `${notificationIdPrefix}-${sessionId}`,
+  });
+};
+
 const startAutomationTask = (
   requestData: ChatRequest,
   notificationTitle: string,
   notificationContent: string,
   notificationIdPrefix: string,
   footerLinkText: string,
-  onStarted?: (sessionId: string) => void
+  streamHooks?: {
+    onStarted?: (sessionId: string) => void;
+    onComplete?: (sessionId: string, payload?: Record<string, unknown>) => void;
+    onError?: (sessionId: string, message: string) => void;
+  }
 ) => {
   sendChatMessageStream(
     requestData,
     (sessionId) => {
       localStorage.setItem('langgraph_session_id', sessionId);
+      streamHooks?.onStarted?.(sessionId);
 
-      if (onStarted) {
-        onStarted(sessionId);
-      }
-
-      // 保存提示词ID，使LangGraphChatView能恢复选中状态
       if (requestData.prompt_id) {
         localStorage.setItem('wharttest_selected_prompt_id', String(requestData.prompt_id));
       }
 
-      // 保存知识库设置，使LangGraphChatView能恢复选中状态
       const knowledgeSettings = {
         useKnowledgeBase: requestData.use_knowledge_base || false,
         selectedKnowledgeBaseId: requestData.knowledge_base_id || null,
-        similarityThreshold: 0.3, // 默认值
-        topK: 5 // 默认值
+        similarityThreshold: 0.3,
+        topK: 5,
       };
       localStorage.setItem('langgraph_knowledge_settings', JSON.stringify(knowledgeSettings));
 
-      const notificationReturn = Notification.info({
-        title: notificationTitle,
-        content: notificationContent,
-        footer: () => h(
-          'div',
-          {
-            style: 'text-align: right; margin-top: 12px;',
-          },
-          [
-            h(
-              'a',
-              {
-                href: 'javascript:;',
-                onClick: () => {
-                  router.push({ name: 'LangGraphChat' });
-                  if (notificationReturn) {
-                    notificationReturn.close();
-                  }
-                },
-              },
-              footerLinkText
-            ),
-          ]
-        ),
-        duration: 10000,
-        id: `${notificationIdPrefix}-${sessionId}`,
-      });
+      showExecutionProgressNotification(
+        sessionId,
+        notificationTitle,
+        notificationContent,
+        notificationIdPrefix,
+        footerLinkText,
+        notificationIdPrefix === 'exec-case',
+      );
+    },
+    undefined,
+    {
+      onComplete: (sessionId, payload) => {
+        streamHooks?.onComplete?.(sessionId, payload);
+      },
+      onError: (sessionId, message) => {
+        streamHooks?.onError?.(sessionId, message);
+      },
     }
   );
 };
@@ -418,12 +668,9 @@ const handleModuleSelected = (moduleId: number | null) => {
 };
 
 const handleModuleUpdated = () => {
-  // 模块更新后，可能需要刷新模块面板自身（如果它没有自动刷新的话）
-  // modulePanelRef.value?.refreshModules(); // 假设 ModuleManagementPanel 有此方法
-  // 同时刷新模块数据给表单用
+  modulePanelRef.value?.refreshModules();
+  testCaseListRef.value?.refreshTestCases();
   fetchAllModulesForForm();
-  // 如果用例列表依赖模块信息（比如显示模块名），也可能需要刷新用例列表
-  // 如需强制刷新用例列表，可在此调用列表刷新方法。
 };
 
 const showAddTestCaseForm = () => {
@@ -431,9 +678,9 @@ const showAddTestCaseForm = () => {
   viewMode.value = 'add';
 };
 
-const showEditTestCaseForm = async (testCaseOrId: TestCase | number) => {
+const showEditTestCaseForm = (testCaseOrId: TestCase | number) => {
   // 先获取当前筛选后的用例ID列表用于导航（在切换视图之前获取）
-  const ids = await testCaseListRef.value?.getTestCaseIds();
+  const ids = testCaseListRef.value?.getTestCaseIds();
   testCaseIdsForNavigation.value = ids || [];
   console.log('获取到的用例ID列表:', testCaseIdsForNavigation.value);
 
@@ -446,9 +693,9 @@ const handleNavigateTestCase = (testCaseId: number) => {
   currentEditingTestCaseId.value = testCaseId;
 };
 
-const showViewTestCaseDetail = async (testCaseOrId: TestCase | number) => {
+const showViewTestCaseDetail = (testCaseOrId: TestCase | number) => {
   // 获取当前筛选后的用例ID列表用于导航
-  const ids = await testCaseListRef.value?.getTestCaseIds();
+  const ids = testCaseListRef.value?.getTestCaseIds();
   testCaseIdsForNavigation.value = ids || [];
 
   currentViewingTestCaseId.value = typeof testCaseOrId === 'number' ? testCaseOrId : testCaseOrId.id;
@@ -474,7 +721,7 @@ const handleReviewStatusChanged = async () => {
   await testCaseListRef.value?.refreshTestCases();
 
   // 重新获取筛选后的用例ID列表
-  const newIds = await testCaseListRef.value?.getTestCaseIds() || [];
+  const newIds = testCaseListRef.value?.getTestCaseIds() || [];
   testCaseIdsForNavigation.value = newIds;
 
   // 检查当前用例是否还在新列表中
@@ -504,8 +751,10 @@ const backToList = () => {
   currentViewingTestCaseId.value = null;
 };
 
-const handleFormSubmitSuccess = () => {
-  backToList();
+const handleFormSubmitSuccess = (keepEditing = false) => {
+  if (!keepEditing) {
+    backToList();
+  }
   testCaseListRef.value?.refreshTestCases(); // 刷新列表
   // 如果用例创建/更新影响了模块的用例数量，需要通知模块面板刷新
   modulePanelRef.value?.refreshModules();
@@ -544,7 +793,7 @@ const handleGenerateCasesSubmit = async (formData: {
   useKnowledgeBase: boolean,
   knowledgeBaseId?: string | null,
   testCaseModuleId: number,
-  selectedModules: Array<{ id: string, title: string, content: string }>,
+  selectedModules: { title: string, content: string }[],
   selectedTestCaseIds: number[],
   selectedTestCases: TestCase[],
   testTypes: string[],
@@ -563,16 +812,6 @@ const handleGenerateCasesSubmit = async (formData: {
 
   // 获取测试类型提示词
   const testTypePrompt = getTestTypePrompt(formData.testTypes);
-  const requirementModuleSummary = formData.selectedModules
-    .map((module, index) => {
-      return `---
-[需求模块 ${index + 1}]
-ID: ${module.id}
-标题: ${module.title}
-内容:
-${module.content}`.trim();
-    })
-    .join('\n\n');
 
   switch (formData.generateMode) {
     case 'full':
@@ -582,14 +821,19 @@ ${module.content}`.trim();
 
 ${testTypePrompt}
 
-${reviewSubagentInstruction}
+${CASE_STEP_DETAIL_PROMPT}
 
-共选择了 ${formData.selectedModules.length} 个需求模块，请综合分析并覆盖跨模块场景。
+${formData.selectedModules.map((mod, idx) => `---
+[需求模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}标题]
+${mod.title}
 
-${requirementModuleSummary}
+---
+[需求模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}内容]
+${mod.content}
+---`).join('\n\n')}
 
 请注意：生成的测试用例最终需要被保存在 **项目ID "${currentProjectId.value}"** 下的 **测试用例模块ID "${formData.testCaseModuleId}"** 中。
-(这些需求模块来源于需求文档ID: ${formData.requirementDocumentId})
+(此需求模块来源于需求文档ID: ${formData.requirementDocumentId})
       `.trim();
       notificationTitle = taskText.value.generationStarted;
       notificationContent = taskText.value.generationStartedContent;
@@ -603,16 +847,19 @@ ${requirementModuleSummary}
 
 ${testTypePrompt}
 
-${reviewSubagentInstruction}
+${formData.selectedModules.map((mod, idx) => `---
+[需求模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}标题]
+${mod.title}
 
-共选择了 ${formData.selectedModules.length} 个需求模块，请综合分析并覆盖跨模块场景。
-
-${requirementModuleSummary}
+---
+[需求模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}内容]
+${mod.content}
+---`).join('\n\n')}
 
 请注意：
 - 只需要生成用例标题，不需要生成详细的测试步骤和预期结果
 - 生成的测试用例最终需要被保存在 **项目ID "${currentProjectId.value}"** 下的 **测试用例模块ID "${formData.testCaseModuleId}"** 中
-(这些需求模块来源于需求文档ID: ${formData.requirementDocumentId})
+(此需求模块来源于需求文档ID: ${formData.requirementDocumentId})
       `.trim();
       notificationTitle = taskText.value.titleGenerationStarted;
       notificationContent = taskText.value.titleGenerationStartedContent;
@@ -629,8 +876,6 @@ ${requirementModuleSummary}
 - 严禁自行生成或创造任何步骤内容
 - 如果知识库中没有相似用例，请明确告知无法补全，不要自行编造步骤
 - 根据用例名称在知识库中检索最相似的用例
-
-${reviewSubagentInstruction}
 
 [待补全用例列表]
 ${formData.selectedTestCases.map(tc => `- 用例ID: ${tc.id}, 名称: ${tc.name}, 优先级: ${tc.level}, 模块ID: ${tc.module_id ?? '未分配'}, 模块: ${tc.module_detail || '未分配'}`).join('\n')}
@@ -649,20 +894,19 @@ ${formData.selectedTestCases.map(tc => `- 用例ID: ${tc.id}, 名称: ${tc.name}
 
 ${testTypePrompt}
 
+${CASE_STEP_DETAIL_PROMPT}
+
 【重要约束】
 - 必须基于知识库和需求文档中的实际内容
 - 严禁猜测或假设任何功能行为
 - 生成的步骤必须有知识库或需求文档作为依据
 - 如果无法从知识库和需求文档中找到相关信息，请明确告知
 
-${reviewSubagentInstruction}
-
 [待生成步骤的用例列表]
 ${formData.selectedTestCases.map(tc => `- 用例ID: ${tc.id}, 名称: ${tc.name}, 优先级: ${tc.level}, 模块ID: ${tc.module_id ?? '未分配'}, 模块: ${tc.module_detail || '未分配'}`).join('\n')}
 
 [需求模块参考]
-共 ${formData.selectedModules.length} 个需求模块
-${requirementModuleSummary || '无'}
+${formData.selectedModules.length > 0 ? formData.selectedModules.map((mod, idx) => `模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''} 标题: ${mod.title}\n模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''} 内容: ${mod.content}`).join('\n\n') : '无'}
 
 项目ID: ${currentProjectId.value}
       `.trim();
@@ -676,7 +920,6 @@ ${requirementModuleSummary || '无'}
     message,
     project_id: String(currentProjectId.value),
     prompt_id: formData.promptId,
-    module_key: 'testcase_generation',
     use_knowledge_base: ['full', 'title_only'].includes(formData.generateMode)
       ? formData.useKnowledgeBase
       : ['kb_complete', 'kb_generate'].includes(formData.generateMode),
@@ -702,464 +945,48 @@ const handleExecuteTestCase = (testCase: TestCase) => {
     Message.error(taskText.value.missingProjectId);
     return;
   }
-  
+
   // 保存待执行的用例并显示确认弹窗
   pendingExecuteTestCase.value = testCase;
   isExecuteModalVisible.value = true;
 };
 
-// AI 诊断抽屉相关状态
-const isAiDiagnosisVisible = ref(false);
-const currentDiagnosingCase = ref<TestCase | null>(null);
-const aiDiagnosisResult = ref<AiDiagnosisResult | null>(null);
-const loadingDiagnosis = ref(false);
+let cachedExecutionPromptId: number | null | undefined;
 
-const handleHealingApplied = () => {
-  if (testCaseListRef.value) {
-    (testCaseListRef.value as any).fetchTestCases?.();
+const resolveTestCaseExecutionPromptId = async (): Promise<number | undefined> => {
+  if (cachedExecutionPromptId !== undefined) {
+    return cachedExecutionPromptId ?? undefined;
   }
-};
-
-const handleViewDiagnosisFromQueue = async (task: ExecutionTask) => {
-  if (task.aiDiagnosis) {
-    currentDiagnosingCase.value = { id: task.testCaseId, name: task.testCaseName } as any;
-    aiDiagnosisResult.value = task.aiDiagnosis;
-    loadingDiagnosis.value = false;
-    isAiDiagnosisVisible.value = true;
-  } else if (currentProjectId.value) {
-    isAiDiagnosisVisible.value = true;
-    loadingDiagnosis.value = true;
-    currentDiagnosingCase.value = { id: task.testCaseId, name: task.testCaseName } as any;
-    aiDiagnosisResult.value = null;
-    try {
-      const diagRes = await diagnoseTestCaseFailure(
-        currentProjectId.value,
-        task.testCaseId,
-        task.uiRecordId ? { ui_execution_record_id: task.uiRecordId } : undefined
-      );
-      if (diagRes.success && diagRes.data) {
-        aiDiagnosisResult.value = diagRes.data;
-        updateTask(task.id, { aiDiagnosis: diagRes.data });
-      } else {
-        Message.error(diagRes.error || 'AI 诊断生成失败');
-      }
-    } catch (err: any) {
-      Message.error(err.message || 'AI 诊断请求异常');
-    } finally {
-      loadingDiagnosis.value = false;
-    }
-  }
-};
-
-const executeUiTestCaseWithAutoHealing = async (
-  testCase: TestCase,
-  targetUiTestCaseId: number,
-  executionMode: 'hybrid' | 'script_only' | 'ai_only',
-  execTask: ExecutionTask,
-  isRetry = false
-) => {
   try {
-    await uiWebSocket.connect();
-  } catch (err) {
-    finishTask(execTask.id, 'failed', 'WebSocket 连接失败，无法下发 UI 执行任务');
-    Message.error('WebSocket 连接失败，无法下发 UI 执行任务');
-    return;
-  }
-
-  // 获取执行器和默认环境
-  let defaultEnvId: number | undefined;
-  let availableActuatorId = 'recorder-browser';
-
-  try {
-    const [envRes, actRes] = await Promise.all([
-      envConfigApi.list({ project: currentProjectId.value! }),
-      actuatorApi.list(),
-    ]);
-    const envData = extractResponseData<any>(envRes);
-    const envItems = envData?.items || [];
-    const defaultEnv = envItems.find((env: any) => env.is_default) || envItems[0];
-    defaultEnvId = defaultEnv?.id;
-
-    const actuatorData = extractResponseData<any>(actRes);
-    const actItems = actuatorData?.items || [];
-    const openActuator = actItems.find(
-      (actuator: any) => actuator.is_open && ((actuator.max_slots ?? 1) - (actuator.busy_slots ?? 0)) >= 1
-    );
-    if (openActuator?.id) {
-      availableActuatorId = openActuator.id;
-    }
-  } catch (error) {
-    console.warn('获取环境或执行器信息失败，将使用本地录制器浏览器执行', error);
-  }
-
-  if (isRetry) {
-    updateTask(execTask.id, {
-      status: 'running',
-      currentStepIndex: 0,
-      currentStepDesc: '已自动修复元素定位，正在自动重新执行...',
+    const response = await getUserPrompts({
+      prompt_type: 'test_case_execution',
+      is_active: true,
+      page_size: 1,
     });
-    addStepLog(execTask.id, '【自愈重试】元素定位已自动修复，正在自动发起第二次执行验证...', 'info');
+    cachedExecutionPromptId = response.data?.results?.[0]?.id ?? null;
+  } catch {
+    cachedExecutionPromptId = null;
   }
-
-  const executionRequestId = typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `hybrid-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  let dispatchAcknowledged = false;
-  let acknowledgementTimer: ReturnType<typeof window.setTimeout> | null = null;
-  let executionResultTimer: ReturnType<typeof window.setTimeout> | null = null;
-  let removeDispatchHandler: (() => void) | null = null;
-  let removeAckHandler: (() => void) | null = null;
-  let removeStepHandler: (() => void) | null = null;
-  let removeHandler: (() => void) | null = null;
-  const cleanupExecutionHandlers = () => {
-    if (acknowledgementTimer !== null) {
-      window.clearTimeout(acknowledgementTimer);
-      acknowledgementTimer = null;
-    }
-    if (executionResultTimer !== null) {
-      window.clearTimeout(executionResultTimer);
-      executionResultTimer = null;
-    }
-    removeDispatchHandler?.();
-    removeAckHandler?.();
-    removeHandler?.();
-    removeStepHandler?.();
-  };
-
-  removeDispatchHandler = uiWebSocket.on(UiSocketEnum.TEST_CASE, (socketMsg: any) => {
-    const responseArgs = socketMsg.data?.func_args || {};
-    if (
-      responseArgs.case_id !== targetUiTestCaseId
-      || responseArgs.execution_request_id !== executionRequestId
-      || !responseArgs.error
-    ) {
-      return;
-    }
-
-    const errorMessage = responseArgs.error || socketMsg.msg || 'UI 自动化任务下发失败';
-    cleanupExecutionHandlers();
-    finishTask(execTask.id, 'failed', errorMessage);
-    Message.error(errorMessage);
-  });
-
-  removeAckHandler = uiWebSocket.on(UiSocketEnum.TEST_CASE_ACK, (socketMsg: any) => {
-    const ack = socketMsg.data?.func_args || {};
-    if (
-      ack.case_id !== targetUiTestCaseId
-      || ack.execution_request_id !== executionRequestId
-    ) {
-      return;
-    }
-
-    dispatchAcknowledged = true;
-    if (acknowledgementTimer !== null) {
-      window.clearTimeout(acknowledgementTimer);
-      acknowledgementTimer = null;
-    }
-    updateTask(execTask.id, {
-      status: 'running',
-      currentStepDesc: `后端已接单，正在执行 UI 自动化用例 #${targetUiTestCaseId}...`,
-    });
-    addStepLog(
-      execTask.id,
-      `后端已接收执行任务（请求: ${executionRequestId}，执行器: ${ack.actuator_id || availableActuatorId}）`,
-      'success'
-    );
-    executionResultTimer = window.setTimeout(() => {
-      cleanupExecutionHandlers();
-      const errorMessage = 'UI 自动化执行长时间未返回结果，请检查执行器日志和在线状态';
-      finishTask(execTask.id, 'failed', errorMessage);
-      Message.error(errorMessage);
-    }, 30 * 60 * 1000);
-  });
-
-  // 监听步骤级执行事件
-  removeStepHandler = uiWebSocket.on(UiSocketEnum.STEP_RESULT, (socketMsg: any) => {
-    if (!dispatchAcknowledged) {
-      return;
-    }
-    const stepData = socketMsg.data?.func_args || socketMsg.data || {};
-    const stepIdx = stepData.step_index ?? stepData.step_number ?? (execTask.currentStepIndex + 1);
-    const stepDesc = stepData.step_name || stepData.description || `步骤 ${stepIdx}`;
-    const isPassed = stepData.status === 'success' || stepData.status === 'passed';
-    updateTask(execTask.id, {
-      currentStepIndex: stepIdx,
-      currentStepDesc: `[${isPassed ? '✓' : '✗'}] ${stepDesc}`,
-    });
-    addStepLog(
-      execTask.id,
-      `${stepDesc}: ${isPassed ? '执行通过' : '执行失败 ' + (stepData.error || '')}`,
-      isPassed ? 'success' : 'error'
-    );
-  });
-
-  // 监听整体用例执行结果
-  removeHandler = uiWebSocket.on(UiSocketEnum.CASE_RESULT, async (socketMsg: any) => {
-    const resultData = socketMsg.data?.func_args || socketMsg.data || {};
-    const caseId = resultData.case_id || resultData.id;
-
-    if (
-      caseId === targetUiTestCaseId
-      && resultData.execution_request_id === executionRequestId
-    ) {
-      cleanupExecutionHandlers();
-
-      const isSuccess = resultData.status === 'success' || (resultData.passed_steps && resultData.failed_steps === 0);
-
-      if (isSuccess) {
-        finishTask(execTask.id, 'success');
-        updateTask(execTask.id, { currentStepDesc: isRetry ? '全部步骤执行通过（AI 自动自愈修复成功）' : '全部步骤执行通过' });
-
-        if (isRetry) {
-          Notification.success({
-            title: 'AI 自动自愈成功',
-            content: `用例【${testCase.name}】已自动修复元素定位并二次执行通过！`,
-            duration: 8000,
-          });
-        } else {
-          Message.success(`用例【${testCase.name}】UI 自动化脚本执行通过！`);
-        }
-
-        if (testCaseListRef.value) {
-          (testCaseListRef.value as any).fetchTestCases?.();
-        }
-      } else {
-        // 步骤失败
-        const errorMsg = resultData.message || '部分步骤未通过';
-
-        // 首次失败且为智能双模模式：直接接入已有的 LLM 对话 Agent，调用 ui-automation-skill / MCP 智能编辑修复用例
-        if (executionMode === 'hybrid' && !isRetry) {
-          updateTask(execTask.id, {
-            status: 'diagnosing',
-            currentStepDesc: '已接入 AI 智能对话 Agent，正在使用 ui-automation-skill / MCP 诊断并编辑修复用例...',
-          });
-          addStepLog(execTask.id, `UI 脚本执行失败: ${errorMsg}`, 'error');
-          addStepLog(execTask.id, '已唤起 LangGraph LLM 对话 Agent，正在自主使用 Skill / MCP 工具编辑修复用例步骤...', 'warning');
-
-          const failedStepSort = execTask.currentStepIndex || 1;
-          const failedStepDesc = execTask.currentStepDesc || '未知步骤';
-
-          const moduleInfo = testCase.module_detail
-            ? testCase.module_detail
-            : `ID: ${testCase.module_id ?? '未分配'}`;
-
-          const message = `
-【UI 自动化测试用例执行失败 - 智能自愈与编辑任务】
-你是一名资深 UI 自动化测试专家。当前功能测试用例【${testCase.name}】（ID: ${testCase.id}）在执行绑定的 UI 自动化用例（UI用例ID: ${targetUiTestCaseId}）时发生失败。
-
-【执行失败现场上下文】
-- 所属项目ID: ${currentProjectId.value}
-- 所属模块: ${moduleInfo}
-- 失败步骤序号: 第 ${failedStepSort} 步
-- 步骤描述: ${failedStepDesc}
-- 报错信息: ${errorMsg}
-
-【任务要求】
-请使用已挂载的 **ui-automation-skill** 或 **MCP 工具** 对该 UI 测试用例及步骤定义进行深度诊断与自愈编辑：
-1. **查询分析**：调用工具读取当前 UI 用例（ID: ${targetUiTestCaseId}）的详细页面步骤（get_page_steps / get_page_step）与关联的页面元素配置（get_elements）；
-2. **根因修复与用例步骤编辑**：
-   - 如果是步骤关联的元素错误（例如将密码输入操作错误关联到了登录按钮），请调用 \`set_step_details\` / \`update_page_step\` 将操作元素修正绑定为正确的输入框元素；
-   - 如果是元素定位表达式失效（例如 XPath/CSS 改变），请结合现场报错与页面结构调用 \`update_element\` 更新为稳定有效的定位；
-   - 如果缺少对应目标元素，请调用 \`create_element\` 先行入库创建，再更新步骤关联；
-3. **完成编辑并保存**：确保用例步骤、操作方法（ope_key）及参数（ope_value）在系统资产库中已正确更新保存；
-4. **重新执行验证**：自愈修复完成后，请调用执行工具或告知用户已完成自愈修复，总结本次自愈修改点。
-          `.trim();
-
-          const requestData: ChatRequest = {
-            message,
-            project_id: String(currentProjectId.value),
-            module_key: 'testcase_execution',
-            use_knowledge_base: false,
-            test_case_id: testCase.id,
-          };
-
-          startAutomationTask(
-            requestData,
-            'AI 对话已介入用例自愈',
-            `用例【${testCase.name}】执行受阻，AI Agent 正在使用 Skill / MCP 智能诊断并编辑修复用例`,
-            'ai-healing',
-            '查看 AI 自愈对话过程',
-            (sessionId) => {
-              // 实时监听 Agent 自愈对话流，同步工具调用日志并在自愈完成后自动重新执行验证
-              let lastMsgIndex = 0;
-              const stopWatcher = watch(
-                () => activeStreams.value[sessionId],
-                async (stream) => {
-                  if (!stream) return;
-
-                  // 1. 同步 Agent 的 MCP/Skill 工具调用卡片和消息
-                  if (stream.messages && stream.messages.length > lastMsgIndex) {
-                    for (let i = lastMsgIndex; i < stream.messages.length; i++) {
-                      const msg = stream.messages[i];
-                      if (msg.type === 'tool') {
-                        const toolName = msg.toolName ? `【${msg.toolName}】` : '';
-                        const summary = (msg.content || '').replace(/\s+/g, ' ').slice(0, 80);
-                        addStepLog(execTask.id, `[AI自愈] Agent 调用工具 ${toolName}: ${summary}`, 'info');
-                        updateTask(execTask.id, {
-                          currentStepDesc: `Agent 正在调用 ${toolName || 'MCP工具'} 修复用例步骤...`,
-                        });
-                      }
-                    }
-                    lastMsgIndex = stream.messages.length;
-                  }
-
-                  // 2. 当 Agent 自愈对话流完成时
-                  if (stream.isComplete) {
-                    stopWatcher(); // 停止监听
-
-                    if (stream.error) {
-                      finishTask(execTask.id, 'failed', `AI 自愈过程异常: ${stream.error}`);
-                      addStepLog(execTask.id, `AI 自愈异常终止: ${stream.error}`, 'error');
-                      return;
-                    }
-
-                    const replySummary = (stream.content || '').replace(/\s+/g, ' ').slice(0, 100) || '用例编辑已完成';
-                    addStepLog(execTask.id, `AI Agent 已完成用例分析与自愈编辑！`, 'success');
-                    addStepLog(execTask.id, `[自愈总结] ${replySummary}`, 'info');
-                    addStepLog(execTask.id, `正在自动重新下发 UI 自动化脚本进行复测验证...`, 'warning');
-
-                    updateTask(execTask.id, {
-                      currentStepDesc: '用例步骤已自愈修复，正在自动重新执行验证...',
-                    });
-
-                    // 3. 自动触发二次执行复测（isRetry = true）
-                    await executeUiTestCaseWithAutoHealing(testCase, targetUiTestCaseId, 'script_only', execTask, true);
-                  }
-                },
-                { deep: true, immediate: true }
-              );
-            }
-          );
-
-          // 异步请求结构化诊断快照供本地报告抽屉展示
-          diagnoseTestCaseFailure(currentProjectId.value!, testCase.id)
-            .then((diagRes) => {
-              if (diagRes.success && diagRes.data) {
-                aiDiagnosisResult.value = diagRes.data;
-                updateTask(execTask.id, { aiDiagnosis: diagRes.data });
-              }
-            })
-            .catch(() => {});
-        } else {
-          // 原生脚本模式 或 二次自愈重试仍失败
-          finishTask(execTask.id, 'failed', errorMsg, aiDiagnosisResult.value);
-          if (isRetry) {
-            addStepLog(execTask.id, '自愈重试后仍未通过，判定为深度业务缺陷或环境异常，需要人工介入', 'error');
-            currentDiagnosingCase.value = testCase;
-            isAiDiagnosisVisible.value = true;
-            Message.error(`用例【${testCase.name}】自动自愈重试后仍未通过，请查看 AI 诊断报告`);
-          } else {
-            Message.error(`UI 自动化脚本执行失败: ${errorMsg}`);
-          }
-        }
-      }
-    }
-  });
-
-  const sendOk = uiWebSocket.runTestCase(
-    targetUiTestCaseId,
-    defaultEnvId,
-    availableActuatorId,
-    executionRequestId,
-  );
-  if (sendOk) {
-    updateTask(execTask.id, {
-      status: 'pending',
-      currentStepDesc: `执行请求已发送，等待后端接单确认...`,
-    });
-    addStepLog(
-      execTask.id,
-      `已发送 UI 自动化执行请求 #${targetUiTestCaseId}（请求: ${executionRequestId}，环境: ${defaultEnvId ?? '默认'}，执行器: ${availableActuatorId}）`,
-      'info'
-    );
-    acknowledgementTimer = window.setTimeout(() => {
-      if (dispatchAcknowledged) {
-        return;
-      }
-      cleanupExecutionHandlers();
-      const errorMessage = '后端未确认接收 UI 自动化执行任务，请检查 Django WebSocket 服务与执行器连接';
-      finishTask(execTask.id, 'failed', errorMessage);
-      Message.error(errorMessage);
-    }, 5000);
-  } else {
-    cleanupExecutionHandlers();
-    finishTask(execTask.id, 'failed', '下发 UI 自动化执行命令失败');
-    Message.error('下发 UI 自动化执行命令失败');
-  }
+  return cachedExecutionPromptId ?? undefined;
 };
 
-const handleExecuteConfirm = async (options: ExecuteConfirmOptions) => {
+const handleExecuteConfirm = async (options: { generatePlaywrightScript: boolean }) => {
   const testCase = pendingExecuteTestCase.value;
   if (!testCase || !currentProjectId.value) {
     return;
   }
 
-  const targetUiTestCaseId = options.uiTestCaseId || testCase.ui_test_case;
+  const executionPromptId = await resolveTestCaseExecutionPromptId();
 
-  // 如果选择绑定新用例且与之前不同，异步保存绑定关系
-  if (options.uiTestCaseId && options.uiTestCaseId !== testCase.ui_test_case) {
-    bindUiTestCase(currentProjectId.value, testCase.id, {
-      ui_test_case_id: options.uiTestCaseId,
-      execution_mode: options.executionMode,
-    }).catch(err => console.error('更新绑定失败', err));
-  }
-
-  // 计算总步骤数并创建任务进入队列
-  const totalSteps = testCase.steps?.length || testCase.ui_test_case_detail?.step_count || 1;
-  const execTask = addTask({
-    testCaseId: testCase.id,
-    testCaseName: testCase.name,
-    moduleName: testCase.module_detail || undefined,
-    executionMode: options.executionMode,
-    totalSteps: totalSteps,
-  });
-
-  // 分支 1：智能双模执行 或 仅脚本执行，且存在绑定的 UI 自动化用例
-  if ((options.executionMode === 'hybrid' || options.executionMode === 'script_only') && targetUiTestCaseId) {
-    pendingExecuteTestCase.value = null;
-    isExecuteModalVisible.value = false;
-
-    Message.info(`[${options.executionMode === 'hybrid' ? '智能双模' : '原生脚本'}] 任务已加入执行队列，正在下发...`);
-    await executeUiTestCaseWithAutoHealing(testCase, targetUiTestCaseId, options.executionMode, execTask, false);
-    return;
-  }
-
-  // 分支 2：纯 AI 探索执行 或 未绑定 UI 自动化用例
-  addStepLog(execTask.id, '已启动纯 AI Agent 探索执行任务', 'info');
-  updateTask(execTask.id, { currentStepDesc: 'AI Agent 正在自主探索并执行用例...' });
-  const moduleInfo = testCase.module_detail
-    ? testCase.module_detail
-    : `ID: ${testCase.module_id ?? '未分配'}`;
-
-  const message = options.generatePlaywrightScript
-    ? `请执行测试用例 ID: ${testCase.id}（所属项目 ID: ${currentProjectId.value}）。
-
-## 执行与资产沉淀目标（单次流·严禁重复开启浏览器）
-1. **执行与截图**：通过浏览器逐步执行该用例的测试步骤，校验预期断言，每步操作后截图上传。
-2. **同步采集与绑定**：在浏览器操作每一步时顺手提取元素定位器；执行通过后直接基于已采集信息调用 ui-automation 工具创建页面、录入元素与步骤并组装 UI 用例，并调用 whart-test 工具将本用例与生成的 UI 用例绑定（--ui_test_case），严禁再次启动浏览器。
-3. **结果总结**：输出测试执行结论与沉淀的 UI 资产详情。
-
-## 用例上下文信息
-- 用例名称：${testCase.name}（等级: ${testCase.level || 'P0'}）
-- 所属模块：${moduleInfo}
-- 前置条件：${testCase.precondition || '无'}`.trim()
-    : `请执行测试用例 ID: ${testCase.id}（所属项目 ID: ${currentProjectId.value}）。
-
-## 执行目标（仅验证）
-1. **执行与截图**：通过浏览器逐步执行该用例的测试步骤，校验预期断言，每步操作后截图上传。
-2. **仅执行验证**：无需创建 UI 自动化用例、页面或元素等资产。
-3. **结果总结**：输出测试执行结论。
-
-## 用例上下文信息
-- 用例名称：${testCase.name}（等级: ${testCase.level || 'P0'}）
-- 所属模块：${moduleInfo}
-- 前置条件：${testCase.precondition || '无'}`.trim();
+  // 执行上下文由后端按最新数据库记录统一生成。前端不能再拼接用例
+  // 内容，否则列表缓存中的旧前置条件会与后端最新步骤发生冲突。
+  const message = `执行用例管理测试用例 ID=${testCase.id}。请使用后端注入的最新用例步骤和执行规则。`;
 
   const requestData: ChatRequest = {
     message,
     project_id: String(currentProjectId.value),
-    module_key: 'testcase_execution',
     use_knowledge_base: false,
+    prompt_id: executionPromptId,
     // Playwright 脚本生成参数
     generate_playwright_script: options.generatePlaywrightScript,
     test_case_id: testCase.id,  // 始终传递，用于截图目录隔离
@@ -1169,59 +996,67 @@ const handleExecuteConfirm = async (options: ExecuteConfirmOptions) => {
     ? taskText.value.executionStartedWithGenerationContent
     : taskText.value.executionStartedContent;
 
+  executionResultTestCase.value = testCase;
+  executionSessionId.value = null;
+  executionPreparing.value = true;
+  isExecutionResultDrawerVisible.value = true;
+
+  Notification.remove(`exec-case-fail-${testCase.id}`);
+  showExecCaseStartedNotification(notificationContent);
+
   startAutomationTask(
     requestData,
     taskText.value.executionStarted,
     notificationContent,
     'exec-case',
     taskText.value.viewExecutionProgress,
-    (sessionId) => {
-      let lastMsgIndex = 0;
-      let stopWatch: (() => void) | null = null;
-      stopWatch = watch(
-        () => activeStreams.value[sessionId],
-        async (stream) => {
-          if (!stream) return;
-
-          // 同步工具调用日志
-          if (stream.messages && stream.messages.length > lastMsgIndex) {
-            for (let i = lastMsgIndex; i < stream.messages.length; i++) {
-              const msg = stream.messages[i];
-              if (msg.type === 'tool') {
-                const toolName = msg.toolName ? `【${msg.toolName}】` : '';
-                const summary = (msg.content || '').replace(/\s+/g, ' ').slice(0, 80);
-                addStepLog(execTask.id, `Agent 调用工具 ${toolName}: ${summary}`, 'info');
-                updateTask(execTask.id, {
-                  currentStepDesc: `Agent 正在执行 ${toolName || '工具操作'}...`,
-                });
-              }
-            }
-            lastMsgIndex = stream.messages.length;
-          }
-
-          // 任务完成处理
-          if (stream.isComplete) {
-            if (stopWatch) stopWatch();
-            if (stream.error) {
-              addStepLog(execTask.id, `AI 探索执行异常: ${stream.error}`, 'error');
-              finishTask(execTask.id, 'failed', `AI 探索执行异常: ${stream.error}`);
-              Message.error(`用例 [${testCase.name}] AI 探索执行失败`);
-            } else {
-              addStepLog(execTask.id, 'AI 探索执行已完成，UI 自动化用例已自动生成并完成绑定', 'info');
-              finishTask(execTask.id, 'success', 'AI 探索执行完成');
-              // 自动刷新用例列表以展示最新绑定的 UI 自动化用例
-              (testCaseListRef.value as any)?.fetchTestCases?.();
-              await fetchTestCasesForMindmap(true);
-              Message.success(`用例 [${testCase.name}] AI 探索执行完成`);
-            }
-          }
-        },
-        { immediate: true, deep: true }
-      );
+    {
+      onStarted: (sessionId) => {
+        executionSessionId.value = sessionId;
+        storeExecCaseSessionContext(sessionId, {
+          message,
+          displayMessage: message,
+          promptId: executionPromptId ?? null,
+          testCaseId: testCase.id,
+          projectId: currentProjectId.value,
+        });
+      },
+      onComplete: async (sessionId, payload) => {
+        executionSessionId.value = sessionId;
+        await executionResultDrawerRef.value?.markCompleted();
+        executionPreparing.value = false;
+        Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
+        await notifyExecutionOutcome(testCase.id, sessionId, payload);
+      },
+      onError: (sessionId, message) => {
+        executionSessionId.value = sessionId;
+        executionPreparing.value = false;
+        Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
+        executionResultDrawerRef.value?.setStreamError(message);
+      },
     }
   );
-  
+
   pendingExecuteTestCase.value = null;
+};
+
+const handleViewExecutionReport = async (testCase: TestCase) => {
+  executionPreparing.value = false;
+  executionResultTestCase.value = testCase;
+  executionSessionId.value = testCase.latest_run?.session_id || null;
+
+  if (!executionSessionId.value && currentProjectId.value) {
+    const response = await getLatestTestCaseRunRecord(currentProjectId.value, testCase.id);
+    if (response.success && response.data?.session_id) {
+      executionSessionId.value = response.data.session_id;
+    }
+  }
+
+  isExecutionResultDrawerVisible.value = true;
+};
+
+const handleExecutionFinished = () => {
+  testCaseListRef.value?.refreshTestCases?.();
 };
 
 const handleRequestOptimization = (testCase: TestCase) => {
@@ -1262,8 +1097,6 @@ const handleOptimizationSubmit = async (data: { testCase: TestCase; suggestion: 
 - 调用编辑用例工具时必须带上 is_optimization 参数
 - 工具返回成功后即表示任务完成，无需再次编辑。
 
-${reviewSubagentInstruction}
-
 【用例信息】
 - 用例ID: ${data.testCase.id}
 - 项目ID: ${currentProjectId.value}
@@ -1276,13 +1109,14 @@ ${stepsText}
 - 备注: ${data.testCase.notes || '无'}
 
 【用户优化建议】
-${data.suggestion || '请根据测试最佳实践进行全面优化'}
+${data.suggestion || '请把前置条件和步骤拆到可独立执行的粒度：前置条件写清账号/密码/URL和业务数据状态；每一步只做一个操作并给出可判定预期结果，不要写“进入页面查看按钮”这类粗步骤。'}
+
+${CASE_STEP_DETAIL_PROMPT}
   `.trim();
 
   const requestData: ChatRequest = {
     message,
     project_id: String(currentProjectId.value),
-    module_key: 'testcase_generation',
     use_knowledge_base: false,
   };
 
@@ -1431,37 +1265,6 @@ const handleMindmapUpdateModuleParent = async (moduleId: number, parentId: numbe
   }
 };
 
-const refreshMindmapModuleState = async () => {
-  await Promise.all([
-    fetchAllModulesForForm(),
-    fetchTestCasesForMindmap(true)
-  ]);
-  modulePanelRef.value?.refreshModules();
-};
-
-const handleMindmapMoveModule = async (payload: {
-  moduleId: number;
-  targetId: number | null;
-  dropPosition: -1 | 0 | 1;
-}) => {
-  if (!currentProjectId.value || payload.targetId === null) return;
-  try {
-    const response = await moveTestCaseModule(currentProjectId.value, payload.moduleId, {
-      target_id: payload.targetId,
-      drop_position: payload.dropPosition
-    });
-    if (response.success) {
-      Message.success('模块位置更新成功');
-    } else {
-      Message.error(response.error || '模块位置更新失败');
-    }
-  } catch (error) {
-    Message.error('更新模块位置时发生错误');
-  } finally {
-    await refreshMindmapModuleState();
-  }
-};
-
 // 脑图新建子模块双向同步
 const handleMindmapCreateModule = async (parentModuleId: number | null, name: string) => {
   if (!currentProjectId.value) return;
@@ -1483,77 +1286,25 @@ const handleMindmapCreateModule = async (parentModuleId: number | null, name: st
 };
 
 // 脑图新建用例双向同步
-const handleMindmapCreateCase = async (
-  moduleId: number | null,
-  name: string,
-  options?: { fullTemplate?: boolean }
-) => {
+const handleMindmapCreateCase = async (moduleId: number | null, name: string) => {
   if (!currentProjectId.value) return;
-  if (!moduleId) {
-    Message.warning(isEnglish.value ? 'Please select a module first' : '请先选择所属模块');
-    return;
-  }
-
-  const fullTemplate = Boolean(options?.fullTemplate);
-  const payload = fullTemplate
-    ? {
-        name,
-        precondition: isEnglish.value ? 'New Precondition' : '新前置条件',
-        level: 'P2',
-        test_type: 'functional',
-        module_id: moduleId,
-        notes: isEnglish.value ? 'New Notes' : '新备注',
-        steps: [
-          {
-            step_number: 1,
-            description: isEnglish.value ? 'New Step' : '新步骤',
-            expected_result: isEnglish.value ? 'New Expected Result' : '新预期结果',
-          },
-        ],
-      }
-    : {
-        name,
-        precondition: '',
-        level: 'P2',
-        test_type: 'functional',
-        module_id: moduleId,
-        steps: [],
-      };
-
   try {
-    const response = await createTestCase(currentProjectId.value, payload);
+    const response = await createTestCase(currentProjectId.value, {
+      name,
+      precondition: '',
+      level: 'P2',
+      test_type: 'functional',
+      module_id: moduleId || undefined,
+      steps: []
+    });
     if (response.success && response.data) {
-      // Create response may omit nested steps/notes; load detail so mindmap shows a full template.
-      let createdCase = response.data;
-      if (fullTemplate) {
-        const detail = await getTestCaseDetail(currentProjectId.value, createdCase.id);
-        if (detail.success && detail.data) {
-          createdCase = detail.data;
-        } else {
-          console.warn('[Mindmap] Case created but detail fetch failed:', detail.error);
-          Message.warning(
-            isEnglish.value
-              ? 'Case created, but details failed to load. Refresh if children are missing.'
-              : '用例已创建，但详情加载失败；若未显示前置/步骤/备注请刷新'
-          );
-          createdCase = {
-            ...createdCase,
-            module_id: createdCase.module_id ?? moduleId,
-            precondition: createdCase.precondition || payload.precondition,
-            notes: createdCase.notes || payload.notes,
-            steps: (createdCase.steps && createdCase.steps.length > 0)
-              ? createdCase.steps
-              : payload.steps,
-          };
-        }
-      }
-      Message.success(isEnglish.value ? 'Test case created successfully' : '测试用例创建成功');
-      mindmapTestCases.value = [...mindmapTestCases.value, createdCase];
+      Message.success('测试用例创建成功');
+      mindmapTestCases.value = [...mindmapTestCases.value, response.data];
     } else {
-      Message.error(response.error || (isEnglish.value ? 'Failed to create test case' : '创建测试用例失败'));
+      Message.error(response.error || '创建测试用例失败');
     }
   } catch (error) {
-    Message.error(isEnglish.value ? 'Error while creating test case' : '创建测试用例时发生错误');
+    Message.error('创建测试用例时发生错误');
   }
 };
 
@@ -1925,7 +1676,7 @@ const handleMindmapCopyStep = async (sourceCaseId: number, stepNumber: number, t
 
 const handleMindmapCopyModule = async (moduleId: number, targetParentId: number | null) => {
   if (!currentProjectId.value) return;
-  
+
   // 递归复制模块
   const copyModuleRecursive = async (sourceModuleId: number, parentId: number | null): Promise<number | null> => {
     if (!currentProjectId.value) return null;

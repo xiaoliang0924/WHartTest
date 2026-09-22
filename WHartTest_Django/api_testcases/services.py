@@ -1,5 +1,7 @@
 from typing import Dict, List, Optional, Tuple
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from django.utils import timezone
 from django.db import transaction
 from api_interfaces.logging_utils import summarize_for_log
@@ -7,9 +9,24 @@ from .models import (
     ApiTestCase, ApiTestCaseStep, ApiTestReport, ApiTestReportDetail,
     ApiInterfaceCase, ApiInterfaceCaseReport, ApiInterfaceCaseReportDetail,
 )
+from .rate_limit import sleep_between_cases
 from .runner import TestCaseRunner
+from wharttest_django.notification_service import notify_api_test_report
 
 logger = logging.getLogger('testrunner')
+_suppress_testcase_notification = ContextVar(
+    'suppress_api_testcase_notification',
+    default=False,
+)
+
+
+@contextmanager
+def suppress_testcase_notifications():
+    token = _suppress_testcase_notification.set(True)
+    try:
+        yield
+    finally:
+        _suppress_testcase_notification.reset(token)
 
 
 class TestCaseService:
@@ -181,8 +198,20 @@ class TestExecutionService:
     def run_testcase(
         testcase: ApiTestCase,
         environment: Optional[Dict] = None,
-        user=None
+        user=None,
+        notify: bool = True,
+        refresh_tokens: bool = True,
     ) -> ApiTestReport:
+        if refresh_tokens and isinstance(environment, dict):
+            from api_environments.token_refresh import (
+                refresh_environment_tokens_for_execution,
+            )
+
+            environment = refresh_environment_tokens_for_execution(
+                environment,
+                persist=True,
+            )
+
         source_config = testcase.config if isinstance(testcase.config, dict) else {}
         source_environment = environment if isinstance(environment, dict) else {}
         verify_source = TestExecutionService._resolve_verify_source(
@@ -284,17 +313,39 @@ class TestExecutionService:
                     )
                     continue
 
+        if notify and not _suppress_testcase_notification.get():
+            notify_api_test_report(report)
+
         return report
 
     @staticmethod
     def run_batch(
         testcases: List[ApiTestCase],
         environment: Optional[Dict] = None,
-        user=None
+        user=None,
+        notify: bool = True,
     ) -> List[ApiTestReport]:
+        if isinstance(environment, dict):
+            from api_environments.token_refresh import (
+                refresh_environment_tokens_for_execution,
+            )
+
+            environment = refresh_environment_tokens_for_execution(
+                environment,
+                persist=True,
+            )
+
         reports = []
-        for testcase in testcases:
-            report = TestExecutionService.run_testcase(testcase, environment, user)
+        for index, testcase in enumerate(testcases):
+            if index > 0:
+                sleep_between_cases()
+            report = TestExecutionService.run_testcase(
+                testcase,
+                environment,
+                user,
+                notify=notify,
+                refresh_tokens=False,
+            )
             reports.append(report)
         return reports
 

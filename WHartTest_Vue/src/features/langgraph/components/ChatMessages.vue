@@ -51,7 +51,8 @@ interface ChatMessage {
   isUser: boolean;
   time: string;
   isLoading?: boolean;
-  messageType?: 'human' | 'ai' | 'tool' | 'system' | 'agent_step' | 'step_separator';
+  messageType?: 'human' | 'ai' | 'tool' | 'system' | 'agent_step' | 'step_separator' | 'execution_report';
+  executionStatus?: 'pass' | 'fail';
   toolName?: string;
   isExpanded?: boolean;
   isStreaming?: boolean;
@@ -88,12 +89,12 @@ const { isEnglish } = useAppI18n();
 const text = computed(() => (
   isEnglish.value
     ? { 
-        emptyChat: 'Start chatting with WHartTest',
+        emptyChat: 'Start chatting with BaiYunTest',
         loadMore: 'Load older messages',
         loadingMore: 'Loading...'
       }
     : { 
-        emptyChat: '开始与 WHartTest 的对话吧',
+        emptyChat: '开始与 BaiYunTest 的对话吧',
         loadMore: '查看更早的历史记录',
         loadingMore: '正在加载历史记录...'
       }

@@ -31,6 +31,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # 从项目根目录的 .env 文件加载环境变量到进程环境。
 load_dotenv(BASE_DIR / ".env")
 
+# 内网/容器环境禁用 HttpRunner GA4 上报，避免每步连接 google-analytics.com 超时
+os.environ.setdefault("DISABLE_GA", "true")
 
 # 处理HuggingFace环境变量的相对路径
 # 将.env文件中的相对路径转换为绝对路径
@@ -144,6 +146,7 @@ INSTALLED_APPS = [
     'api_sync',  # API 接口同步应用。
     'operation_logs',  # 用户操作日志。
     'file_management',  # 统一文件管理/附件中心。
+    'data_generation',  # 造数管理。
 ]
 
 # ASGI 配置（用于 Channels WebSocket）
@@ -225,8 +228,9 @@ if DATABASE_TYPE == "postgres":
             "OPTIONS": {
                 "connect_timeout": 5,
             },
-            # 连接保持 600 秒（10 分钟），减少频繁建连开销。
-            "CONN_MAX_AGE": 600,
+            # ASGI 和线程池会为不同线程创建独立连接，默认不保留连接，
+            # 避免长会话和并发任务持续占用 PostgreSQL 连接槽位。
+            "CONN_MAX_AGE": int(os.environ.get("DB_CONN_MAX_AGE", "0")),
             # 启用连接健康检查。
             "CONN_HEALTH_CHECKS": True,
         }
@@ -722,6 +726,15 @@ CELERY_WORKER_TASK_LOG_FORMAT = "[%(asctime)s: %(levelname)s/%(processName)s][%(
 # 在本地开发环境中可以使用 http://localhost:8000
 # 内部服务调用基础地址。
 BASE_URL = os.environ.get("DJANGO_BASE_URL", "http://localhost:8000")
+FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "").rstrip("/")
+WHARTTEST_FRONTEND_BASE_URL = os.environ.get("WHARTTEST_FRONTEND_BASE_URL", "").rstrip("/")
+WECHAT_WORK_BOT_WEBHOOK = os.environ.get("WECHAT_WORK_BOT_WEBHOOK", "").strip()
+WECHAT_WORK_BOT_WEBHOOKS = os.environ.get("WECHAT_WORK_BOT_WEBHOOKS", "").strip()
+WEIXIN_WORK_BOT_WEBHOOK = os.environ.get("WEIXIN_WORK_BOT_WEBHOOK", "").strip()
+WEIXIN_WORK_BOT_WEBHOOKS = os.environ.get("WEIXIN_WORK_BOT_WEBHOOKS", "").strip()
+WECHAT_WORK_BOT_TIMEOUT_SECONDS = float(
+    os.environ.get("WECHAT_WORK_BOT_TIMEOUT_SECONDS", "5")
+)
 
 # DOCX Editor 集成配置
 # 主项目后端服务端访问 docx-editor 的地址，例如 http://127.0.0.1:18080
@@ -749,3 +762,26 @@ SKILL_STORE_ALLOW_CUSTOM_SOURCE = os.environ.get(
 SKILL_STORE_MAX_ZIP_SIZE = int(os.environ.get("SKILL_STORE_MAX_ZIP_SIZE", str(10 * 1024 * 1024)))
 # 通过 zip URL 下载的超时时间（秒）
 SKILL_STORE_DOWNLOAD_TIMEOUT = int(os.environ.get("SKILL_STORE_DOWNLOAD_TIMEOUT", "60"))
+
+# LLM 对话图片以 base64 放入 JSON 请求体，默认 2.5MB 不足以承载截图
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.environ.get("DATA_UPLOAD_MAX_MEMORY_SIZE", str(50 * 1024 * 1024))
+)
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.environ.get("FILE_UPLOAD_MAX_MEMORY_SIZE", str(50 * 1024 * 1024))
+)
+
+# Playwright 持久化浏览器（playwright-skill / UI 自动化）
+# 4 核小机器建议：并发 1、空闲 3 分钟、最多保留 2 个 session_key
+PLAYWRIGHT_BROWSER_MAX_CONCURRENT_EXECUTIONS = int(
+    os.environ.get("PLAYWRIGHT_BROWSER_MAX_CONCURRENT_EXECUTIONS", "1")
+)
+PLAYWRIGHT_BROWSER_MAX_SESSIONS = int(
+    os.environ.get("PLAYWRIGHT_BROWSER_MAX_SESSIONS", "2")
+)
+PLAYWRIGHT_BROWSER_SESSION_IDLE_TIMEOUT_SECONDS = int(
+    os.environ.get("PLAYWRIGHT_BROWSER_SESSION_IDLE_TIMEOUT_SECONDS", "180")
+)
+PLAYWRIGHT_BROWSER_EXEC_QUEUE_TIMEOUT_SECONDS = int(
+    os.environ.get("PLAYWRIGHT_BROWSER_EXEC_QUEUE_TIMEOUT_SECONDS", "600")
+)

@@ -8,6 +8,10 @@ from .models import (
     TestSuite,
     TestExecution,
     TestCaseResult,
+    TestCaseRunRecord,
+    ManualTestRun,
+    ManualTestAssignment,
+    MAX_MODULE_LEVEL,
 )
 from projects.models import Project  # 确保导入Project模型以便进行校验
 from accounts.serializers import UserDetailSerializer  # 用于显示创建者信息
@@ -55,7 +59,12 @@ class UiTestCaseDetailMixin:
             "status": ui_tc.status,
             "module_id": ui_tc.module_id,
             "module_name": ui_tc.module.name if ui_tc.module else None,
-            "step_count": len(ui_tc.case_steps.all()) if hasattr(ui_tc, "_prefetched_objects_cache") and "case_steps" in ui_tc._prefetched_objects_cache else ui_tc.case_steps.count(),
+            "step_count": (
+                len(ui_tc.case_steps.all())
+                if hasattr(ui_tc, "_prefetched_objects_cache")
+                and "case_steps" in ui_tc._prefetched_objects_cache
+                else ui_tc.case_steps.count()
+            ),
         }
 
 
@@ -72,6 +81,7 @@ class TestCaseListSerializer(UiTestCaseDetailMixin, serializers.ModelSerializer)
     module_id = serializers.PrimaryKeyRelatedField(source="module", read_only=True)
     module_detail = serializers.StringRelatedField(source="module", read_only=True)
     ui_test_case_detail = serializers.SerializerMethodField()
+    latest_run = serializers.SerializerMethodField()
 
     class Meta:
         model = TestCase
@@ -95,8 +105,16 @@ class TestCaseListSerializer(UiTestCaseDetailMixin, serializers.ModelSerializer)
             "ui_test_case",
             "ui_test_case_detail",
             "execution_mode",
+            "sort_order",
+            "latest_run",
         ]
         read_only_fields = fields
+
+    def get_latest_run(self, obj):
+        run = obj.run_records.order_by("-started_at").first()
+        if not run:
+            return None
+        return TestCaseRunRecordSerializer(run).data
 
     def get_screenshots(self, obj):
         """获取测试用例的所有截屏"""
@@ -122,6 +140,10 @@ class TestCaseSerializer(UiTestCaseDetailMixin, serializers.ModelSerializer):
         source="module", read_only=True
     )  # 用于只读展示模块名称
     ui_test_case_detail = serializers.SerializerMethodField()
+    latest_run = serializers.SerializerMethodField()
+
+    # project 字段在创建时需要，但通常通过 URL 传递，不在请求体中
+    # project = serializers.PrimaryKeyRelatedField(queryset=Project.objects.all()) # 可以取消注释用于校验
 
     class Meta:
         model = TestCase
@@ -146,6 +168,8 @@ class TestCaseSerializer(UiTestCaseDetailMixin, serializers.ModelSerializer):
             "ui_test_case",
             "ui_test_case_detail",
             "execution_mode",
+            "sort_order",
+            "latest_run",
         ]
         read_only_fields = [
             "id",
@@ -156,9 +180,21 @@ class TestCaseSerializer(UiTestCaseDetailMixin, serializers.ModelSerializer):
             "creator_detail",
             "created_at",
             "updated_at",
+            "sort_order",
+            "latest_run",
         ]
-
+        # project 字段在创建时是必需的，但通常从 URL 获取，不在 request.data 中。
+        # 如果要通过 request.data 传递 project_id，则需要将其从 read_only_fields 中移除，
+        # 并在视图中处理或使用 HiddenField/SerializerMethodField 等。
+        # 这里我们假设 project 将从 URL 传递给视图，并在视图的 perform_create 中设置。
+        # 因此，对于序列化器本身，project 字段可以被视为只读或在创建时不直接通过此序列化器输入。
         # 为了简单起见，我们先将其保留在 fields 中，视图将负责处理其赋值。
+
+    def get_latest_run(self, obj):
+        run = obj.run_records.order_by("-started_at").first()
+        if not run:
+            return None
+        return TestCaseRunRecordSerializer(run).data
 
     def validate(self, attrs):
         """验证数据"""
@@ -170,12 +206,13 @@ class TestCaseSerializer(UiTestCaseDetailMixin, serializers.ModelSerializer):
         if self.instance and "module" in attrs and attrs["module"] is None:
             raise serializers.ValidationError({"module_id": "请选择所属模块"})
 
-        # 校验绑定的 UI 测试用例必须属于当前项目
         ui_test_case = attrs.get("ui_test_case")
         if ui_test_case is not None:
             project = self.instance.project if self.instance else attrs.get("project")
             if project and ui_test_case.project_id != project.id:
-                raise serializers.ValidationError({"ui_test_case": "绑定的 UI 自动化用例不属于当前项目"})
+                raise serializers.ValidationError(
+                    {"ui_test_case": "绑定的 UI 自动化用例不属于当前项目"}
+                )
 
         return attrs
 
@@ -314,6 +351,7 @@ class TestCaseModuleSerializer(serializers.ModelSerializer):
             "parent",
             "parent_id",
             "level",
+            "sort_order",
             "creator",
             "creator_detail",
             "created_at",
@@ -325,19 +363,25 @@ class TestCaseModuleSerializer(serializers.ModelSerializer):
             "id",
             "project",
             "level",
+            "sort_order",
             "creator",
             "creator_detail",
             "created_at",
             "updated_at",
+            "order",
         ]
 
     # 添加获取用例数量的方法
     def get_testcase_count(self, obj):
         """
-        计算模块下的用例数量（包含所有子模块的用例）
+        计算模块下的用例数量（包含所有子模块的用例）。
+        只统计当前模块所属项目内的用例，避免把误挂到该模块的其他项目用例算进去。
         """
         all_module_ids = obj.get_all_descendant_ids()
-        return TestCase.objects.filter(module_id__in=all_module_ids).count()
+        return TestCase.objects.filter(
+            module_id__in=all_module_ids,
+            project_id=obj.project_id,
+        ).count()
 
     def validate(self, attrs):
         """验证模块数据"""
@@ -350,9 +394,9 @@ class TestCaseModuleSerializer(serializers.ModelSerializer):
                     {"parent": "父模块必须属于同一个项目"}
                 )
 
-            # 验证模块级别不超过5级
-            if parent.level >= 5:
-                raise serializers.ValidationError({"parent": "模块级别不能超过5级"})
+            # 验证模块级别不超过上限
+            if parent.level >= MAX_MODULE_LEVEL:
+                raise serializers.ValidationError({"parent": "模块级别不能超过6级"})
 
         # 更新时，确保父模块属于同一个项目
         elif self.instance and "parent" in attrs and attrs["parent"]:
@@ -362,9 +406,9 @@ class TestCaseModuleSerializer(serializers.ModelSerializer):
                     {"parent": "父模块必须属于同一个项目"}
                 )
 
-            # 验证模块级别不超过5级
-            if parent.level >= 5:
-                raise serializers.ValidationError({"parent": "模块级别不能超过5级"})
+            # 验证模块级别不超过上限
+            if parent.level >= MAX_MODULE_LEVEL:
+                raise serializers.ValidationError({"parent": "模块级别不能超过6级"})
 
             # 验证父模块不是自己或自己的子模块（避免循环引用）
             if parent.id == self.instance.id:
@@ -392,15 +436,40 @@ class TestCaseModuleSerializer(serializers.ModelSerializer):
         else:
             validated_data["level"] = 1
 
+        siblings = TestCaseModule.objects.filter(
+            project=validated_data["project"],
+            parent=parent,
+        )
+        max_sort_order = max(
+            [order for order in siblings.values_list("sort_order", flat=True)] or [0]
+        )
+        validated_data["sort_order"] = max_sort_order + 1
+        validated_data["order"] = validated_data["sort_order"]
+
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
         # 更新模块级别
+        old_parent_id = instance.parent_id
         parent = validated_data.get("parent")
         if parent:
             validated_data["level"] = parent.level + 1
         elif "parent" in validated_data and validated_data["parent"] is None:
             validated_data["level"] = 1
+
+        if "parent" in validated_data:
+            new_parent = validated_data.get("parent")
+            new_parent_id = new_parent.id if new_parent else None
+            if new_parent_id != old_parent_id:
+                siblings = TestCaseModule.objects.filter(
+                    project=instance.project,
+                    parent=new_parent,
+                ).exclude(pk=instance.pk)
+                max_sort_order = max(
+                    [order for order in siblings.values_list("sort_order", flat=True)] or [0]
+                )
+                validated_data["sort_order"] = max_sort_order + 1
+                validated_data["order"] = validated_data["sort_order"]
 
         return super().update(instance, validated_data)
 
@@ -452,6 +521,61 @@ class TestCaseScreenshotSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+class TestSuiteSummarySerializer(serializers.ModelSerializer):
+    """列表/嵌套场景下的套件摘要，避免展开全部用例。"""
+
+    class Meta:
+        model = TestSuite
+        fields = ["id", "name", "description"]
+        read_only_fields = fields
+
+
+class TestSuiteListSerializer(serializers.ModelSerializer):
+    """测试套件列表：不含 testcases_detail，避免列表接口拉取详情级数据。"""
+
+    creator_detail = UserDetailSerializer(source="creator", read_only=True)
+    testcase_count = serializers.SerializerMethodField()
+    pre_data_plan_name = serializers.CharField(
+        source="pre_data_plan.name",
+        read_only=True,
+        default=None,
+    )
+    pre_data_environment_name = serializers.CharField(
+        source="pre_data_environment.name",
+        read_only=True,
+        default=None,
+    )
+
+    class Meta:
+        model = TestSuite
+        fields = [
+            "id",
+            "name",
+            "description",
+            "project",
+            "testcase_count",
+            "max_concurrent_tasks",
+            "pre_data_plan",
+            "pre_data_plan_name",
+            "pre_data_params",
+            "pre_data_environment",
+            "pre_data_environment_name",
+            "pre_data_fail_fast",
+            "post_data_cleanup",
+            "creator",
+            "creator_detail",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_testcase_count(self, obj):
+        annotated = getattr(obj, "_testcase_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.testcases.count()
+
+
 class TestSuiteSerializer(serializers.ModelSerializer):
     """
     测试套件序列化器
@@ -469,6 +593,16 @@ class TestSuiteSerializer(serializers.ModelSerializer):
     )
     testcases_detail = TestCaseSerializer(source="testcases", many=True, read_only=True)
     testcase_count = serializers.SerializerMethodField()
+    pre_data_plan_name = serializers.CharField(
+        source="pre_data_plan.name",
+        read_only=True,
+        default=None,
+    )
+    pre_data_environment_name = serializers.CharField(
+        source="pre_data_environment.name",
+        read_only=True,
+        default=None,
+    )
 
     class Meta:
         model = TestSuite
@@ -481,6 +615,13 @@ class TestSuiteSerializer(serializers.ModelSerializer):
             "testcases_detail",
             "testcase_count",
             "max_concurrent_tasks",
+            "pre_data_plan",
+            "pre_data_plan_name",
+            "pre_data_params",
+            "pre_data_environment",
+            "pre_data_environment_name",
+            "pre_data_fail_fast",
+            "post_data_cleanup",
             "creator",
             "creator_detail",
             "created_at",
@@ -545,6 +686,19 @@ class TestSuiteSerializer(serializers.ModelSerializer):
             if not testcases:
                 raise serializers.ValidationError("测试套件至少需要包含一个测试用例")
 
+        project_id = self.instance.project_id if self.instance else self.context.get("project_id")
+        pre_data_plan = attrs.get("pre_data_plan")
+        if pre_data_plan is None and self.instance:
+            pre_data_plan = self.instance.pre_data_plan
+        if pre_data_plan and project_id and pre_data_plan.project_id != project_id:
+            raise serializers.ValidationError({"pre_data_plan": "造数计划必须属于当前项目"})
+
+        pre_data_environment = attrs.get("pre_data_environment")
+        if pre_data_environment is None and self.instance:
+            pre_data_environment = self.instance.pre_data_environment
+        if pre_data_environment and project_id and pre_data_environment.project_id != project_id:
+            raise serializers.ValidationError({"pre_data_environment": "造数环境必须属于当前项目"})
+
         return attrs
 
     def validate_max_concurrent_tasks(self, value):
@@ -570,6 +724,16 @@ class TestSuiteSerializer(serializers.ModelSerializer):
         instance.max_concurrent_tasks = validated_data.get(
             "max_concurrent_tasks", instance.max_concurrent_tasks
         )
+        if "pre_data_plan" in validated_data:
+            instance.pre_data_plan = validated_data.get("pre_data_plan")
+        if "pre_data_params" in validated_data:
+            instance.pre_data_params = validated_data.get("pre_data_params") or {}
+        if "pre_data_environment" in validated_data:
+            instance.pre_data_environment = validated_data.get("pre_data_environment")
+        if "pre_data_fail_fast" in validated_data:
+            instance.pre_data_fail_fast = validated_data.get("pre_data_fail_fast")
+        if "post_data_cleanup" in validated_data:
+            instance.post_data_cleanup = validated_data.get("post_data_cleanup")
         instance.save()
 
         if testcases is not None:
@@ -579,6 +743,30 @@ class TestSuiteSerializer(serializers.ModelSerializer):
 
 
 from urllib.parse import urlparse
+
+
+class TestCaseRunRecordSerializer(serializers.ModelSerializer):
+    executor_detail = UserDetailSerializer(source="executor", read_only=True)
+
+    class Meta:
+        model = TestCaseRunRecord
+        fields = [
+            "id",
+            "testcase",
+            "executor",
+            "executor_detail",
+            "session_id",
+            "status",
+            "summary",
+            "step_results",
+            "execution_log",
+            "data_generation_run",
+            "data_usage",
+            "generate_playwright_script",
+            "started_at",
+            "completed_at",
+        ]
+        read_only_fields = fields
 
 
 class TestCaseResultSerializer(serializers.ModelSerializer):
@@ -609,11 +797,6 @@ class TestCaseResultSerializer(serializers.ModelSerializer):
             "mcp_session_id",
             "screenshots",
             "execution_log",
-            "execution_mode",
-            "is_ai_intervened",
-            "ai_diagnosis",
-            "self_healing_info",
-            "ui_execution_record",
             "created_at",
             "updated_at",
         ]
@@ -633,6 +816,52 @@ class TestCaseResultSerializer(serializers.ModelSerializer):
         return relative_urls
 
 
+class TestExecutionListSerializer(serializers.ModelSerializer):
+    """执行历史列表：不含 results / 完整 suite / 造数 step_logs，减小响应体积。"""
+
+    suite_detail = TestSuiteSummarySerializer(source="suite", read_only=True)
+    executor_detail = UserDetailSerializer(source="executor", read_only=True)
+    duration = serializers.ReadOnlyField()
+    pass_rate = serializers.ReadOnlyField()
+    data_generation_run_detail = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TestExecution
+        fields = [
+            "id",
+            "suite",
+            "suite_detail",
+            "status",
+            "executor",
+            "executor_detail",
+            "started_at",
+            "completed_at",
+            "total_count",
+            "passed_count",
+            "failed_count",
+            "skipped_count",
+            "error_count",
+            "duration",
+            "pass_rate",
+            "data_generation_run",
+            "data_generation_run_detail",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_data_generation_run_detail(self, obj):
+        run = getattr(obj, "data_generation_run", None)
+        if not run:
+            return None
+        return {
+            "id": run.id,
+            "status": run.status,
+            "plan_name": run.plan.name if run.plan_id else None,
+            "error_message": run.error_message,
+        }
+
+
 class TestExecutionSerializer(serializers.ModelSerializer):
     """
     测试执行记录序列化器
@@ -645,6 +874,7 @@ class TestExecutionSerializer(serializers.ModelSerializer):
     results = TestCaseResultSerializer(many=True, read_only=True)
     duration = serializers.ReadOnlyField()
     pass_rate = serializers.ReadOnlyField()
+    data_generation_run_detail = serializers.SerializerMethodField()
 
     class Meta:
         model = TestExecution
@@ -667,6 +897,8 @@ class TestExecutionSerializer(serializers.ModelSerializer):
             "pass_rate",
             "results",
             "generate_playwright_script",
+            "data_generation_run",
+            "data_generation_run_detail",
             "created_at",
             "updated_at",
         ]
@@ -686,6 +918,21 @@ class TestExecutionSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def get_data_generation_run_detail(self, obj):
+        run = getattr(obj, 'data_generation_run', None)
+        if not run:
+            return None
+        return {
+            'id': run.id,
+            'status': run.status,
+            'plan_name': run.plan.name if run.plan_id else None,
+            'output_snapshot': run.output_snapshot,
+            'error_message': run.error_message,
+            'step_logs': run.step_logs,
+            'started_at': run.started_at,
+            'finished_at': run.finished_at,
+        }
 
 
 class TestExecutionCreateSerializer(serializers.Serializer):
@@ -708,3 +955,156 @@ class TestExecutionCreateSerializer(serializers.Serializer):
             return value
         except TestSuite.DoesNotExist:
             raise serializers.ValidationError("测试套件不存在")
+
+
+class ManualTestAssignmentSerializer(serializers.ModelSerializer):
+    testcase = serializers.SerializerMethodField()
+    testcase_detail = serializers.SerializerMethodField()
+    assignee_detail = UserDetailSerializer(source="assignee", read_only=True)
+    run_name = serializers.CharField(source="run.name", read_only=True)
+    run_status = serializers.CharField(source="run.status", read_only=True)
+    run_total_count = serializers.IntegerField(source="run.total_count", read_only=True)
+    run_pending_count = serializers.IntegerField(source="run.pending_count", read_only=True)
+    run_passed_count = serializers.IntegerField(source="run.passed_count", read_only=True)
+    run_failed_count = serializers.IntegerField(source="run.failed_count", read_only=True)
+    run_created_at = serializers.DateTimeField(source="run.created_at", read_only=True)
+
+    class Meta:
+        model = ManualTestAssignment
+        fields = [
+            "id", "run", "run_name", "run_status", "run_total_count", "run_pending_count",
+            "run_passed_count", "run_failed_count", "run_created_at",
+            "testcase", "testcase_detail", "assignee", "assignee_detail", "status",
+            "failure_reason", "comment", "step_results", "evidence_files",
+            "defect_title", "defect_url",
+            "executed_at", "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "run", "testcase", "assignee", "status", "failure_reason", "comment",
+            "executed_at", "created_at", "updated_at",
+        ]
+
+    def get_testcase(self, obj):
+        return obj.testcase_id or obj.testcase_snapshot.get("id")
+
+    def get_testcase_detail(self, obj):
+        if obj.testcase_id:
+            return TestCaseSerializer(obj.testcase, context=self.context).data
+        return obj.testcase_snapshot or None
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        representation["testcase"] = self.get_testcase(instance)
+        return representation
+
+
+class ManualTestRunListSerializer(serializers.ModelSerializer):
+    creator_detail = UserDetailSerializer(source="creator", read_only=True)
+    assignee_detail = serializers.SerializerMethodField()
+    pass_rate = serializers.SerializerMethodField()
+    test_suite_name = serializers.CharField(source="test_suite.name", read_only=True, default=None)
+    is_overdue = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ManualTestRun
+        fields = [
+            "id", "project", "name", "description", "environment", "version", "deadline",
+            "test_suite", "test_suite_name", "is_overdue",
+            "status", "creator", "creator_detail",
+            "assignee_detail", "total_count", "passed_count", "failed_count",
+            "blocked_count", "skip_count", "pending_count",
+            "pass_rate", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_assignee_detail(self, obj):
+        assignment = obj.assignments.all().first()
+        if assignment is None:
+            return None
+        return UserDetailSerializer(assignment.assignee).data
+
+    def get_pass_rate(self, obj):
+        if not obj.total_count:
+            return 0
+        return round(obj.passed_count / obj.total_count * 100, 1)
+
+    def get_is_overdue(self, obj):
+        if not obj.deadline or not obj.pending_count:
+            return False
+        from django.utils import timezone
+        deadline = obj.deadline
+        if isinstance(deadline, str):
+            from django.utils.dateparse import parse_datetime
+            deadline = parse_datetime(deadline)
+            if deadline is None:
+                return False
+        return deadline < timezone.now()
+
+
+class ManualTestRunSerializer(serializers.ModelSerializer):
+    creator_detail = UserDetailSerializer(source="creator", read_only=True)
+    assignments = ManualTestAssignmentSerializer(many=True, read_only=True)
+    test_suite_name = serializers.CharField(source="test_suite.name", read_only=True, default=None)
+    is_overdue = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ManualTestRun
+        fields = [
+            "id", "project", "name", "description", "environment", "version", "deadline",
+            "test_suite", "test_suite_name", "is_overdue",
+            "status", "creator", "creator_detail",
+            "total_count", "passed_count", "failed_count", "blocked_count", "skip_count",
+            "pending_count", "assignments", "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "project", "status", "creator", "creator_detail", "total_count",
+            "passed_count", "failed_count", "blocked_count", "skip_count", "pending_count",
+            "assignments", "created_at", "updated_at",
+        ]
+
+    def get_is_overdue(self, obj):
+        if not obj.deadline or not obj.pending_count:
+            return False
+        from django.utils import timezone
+        deadline = obj.deadline
+        if isinstance(deadline, str):
+            from django.utils.dateparse import parse_datetime
+            deadline = parse_datetime(deadline)
+            if deadline is None:
+                return False
+        return deadline < timezone.now()
+
+
+class ManualTestRunCreateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=255)
+    description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    environment = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    version = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    deadline = serializers.DateTimeField(required=False, allow_null=True)
+    testsuite_id = serializers.IntegerField(required=False, allow_null=True)
+    testcase_ids = serializers.ListField(child=serializers.IntegerField(), required=False)
+    assignee_id = serializers.IntegerField()
+
+    def validate(self, attrs):
+        testsuite_id = attrs.get("testsuite_id")
+        testcase_ids = attrs.get("testcase_ids") or []
+        if not testsuite_id and not testcase_ids:
+            raise serializers.ValidationError({"testcase_ids": "请选择测试用例或测试套件"})
+        return attrs
+
+
+class ManualTestResultSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=["pending", "pass", "fail", "blocked", "skip"])
+    failure_reason = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    comment = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    step_results = serializers.ListField(child=serializers.DictField(), required=False)
+    evidence_files = serializers.ListField(child=serializers.DictField(), required=False)
+    defect_title = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    defect_url = serializers.URLField(required=False, allow_blank=True, allow_null=True)
+
+    def validate(self, attrs):
+        if attrs["status"] == "fail" and not (attrs.get("failure_reason") or "").strip():
+            raise serializers.ValidationError({"failure_reason": "标记为不通过时必须填写失败原因"})
+        if attrs["status"] == "blocked" and not (attrs.get("comment") or "").strip():
+            raise serializers.ValidationError({"comment": "标记为阻塞时请填写阻塞原因"})
+        return attrs

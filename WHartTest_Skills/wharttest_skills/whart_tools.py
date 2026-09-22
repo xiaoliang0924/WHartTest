@@ -31,6 +31,11 @@ IMAGE_MIME_TYPES = {
     '.jpeg': 'image/jpeg',
     '.gif': 'image/gif',
 }
+def _normalize_multiline_text(value):
+    """Convert literal newline escape sequences from generated commands to text lines."""
+    if not isinstance(value, str):
+        return value
+    return value.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
 
 
 def _base_url() -> str:
@@ -207,13 +212,35 @@ def get_levels():
 
 
 def get_testcases(project_id: int, module_id: int):
-    """获取用例列表"""
+    """Return test cases with an authoritative total from the API."""
     url = f"{_base_url()}/api/projects/{project_id}/testcases/?page=1&page_size=1000&module_id={module_id}"
     try:
         resp = requests.get(url, headers=_headers())
         resp.raise_for_status()
-        data = resp.json().get("data", [])
-        return [{"case_id": i.get("id"), "case_name": i.get("name")} for i in data]
+        response_data = resp.json()
+        items = [
+            {"case_id": item.get("id"), "case_name": item.get("name")}
+            for item in response_data.get("data", [])
+        ]
+        case_ids = [item["case_id"] for item in items if item["case_id"] is not None]
+        total = response_data.get("total")
+        if not isinstance(total, int):
+            total = len(items)
+
+        return {
+            "project_id": project_id,
+            "module_id": module_id,
+            "total": total,
+            "returned_count": len(items),
+            "case_id_range": [min(case_ids), max(case_ids)] if case_ids else None,
+            "case_ids": case_ids,
+            "authoritative_summary": (
+                f"权威统计：项目 {project_id} 的模块 {module_id} 共有 {total} 条用例；"
+                "回答时只能使用 total 作为用例数量。"
+            ),
+            "items": items,
+            "counting_rule": "Use total as the authoritative count; do not calculate the count from case IDs or manually count items.",
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -237,11 +264,11 @@ def add_testcase(project_id: int, module_id: int, name: str, level: str = "P1",
     url = f"{_base_url()}/api/projects/{project_id}/testcases/"
     data = {
         "name": name,
-        "precondition": precondition,
+        "precondition": _normalize_multiline_text(precondition),
         "level": level,
         "module_id": module_id,
         "steps": steps or [],
-        "notes": notes,
+        "notes": _normalize_multiline_text(notes),
         "review_status": review_status,
         "test_type": test_type
     }
@@ -270,9 +297,9 @@ def edit_testcase(project_id: int, case_id: int, name: str = None, level: str = 
     if name is not None: data["name"] = name
     if level is not None: data["level"] = level
     if module_id is not None: data["module_id"] = module_id
-    if precondition is not None: data["precondition"] = precondition
+    if precondition is not None: data["precondition"] = _normalize_multiline_text(precondition)
     if steps is not None: data["steps"] = steps
-    if notes is not None: data["notes"] = notes
+    if notes is not None: data["notes"] = _normalize_multiline_text(notes)
     if test_type is not None: data["test_type"] = test_type
     if ui_test_case_id is not None: data["ui_test_case"] = ui_test_case_id
     if execution_mode is not None: data["execution_mode"] = execution_mode
@@ -386,16 +413,153 @@ def _search_file_in_dirs(target_name: str, search_dirs: list[str]):
     return None
 
 
+def _screenshot_dir_images():
+    screenshot_dir = os.environ.get('SCREENSHOT_DIR', '').strip()
+    if not screenshot_dir or not os.path.isdir(screenshot_dir):
+        return []
+    images = []
+    for name in os.listdir(screenshot_dir):
+        if os.path.splitext(name)[1].lower() in IMAGE_MIME_TYPES:
+            images.append(os.path.join(screenshot_dir, name))
+    return images
+
+
+MIN_VALID_SCREENSHOT_BYTES = 15000
+
+
+def _extract_step_hint(name: str):
+    import re
+    match = re.search(r'(?:step|步骤)[_\-\s]*(\d+)', name or '', re.I)
+    return match.group(1) if match else None
+
+
+def _is_blank_screenshot(path: str) -> bool:
+    try:
+        return os.path.getsize(path) < MIN_VALID_SCREENSHOT_BYTES
+    except OSError:
+        return True
+
+
+def _step_file_matches_hint(basename: str, hint: str) -> bool:
+    lowered = (basename or '').lower()
+    if not hint or hint not in lowered:
+        return False
+    padded = hint.zfill(2)
+    patterns = (
+        f'step{hint}',
+        f'step_{hint}',
+        f'step{padded}',
+        f'step_{padded}',
+        f'步骤{hint}',
+    )
+    return any(pattern in lowered for pattern in patterns)
+
+
+def _is_last_png_basename(name: str) -> bool:
+    return os.path.basename(name or '').lower() == 'last.png'
+
+
+def _fallback_recent_screenshot(requested_path: str):
+    """仅在能从文件名推断步骤号且目录内有对应 step 文件时兜底，禁止回退到 last.png 或任意最新图。"""
+    requested_name = os.path.basename((requested_path or '').strip())
+    if _is_last_png_basename(requested_name):
+        # 显式上传 last.png 时允许（但多步共用 last.png 会重复，由执行提示词约束）
+        images = _screenshot_dir_images()
+        for path in images:
+            if _is_last_png_basename(path):
+                return path
+        return None
+
+    images = [
+        path for path in _screenshot_dir_images()
+        if not _is_last_png_basename(path)
+    ]
+    if not images:
+        return None
+
+    hint = _extract_step_hint(requested_name)
+    if not hint:
+        return None
+
+    now = time.time()
+    recent = [path for path in images if now - os.path.getmtime(path) < 10 * 60]
+    candidates = recent or images
+    ranked = sorted(candidates, key=os.path.getmtime, reverse=True)
+    for path in ranked:
+        if _step_file_matches_hint(os.path.basename(path), hint):
+            return path
+    return None
+
+
+def _fallback_non_blank_screenshot(requested_path: str):
+    """Prefer step-specific captures when the requested file is missing or blank."""
+    fallback = _fallback_recent_screenshot(requested_path)
+    if fallback and os.path.exists(fallback) and not _is_blank_screenshot(fallback):
+        return fallback
+
+    images = [
+        path for path in _screenshot_dir_images()
+        if os.path.exists(path) and not _is_blank_screenshot(path)
+    ]
+    if not images:
+        return None
+
+    requested_name = os.path.basename((requested_path or '').strip())
+    hint = _extract_step_hint(requested_name)
+    if hint:
+        ranked = sorted(images, key=os.path.getmtime, reverse=True)
+        matched = [
+            path
+            for path in ranked
+            if _step_file_matches_hint(os.path.basename(path), hint)
+        ]
+        if matched:
+            return max(matched, key=lambda path: os.path.getsize(path))
+
+    last_path = next(
+        (path for path in images if _is_last_png_basename(path)),
+        None,
+    )
+    if last_path:
+        return last_path
+
+    return max(images, key=os.path.getmtime)
+
+
+def _is_case_step_filename(name: str) -> bool:
+    import re
+    return bool(re.match(r'^case_\d+_step\d+\.png$', (name or '').lower()))
+
+
 def _resolve_screenshot_file_path(file_path: str):
     """解析截图路径，兼容固定 SCREENSHOT_DIR 与临时目录兜底。"""
     normalized_path = (file_path or '').strip()
     if not normalized_path:
         return normalized_path, []
 
-    if os.path.exists(normalized_path):
+    search_dirs = _collect_screenshot_candidate_dirs()
+    basename = os.path.basename(normalized_path)
+    strict_case_step = _is_case_step_filename(basename)
+
+    if os.path.exists(normalized_path) and not _is_blank_screenshot(normalized_path):
         return normalized_path, []
 
-    search_dirs = _collect_screenshot_candidate_dirs()
+    if strict_case_step:
+        # case_1332_step3.png 必须精确存在，禁止回退到 step_03.png / last.png
+        if os.path.exists(normalized_path):
+            return normalized_path, search_dirs
+        resolved_path = _search_file_in_dirs(basename, search_dirs)
+        if resolved_path and os.path.exists(resolved_path):
+            return resolved_path, search_dirs
+        return normalized_path, search_dirs
+
+    if os.path.exists(normalized_path) and _is_blank_screenshot(normalized_path):
+        fallback_path = _fallback_non_blank_screenshot(normalized_path)
+        if fallback_path:
+            return fallback_path, search_dirs
+
+    if os.path.exists(normalized_path):
+        return normalized_path, search_dirs
     candidate_names = []
     if os.sep not in normalized_path and '/' not in normalized_path:
         candidate_names.append(normalized_path)
@@ -407,16 +571,30 @@ def _resolve_screenshot_file_path(file_path: str):
     for candidate_name in candidate_names:
         resolved_path = _search_file_in_dirs(candidate_name, search_dirs)
         if resolved_path:
+            if not _is_blank_screenshot(resolved_path):
+                return resolved_path, search_dirs
+            fallback_path = _fallback_non_blank_screenshot(resolved_path)
+            if fallback_path:
+                return fallback_path, search_dirs
             return resolved_path, search_dirs
+
+    fallback_path = _fallback_non_blank_screenshot(normalized_path)
+    if fallback_path and os.path.exists(fallback_path):
+        return fallback_path, search_dirs
 
     return normalized_path, search_dirs
 
 
-def _build_missing_file_error(original_path: str, searched_dirs: list[str]):
+def _build_missing_file_error(original_path: str, searched_dirs: list):
+    existing = [os.path.basename(path) for path in _screenshot_dir_images()]
+    extra = f"；目录内现有文件: {', '.join(existing)}" if existing else "；目录内没有截图，请先 page.screenshot 保存到 SCREENSHOT_DIR，文件名只用英文，例如 case_1520_step1.png"
     if not searched_dirs:
-        return {"error": f"文件不存在: {original_path}"}
+        return {"error": f"文件不存在: {original_path}{extra}"}
     return {
-        "error": f"文件不存在: {original_path}；已搜索目录: {', '.join(searched_dirs)}"
+        "error": (
+            f"文件不存在: {original_path}；已搜索目录: {', '.join(searched_dirs)}{extra}"
+            "。这不是用例失败，请用目录中的实际文件名重新上传，或先截图再上传。"
+        )
     }
 
 
@@ -757,6 +935,76 @@ def _parse_steps(steps_str):
 
 
 # Action 路由
+ACTION_REQUIRED_ARGS = {
+    "get_modules": ("project_id",),
+    "add_module": ("project_id", "name"),
+    "get_testcases": ("project_id", "module_id"),
+    "get_testcase_detail": ("project_id", "case_id"),
+    "add_testcase": ("project_id", "module_id", "name"),
+    "edit_testcase": ("project_id", "case_id"),
+    "upload_screenshot": ("project_id", "case_id", "file_path"),
+    "upload_screenshots": ("project_id", "case_id", "file_paths"),
+    "list_files": ("project_id",),
+    "get_file_detail": ("project_id", "file_id"),
+    "upload_file": ("project_id", "file_path"),
+    "upload_files": ("project_id", "file_paths"),
+    "validate_files": ("project_id", "file_ids"),
+    "get_file_references": ("project_id", "file_id"),
+    "delete_file": ("project_id", "file_id"),
+    "get_file_settings": ("project_id",),
+    "update_file_settings": ("project_id",),
+    "cleanup_unreferenced_files": ("project_id",),
+    "download_file": ("project_id", "file_id"),
+    "preview_file": ("project_id", "file_id"),
+}
+
+ACTION_EXAMPLES = {
+    "get_testcase_detail": (
+        "python whart_tools.py --action get_testcase_detail --project_id 1 --case_id 1332"
+    ),
+    "upload_screenshot": (
+        "python whart_tools.py --action upload_screenshot --project_id 1 --case_id 1332 "
+        "--file_path case_1332_step1.png --step_number 1"
+    ),
+    "get_testcases": (
+        "python whart_tools.py --action get_testcases --project_id 1 --module_id 5"
+    ),
+}
+
+
+def _apply_execution_env_defaults(args):
+    """单条用例执行时，skill_tools 会注入 WHARTTEST_PROJECT_ID / WHARTTEST_CASE_ID。"""
+    if args.project_id is None:
+        env_pid = (os.environ.get("WHARTTEST_PROJECT_ID") or "").strip()
+        if env_pid.isdigit():
+            args.project_id = int(env_pid)
+    if args.case_id is None:
+        env_cid = (os.environ.get("WHARTTEST_CASE_ID") or "").strip()
+        if env_cid.isdigit():
+            args.case_id = int(env_cid)
+    return args
+
+
+def _validate_action_args(args):
+    required = ACTION_REQUIRED_ARGS.get(args.action, ())
+    missing = [
+        name for name in required
+        if getattr(args, name, None) in (None, "")
+    ]
+    if not missing:
+        return None
+    flags = ", ".join(f"--{name}" for name in missing)
+    payload = {
+        "error": f"缺少必填参数: {flags}",
+        "action": args.action,
+        "hint": "用例管理执行时 project_id/case_id 已注入环境变量，请勿省略；或查看消息中的【已注入用例详情】块。",
+    }
+    example = ACTION_EXAMPLES.get(args.action)
+    if example:
+        payload["example"] = example
+    return payload
+
+
 ACTIONS = {
     "get_projects": lambda args: get_projects(),
     "get_modules": lambda args: get_modules(args.project_id),
@@ -832,7 +1080,7 @@ def main():
     parser.add_argument("--description", help="描述")
     parser.add_argument("--step_number", type=int, help="步骤编号")
     parser.add_argument("--page_url", help="页面URL")
-    parser.add_argument("--review_status", help="审核状态 (pending_review/approved/needs_optimization/optimization_pending_review/unavailable)")
+    parser.add_argument("--review_status", help="审核状态 (pending_review/approved/needs_optimization/optimization_pending_review/pending_product_confirmation/unavailable)")
     parser.add_argument("--test_type", help="测试类型 (smoke/functional/boundary/exception/permission/security/compatibility)", default="functional")
     parser.add_argument("--ui_test_case_id", type=int, help="绑定的UI自动化用例ID")
     parser.add_argument("--execution_mode", help="默认执行模式 (hybrid/script_only/ai_only)")
@@ -850,6 +1098,12 @@ def main():
     parser.add_argument("--auto_delete_zero_refs", help="引用为0时自动删除 (true/false)")
 
     args = parser.parse_args()
+    args = _apply_execution_env_defaults(args)
+    validation_error = _validate_action_args(args)
+    if validation_error:
+        print(json.dumps(validation_error, indent=2, ensure_ascii=False))
+        sys.exit(1)
+
     result = ACTIONS[args.action](args)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 

@@ -6,6 +6,10 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.db.models import Count
+
+from wharttest_django.pagination import StandardPagination
+from django.utils import timezone
 from django.http import HttpResponse
 from django.conf import settings
 from openpyxl import Workbook
@@ -21,15 +25,28 @@ from .models import (
     TestSuite,
     TestExecution,
     TestCaseResult,
+    ManualTestRun,
+    ManualTestAssignment,
+    MAX_MODULE_LEVEL,
 )
 from .serializers import (
     TestCaseSerializer,
     TestCaseListSerializer,
     TestCaseModuleSerializer,
     TestCaseScreenshotSerializer,
+    ManualTestRunSerializer,
+    ManualTestRunCreateSerializer,
+    ManualTestAssignmentSerializer,
+    ManualTestResultSerializer,
 )
-from .permissions import IsProjectMemberForTestCase, IsProjectMemberForTestCaseModule
-from .filters import TestCaseFilter  # 导入自定义过滤器
+from .permissions import (
+    IsProjectMemberForTestCase,
+    IsProjectMemberForTestCaseModule,
+    IsProjectMemberForManualTestRun,
+)
+from .filters import TestCaseFilter, TestCaseSearchFilter  # 导入自定义过滤器
+from wharttest_django.pagination import StandardPagination
+from projects.models import ProjectMember
 
 # 确保导入项目自定义的权限类
 from wharttest_django.permissions import HasModelPermission, permission_required
@@ -74,18 +91,21 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     pagination_class = StandardPagination
     filter_backends = [
         DjangoFilterBackend,
-        filters.SearchFilter,
+        TestCaseSearchFilter,
         filters.OrderingFilter,
     ]  # 添加 DjangoFilterBackend、搜索与排序
     filterset_class = TestCaseFilter  # 使用自定义的 FilterSet
     search_fields = ["name", "precondition"]
     ordering_fields = ["id", "created_at", "updated_at"]
-    ordering = ["-created_at"]
+    ordering = ["created_at"]
+
+    def _should_include_steps(self):
+        value = self.request.query_params.get("include_steps")
+        return str(value).lower() in {"1", "true", "yes"}
 
     def get_serializer_class(self):
-        """列表接口使用精简序列化器，详情/写入接口保留完整步骤数据。"""
-        include_steps = self.request.query_params.get("include_steps") == "true"
-        if self.action == "list" and not include_steps:
+        """列表接口默认使用精简序列化器，详情/写入接口保留完整步骤数据。"""
+        if self.action == "list" and not self._should_include_steps():
             return TestCaseListSerializer
         return TestCaseSerializer
 
@@ -109,17 +129,17 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         project_pk = self.kwargs.get("project_pk")
         if project_pk:
             project = get_object_or_404(Project, pk=project_pk)
-            # 权限类 IsProjectMemberForTestCase 已经检查了用户是否是此项目的成员
-            # 所以这里可以直接返回项目下的用例
-            queryset = (
-                TestCase.objects.filter(project=project)
-                .select_related("creator", "module", "ui_test_case__module")
-                .prefetch_related("ui_test_case__case_steps")
+            # 权限类 IsProjectMemberForTestCase 已经检查了用户是否是此项目的成员，
+            # 所以这里可以直接返回项目下的用例。列表接口默认不预取 steps，减少传输和查询开销；
+            # 思维导图等场景可通过 include_steps=true/1/yes 显式获取步骤详情。
+            qs = TestCase.objects.filter(project=project).select_related(
+                "creator", "module"
             )
-            include_steps = self.request.query_params.get("include_steps") == "true"
-            if self.action != "list" or include_steps:
-                queryset = queryset.prefetch_related("steps")
-            return queryset
+            if self.action == "list":
+                qs = qs.order_by("created_at", "id")
+            if self.action != "list" or self._should_include_steps():
+                qs = qs.prefetch_related("steps")
+            return qs
         # 如果没有 project_pk (理论上不应该发生，因为路由是嵌套的)
         # 返回空 queryset 或根据需求抛出错误
         return TestCase.objects.none()
@@ -186,8 +206,6 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 try:
                     testcase_ids = [int(id) for id in ids_data]
                 except (ValueError, TypeError):
-                    from rest_framework.response import Response
-
                     return Response(
                         {"error": "ids参数格式错误，应为数字列表"}, status=400
                     )
@@ -209,8 +227,6 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                         int(id.strip()) for id in ids_param.split(",") if id.strip()
                     ]
                 except ValueError:
-                    from rest_framework.response import Response
-
                     return Response(
                         {"error": "ids参数格式错误，应为逗号分隔的数字列表"}, status=400
                     )
@@ -372,6 +388,83 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             else status.HTTP_400_BAD_REQUEST,
         )
 
+    @action(detail=False, methods=["post"], url_path="reorder")
+    def reorder(self, request, project_pk=None):
+        """
+        保存当前测试用例列表的拖拽顺序。
+        POST /api/projects/{project_pk}/testcases/reorder/
+        请求体: {"ids": [35, 36, 37]}
+        """
+        ids_data = request.data.get("ids") or request.data.get("ordered_ids")
+        if not isinstance(ids_data, list):
+            return Response(
+                {"error": "ids参数格式错误，应为数字列表"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            ordered_ids = [int(item) for item in ids_data]
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "ids参数格式错误，应为数字列表"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not ordered_ids:
+            return Response(
+                {"error": "用例ID列表不能为空"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if len(set(ordered_ids)) != len(ordered_ids):
+            return Response(
+                {"error": "用例ID列表不能包含重复项"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        project = get_object_or_404(Project, pk=project_pk)
+
+        with transaction.atomic():
+            testcases = list(
+                TestCase.objects.select_for_update().filter(
+                    project=project,
+                    id__in=ordered_ids,
+                )
+            )
+            testcase_map = {testcase.id: testcase for testcase in testcases}
+            not_found_ids = [
+                testcase_id for testcase_id in ordered_ids if testcase_id not in testcase_map
+            ]
+            if not_found_ids:
+                return Response(
+                    {
+                        "error": f"以下用例ID不存在或不属于当前项目: {not_found_ids}",
+                        "not_found_ids": not_found_ids,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            sort_start = min(
+                [testcase.sort_order or testcase.id for testcase in testcases] or [1]
+            )
+            sort_start = max(1, sort_start)
+
+            ordered_testcases = []
+            for index, testcase_id in enumerate(ordered_ids):
+                testcase = testcase_map[testcase_id]
+                testcase.sort_order = sort_start + index
+                ordered_testcases.append(testcase)
+
+            TestCase.objects.bulk_update(ordered_testcases, ["sort_order"])
+
+        return Response(
+            {
+                "message": "测试用例顺序已保存",
+                "ordered_ids": ordered_ids,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=["post"], url_path="copy")
     def copy(self, request, project_pk=None, pk=None):
         """
@@ -516,6 +609,202 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    @action(detail=False, methods=["post"], url_path="batch-move")
+    @permission_required("testcases.change_testcase")
+    def batch_move(self, request, project_pk=None, **kwargs):
+        """Move one or more test cases to another module in the same project."""
+        ids_data = request.data.get("ids", [])
+        target_module_id = request.data.get("target_module_id")
+
+        if not ids_data:
+            return Response(
+                {"error": "请选择要移动的测试用例"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            testcase_ids = list(dict.fromkeys(int(testcase_id) for testcase_id in ids_data))
+            target_module_id = int(target_module_id)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "用例ID和目标模块ID必须为数字"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        project = get_object_or_404(Project, pk=project_pk)
+        target_module = get_object_or_404(
+            TestCaseModule,
+            pk=target_module_id,
+            project=project,
+        )
+        testcases_to_move = self.get_queryset().filter(id__in=testcase_ids)
+        found_ids = set(testcases_to_move.values_list("id", flat=True))
+        missing_ids = [testcase_id for testcase_id in testcase_ids if testcase_id not in found_ids]
+        if missing_ids:
+            return Response(
+                {"error": "部分测试用例不存在或不属于当前项目", "missing_ids": missing_ids},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            moved_count = testcases_to_move.exclude(module=target_module).update(
+                module=target_module
+            )
+
+        return Response(
+            {
+                "message": f"已移动 {moved_count} 条测试用例到模块 {target_module.name}",
+                "moved_count": moved_count,
+                "target_module": {"id": target_module.id, "name": target_module.name},
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="batch-move-by-module")
+    @permission_required("testcases.change_testcase")
+    def batch_move_by_module(self, request, project_pk=None, **kwargs):
+        """Move a module subtree under another module in the same project."""
+        source_module_id = request.data.get("source_module_id")
+        target_module_id = request.data.get("target_module_id")
+
+        if source_module_id is None or target_module_id is None:
+            return Response(
+                {"error": "请提供源模块和目标模块"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            source_module_id = int(source_module_id)
+            target_module_id = int(target_module_id)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "源模块ID和目标模块ID必须为数字"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if source_module_id == target_module_id:
+            return Response(
+                {"error": "源模块与目标模块不能相同"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        project = get_object_or_404(Project, pk=project_pk)
+        source_module = get_object_or_404(
+            TestCaseModule,
+            pk=source_module_id,
+            project=project,
+        )
+        target_module = get_object_or_404(
+            TestCaseModule,
+            pk=target_module_id,
+            project=project,
+        )
+
+        descendant_ids = source_module.get_all_descendant_ids()
+        if target_module.id in descendant_ids:
+            return Response(
+                {"error": "无法移动模块到自身或其子模块下"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if target_module.level >= MAX_MODULE_LEVEL:
+            return Response(
+                {"error": "模块级别不能超过6级"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        subtree_depth = source_module.get_max_depth()
+        if target_module.level + subtree_depth > MAX_MODULE_LEVEL:
+            return Response(
+                {
+                    "error": (
+                        f"移动后模块层级将超过6级限制（当前子树深度: {subtree_depth}）"
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            old_parent_id = source_module.parent_id
+            source_module.parent = target_module
+            source_module.level = target_module.level + 1
+            source_module.save(update_fields=["parent", "level", "updated_at"])
+
+            module_viewset = TestCaseModuleViewSet()
+            reordered = module_viewset._normalize_sibling_order(
+                project, target_module.id
+            )
+            reordered = [
+                module for module in reordered if module.id != source_module.id
+            ]
+            reordered.append(source_module)
+            module_viewset._persist_sibling_order(reordered)
+
+            if old_parent_id != source_module.parent_id:
+                module_viewset._normalize_sibling_order(project, old_parent_id)
+
+        return Response(
+            {
+                "message": (
+                    f"已将模块 {source_module.name} 及其子模块移动到 {target_module.name} 下"
+                ),
+                "source_module": {"id": source_module.id, "name": source_module.name},
+                "target_module": {"id": target_module.id, "name": target_module.name},
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="batch-update-review-status")
+    @permission_required("testcases.change_testcase")
+    def batch_update_review_status(self, request, project_pk=None, **kwargs):
+        """Batch update review status for multiple test cases in the same project."""
+        ids_data = request.data.get("ids", [])
+        review_status = request.data.get("review_status")
+
+        if not ids_data:
+            return Response(
+                {"error": "请选择要更新的测试用例"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        valid_statuses = {choice[0] for choice in TestCase.REVIEW_STATUS_CHOICES}
+        if review_status not in valid_statuses:
+            return Response(
+                {"error": "无效的审核状态"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            testcase_ids = list(dict.fromkeys(int(testcase_id) for testcase_id in ids_data))
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "用例ID必须为数字列表"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        testcases_to_update = self.get_queryset().filter(id__in=testcase_ids)
+        found_ids = set(testcases_to_update.values_list("id", flat=True))
+        missing_ids = [testcase_id for testcase_id in testcase_ids if testcase_id not in found_ids]
+        if missing_ids:
+            return Response(
+                {"error": "部分测试用例不存在或不属于当前项目", "missing_ids": missing_ids},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            updated_count = testcases_to_update.exclude(review_status=review_status).update(
+                review_status=review_status
+            )
+
+        return Response(
+            {
+                "message": f"已更新 {updated_count} 条测试用例的审核状态",
+                "updated_count": updated_count,
+                "review_status": review_status,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=["post"], url_path="upload-screenshots")
     @permission_required("testcases.add_testcasescreenshot")
     def upload_screenshots(self, request, project_pk=None, pk=None):
@@ -554,7 +843,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
         # 验证文件类型和大小
         allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/gif"]
-        max_size = 5 * 1024 * 1024  # 5MB
+        max_size = 20 * 1024 * 1024  # 20MB
 
         for file in uploaded_files:
             if file.content_type not in allowed_types:
@@ -567,7 +856,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
             if file.size > max_size:
                 return Response(
-                    {"error": f"文件 {file.name} 大小超过5MB限制"},
+                    {"error": f"文件 {file.name} 大小超过20MB限制"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -662,6 +951,49 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         except TestCaseScreenshot.DoesNotExist:
             return Response({"error": "截屏不存在"}, status=status.HTTP_404_NOT_FOUND)
 
+    @action(detail=True, methods=["get"], url_path="run-records")
+    def list_run_records(self, request, project_pk=None, pk=None):
+        """GET /api/projects/{project_pk}/testcases/{pk}/run-records/"""
+        testcase = self.get_object()
+        records = testcase.run_records.select_related("executor").order_by("-started_at")[:20]
+        from .serializers import TestCaseRunRecordSerializer
+
+        serializer = TestCaseRunRecordSerializer(records, many=True, context={"request": request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["get"], url_path="run-records/latest")
+    def latest_run_record(self, request, project_pk=None, pk=None):
+        """GET /api/projects/{project_pk}/testcases/{pk}/run-records/latest/?session_id="""
+        testcase = self.get_object()
+        from .serializers import TestCaseRunRecordSerializer
+
+        session_id = request.query_params.get("session_id")
+        queryset = testcase.run_records.select_related("executor").order_by("-started_at")
+        if session_id:
+            record = queryset.filter(session_id=session_id).first()
+        else:
+            record = queryset.first()
+        if not record:
+            return Response({"detail": "暂无执行记录"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(TestCaseRunRecordSerializer(record, context={"request": request}).data)
+
+    @action(
+        detail=True,
+        methods=["get"],
+        # 仅匹配数字 id：否则 "run-records/latest" 会被本路由先吃掉
+        # （DRF 的 extra action 按字母序注册，get_run_record 先于 latest_run_record），
+        # 导致 record_id='latest' 传入 filter(id=...) 抛 ValueError。
+        url_path=r"run-records/(?P<record_id>\d+)",
+    )
+    def get_run_record(self, request, project_pk=None, pk=None, record_id=None):
+        testcase = self.get_object()
+        from .serializers import TestCaseRunRecordSerializer
+
+        record = testcase.run_records.filter(id=record_id).select_related("executor").first()
+        if not record:
+            return Response({"detail": "执行记录不存在"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(TestCaseRunRecordSerializer(record, context={"request": request}).data)
+
     @action(detail=True, methods=["post"], url_path="screenshots/batch-delete")
     @permission_required("testcases.delete_testcasescreenshot")
     def batch_delete_screenshots(self, request, project_pk=None, pk=None):
@@ -744,98 +1076,10 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    @action(detail=True, methods=["post"], url_path="bind-ui-testcase")
-    def bind_ui_testcase(self, request, project_pk=None, pk=None):
-        """
-        绑定或解绑 UI 自动化用例
-        POST /api/projects/{project_pk}/testcases/{pk}/bind-ui-testcase/
-        请求体: {"ui_test_case_id": 123, "execution_mode": "hybrid"}
-        """
-        from ui_automation.models import UiTestCase
-        testcase = self.get_object()
-        ui_test_case_id = request.data.get("ui_test_case_id")
-
-        if ui_test_case_id:
-            try:
-                ui_tc = UiTestCase.objects.get(id=ui_test_case_id, project_id=testcase.project_id)
-                testcase.ui_test_case = ui_tc
-            except UiTestCase.DoesNotExist:
-                return Response(
-                    {"error": "指定的 UI 自动化用例不存在或不属于当前项目"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        else:
-            testcase.ui_test_case = None
-
-        if "execution_mode" in request.data:
-            testcase.execution_mode = request.data["execution_mode"]
-
-        testcase.save(update_fields=["ui_test_case", "execution_mode", "updated_at"])
-        serializer = self.get_serializer(testcase)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=["post"], url_path="diagnose-failure")
-    def diagnose_failure(self, request, project_pk=None, pk=None):
-        """
-        AI 失败归因诊断接口
-        POST /api/projects/{project_pk}/testcases/{pk}/diagnose-failure/
-        请求体: {"ui_execution_record_id": 123} (可选)
-        """
-        from .ai_diagnosis_service import diagnose_execution_failure
-        testcase = self.get_object()
-        ui_record_id = request.data.get("ui_execution_record_id")
-
-        try:
-            diagnosis = diagnose_execution_failure(
-                testcase=testcase,
-                ui_record_id=ui_record_id,
-                user=request.user,
-            )
-            return Response(diagnosis, status=status.HTTP_200_OK)
-        except ValueError as e:
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        except Exception as e:
-            return Response(
-                {"error": f"AI 诊断失败: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-    @action(detail=True, methods=["post"], url_path="apply-healing")
-    def apply_healing(self, request, project_pk=None, pk=None):
-        """
-        一键应用 AI 自愈建议，回写 UI 元素定位配置
-        POST /api/projects/{project_pk}/testcases/{pk}/apply-healing/
-        请求体: {
-            "element_id": 123,
-            "element_name": "...",
-            "suggested_locator_type": "xpath",
-            "suggested_locator_value": "..."
-        }
-        """
-        from .ai_diagnosis_service import apply_healing_to_element
-        testcase = self.get_object()
-        healing_data = request.data
-
-        try:
-            result = apply_healing_to_element(
-                testcase=testcase,
-                healing_data=healing_data,
-                user=request.user,
-            )
-            return Response(result, status=status.HTTP_200_OK)
-        except Exception as e:
-            return Response(
-                {"error": f"应用自愈建议失败: {str(e)}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
 
 class TestCaseModuleViewSet(viewsets.ModelViewSet):
     """
-    用例模块视图集，处理模块的 CRUD 操作，支持5级子模块。
+    用例模块视图集，处理模块的 CRUD 操作，最多支持 6 级。
     API 端点将嵌套在项目下，例如 /api/projects/{project_pk}/testcase-modules/
     """
 
@@ -864,8 +1108,32 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
             # 权限类 IsProjectMemberForTestCaseModule 已经检查了用户是否是此项目的成员
             return TestCaseModule.objects.filter(project=project).select_related(
                 "creator", "parent"
-            )
+            ).order_by("parent_id", "sort_order", "id")
         return TestCaseModule.objects.none()
+
+    def _normalize_sibling_order(self, project, parent_id):
+        siblings = list(
+            TestCaseModule.objects.filter(project=project, parent_id=parent_id)
+        )
+        siblings.sort(
+            key=lambda module: (
+                module.sort_order or module.order or module.id,
+                module.id,
+            )
+        )
+        for index, module in enumerate(siblings, start=1):
+            module.sort_order = index
+            module.order = index
+        if siblings:
+            TestCaseModule.objects.bulk_update(siblings, ["sort_order", "order"])
+        return siblings
+
+    def _persist_sibling_order(self, siblings):
+        for index, module in enumerate(siblings, start=1):
+            module.sort_order = index
+            module.order = index
+        if siblings:
+            TestCaseModule.objects.bulk_update(siblings, ["sort_order", "order"])
 
     def perform_create(self, serializer):
         """
@@ -880,19 +1148,18 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
 
     def perform_destroy(self, instance):
         """
-        级联删除模块，递归删除其下所有的测试用例和子模块
+        删除空模块；存在测试用例时阻止删除，避免误删业务数据。
         """
-        from django.db import transaction
-        from testcases.models import TestCase
-
-        # 获取该模块及其所有后代子模块的 ID 列表
         descendant_ids = instance.get_all_descendant_ids()
+        testcase_count = TestCase.objects.filter(module_id__in=descendant_ids).count()
+        if testcase_count:
+            from rest_framework.exceptions import ValidationError
 
-        with transaction.atomic():
-            # 先删除这些模块下的所有测试用例，解除 PROTECT 约束关系
-            TestCase.objects.filter(module_id__in=descendant_ids).delete()
-            # 接着删除当前模块实例，其子模块会自动级联删除（models.CASCADE）
-            instance.delete()
+            raise ValidationError(
+                f"无法删除模块 '{instance.name}'，该模块或子模块下还有 "
+                f"{testcase_count} 个测试用例。请先删除或移动这些用例。"
+            )
+        instance.delete()
 
     def get_serializer_context(self):
         """
@@ -905,14 +1172,51 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
             context["project"] = project
         return context
 
-    @action(detail=True, methods=["post"])
+    @action(detail=True, methods=["post"], url_path="move")
     def move(self, request, project_pk=None, pk=None, **kwargs):
         """
-        移动模块：支持移动到另一个模块的之前、之后或作为其子模块。
+        支持同级上移/下移，以及拖拽到目标模块之前、之后或内部。
         """
-        from django.db.models import Max
-        
         instance = self.get_object()
+        direction = request.data.get("direction")
+
+        if direction is not None:
+            if direction not in {"up", "down"}:
+                return Response(
+                    {"error": "direction 参数必须是 up 或 down"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            with transaction.atomic():
+                siblings = self._normalize_sibling_order(
+                    instance.project, instance.parent_id
+                )
+                current_index = next(
+                    (
+                        index
+                        for index, module in enumerate(siblings)
+                        if module.id == instance.id
+                    ),
+                    None,
+                )
+                if current_index is None:
+                    return Response(
+                        {"error": "模块不在当前同级列表中"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                target_index = (
+                    current_index - 1 if direction == "up" else current_index + 1
+                )
+                if 0 <= target_index < len(siblings):
+                    siblings[current_index], siblings[target_index] = (
+                        siblings[target_index],
+                        siblings[current_index],
+                    )
+                    self._persist_sibling_order(siblings)
+
+            return Response(self.get_serializer(instance).data)
+
         target_id = request.data.get("target_id")
         drop_position = request.data.get("drop_position")  # -1 (before), 1 (after), 0 (inside)
 
@@ -933,6 +1237,8 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
             )
 
         with transaction.atomic():
+            old_parent_id = instance.parent_id
+
             # 如果 target_id 为 None，说明移动到根节点层级
             if target_id is None:
                 if drop_position == 0:
@@ -940,23 +1246,19 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
                         {"error": "无法将模块拖入空位置中。"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                
+
                 instance.parent = None
                 instance.level = 1
-                instance.save()
-                
+                instance.save(update_fields=["parent", "level", "updated_at"])
+
                 # 重新排序根节点模块
-                root_modules = TestCaseModule.objects.filter(
-                    project_id=project_pk, parent=None
-                ).exclude(id=instance.id).order_by("order", "id")
-                
-                reordered = list(root_modules)
+                reordered = self._normalize_sibling_order(instance.project, None)
+                reordered = [module for module in reordered if module.id != instance.id]
                 reordered.append(instance)
-                
-                for index, m in enumerate(reordered, start=1):
-                    m.order = index
-                    m.save(update_fields=["order"])
-                
+                self._persist_sibling_order(reordered)
+                if old_parent_id is not None:
+                    self._normalize_sibling_order(instance.project, old_parent_id)
+
                 serializer = self.get_serializer(instance)
                 return Response(serializer.data)
 
@@ -981,53 +1283,54 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
 
             if drop_position == 0:
                 # 移动到目标模块内部，作为其子模块
-                if target_module.level >= 5:
+                if target_module.level >= MAX_MODULE_LEVEL:
                     return Response(
-                        {"error": "模块级别不能超过5级。"},
+                        {"error": "模块级别不能超过6级。"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                
+
                 # 校验子树最大深度
                 subtree_depth = instance.get_max_depth()
-                if target_module.level + subtree_depth > 5:
+                if target_module.level + subtree_depth > MAX_MODULE_LEVEL:
                     return Response(
-                        {"error": f"移动后模块层级将超过5级限制（当前子树深度: {subtree_depth}）。"},
+                        {"error": f"移动后模块层级将超过6级限制（当前子树深度: {subtree_depth}）。"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
                 instance.parent = target_module
                 instance.level = target_module.level + 1
-                
-                # 获取目标模块下已有子模块的最大 order
-                max_order = TestCaseModule.objects.filter(
-                    parent=target_module
-                ).aggregate(Max("order"))["order__max"] or 0
-                
-                instance.order = max_order + 1
-                instance.save()
-                
+                instance.save(update_fields=["parent", "level", "updated_at"])
+
+                reordered = self._normalize_sibling_order(
+                    instance.project, target_module.id
+                )
+                reordered = [module for module in reordered if module.id != instance.id]
+                reordered.append(instance)
+                self._persist_sibling_order(reordered)
+
             else:
                 # 移动到目标模块的前面或后面，成为同级模块
                 parent = target_module.parent
-                
+
                 # 校验子树最大深度
                 target_parent_level = target_module.parent.level if target_module.parent else 0
                 subtree_depth = instance.get_max_depth()
-                if target_parent_level + subtree_depth > 5:
+                if target_parent_level + subtree_depth > MAX_MODULE_LEVEL:
                     return Response(
-                        {"error": f"移动后模块层级将超过5级限制（当前子树深度: {subtree_depth}）。"},
+                        {"error": f"移动后模块层级将超过6级限制（当前子树深度: {subtree_depth}）。"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
                 instance.parent = parent
                 instance.level = target_module.level
-                instance.save()
-                
+                instance.save(update_fields=["parent", "level", "updated_at"])
+
                 # 重新排序所有同级模块
-                siblings = TestCaseModule.objects.filter(
-                    project_id=project_pk, parent=parent
-                ).exclude(id=instance.id).order_by("order", "id")
-                
+                siblings = self._normalize_sibling_order(
+                    instance.project, target_module.parent_id
+                )
+                siblings = [module for module in siblings if module.id != instance.id]
+
                 reordered = []
                 for s in siblings:
                     if s.id == target_module.id and drop_position == -1:
@@ -1038,14 +1341,15 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
                         reordered.append(instance)
                     else:
                         reordered.append(s)
-                
+
                 # 防御，如果目标模块没在 siblings 里（理论上不可能）
                 if instance not in reordered:
                     reordered.append(instance)
 
-                for index, m in enumerate(reordered, start=1):
-                    m.order = index
-                    m.save(update_fields=["order"])
+                self._persist_sibling_order(reordered)
+
+            if old_parent_id != instance.parent_id:
+                self._normalize_sibling_order(instance.project, old_parent_id)
 
             serializer = self.get_serializer(instance)
             return Response(serializer.data)
@@ -1057,6 +1361,7 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
     API 端点将嵌套在项目下，例如 /api/projects/{project_pk}/test-suites/
     """
 
+    pagination_class = StandardPagination
     filter_backends = [filters.SearchFilter]
     search_fields = ["name", "description"]
 
@@ -1075,15 +1380,23 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
         project_pk = self.kwargs.get("project_pk")
         if project_pk:
             project = get_object_or_404(Project, pk=project_pk)
-            return TestSuite.objects.filter(project=project).prefetch_related(
-                "testcases", "creator"
+            queryset = (
+                TestSuite.objects.filter(project=project)
+                .select_related("pre_data_plan", "pre_data_environment", "creator")
             )
+            if getattr(self, "action", None) == "list":
+                return queryset.annotate(_testcase_count=Count("testcases", distinct=True)).order_by(
+                    "-id"
+                )
+            return queryset.prefetch_related("testcases")
         return TestSuite.objects.none()
 
     def get_serializer_class(self):
         """根据不同action返回不同的序列化器"""
-        from .serializers import TestSuiteSerializer
+        from .serializers import TestSuiteListSerializer, TestSuiteSerializer
 
+        if self.action == "list":
+            return TestSuiteListSerializer
         return TestSuiteSerializer
 
     def get_serializer_context(self):
@@ -1107,7 +1420,9 @@ class TestExecutionViewSet(viewsets.ModelViewSet):
     API 端点将嵌套在项目下，例如 /api/projects/{project_pk}/test-executions/
     """
 
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    pagination_class = StandardPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ["status"]
     search_fields = ["suite__name"]
     ordering_fields = ["created_at", "started_at", "completed_at", "status"]
     ordering = ["-created_at"]
@@ -1127,21 +1442,29 @@ class TestExecutionViewSet(viewsets.ModelViewSet):
         project_pk = self.kwargs.get("project_pk")
         if project_pk:
             project = get_object_or_404(Project, pk=project_pk)
-            return (
-                TestExecution.objects.filter(suite__project=project)
-                .select_related("suite", "executor")
-                .prefetch_related("results")
+            queryset = TestExecution.objects.filter(suite__project=project).select_related(
+                "suite",
+                "executor",
+                "data_generation_run",
+                "data_generation_run__plan",
             )
+            if getattr(self, "action", None) in ("retrieve", "update", "partial_update"):
+                return queryset.prefetch_related("results__testcase")
+            return queryset
         return TestExecution.objects.none()
 
     def get_serializer_class(self):
         """根据不同action返回不同的序列化器"""
-        from .serializers import TestExecutionSerializer, TestExecutionCreateSerializer
-
-
+        from .serializers import (
+            TestExecutionCreateSerializer,
+            TestExecutionListSerializer,
+            TestExecutionSerializer,
+        )
 
         if self.action == "create":
             return TestExecutionCreateSerializer
+        if self.action == "list":
+            return TestExecutionListSerializer
         return TestExecutionSerializer
 
     def create(self, request, *args, **kwargs):

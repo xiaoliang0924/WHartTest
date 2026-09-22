@@ -1,0 +1,22 @@
+FROM ghcr.io/mgdaaslab/wharttest-backend:latest
+
+COPY WHartTest_Django/wharttest_django/notification_service.py /app/wharttest_django/notification_service.py
+COPY WHartTest_Django/wharttest_django/settings.py /app/wharttest_django/settings.py
+COPY WHartTest_Django/wharttest_django/health.py /app/wharttest_django/health.py
+COPY WHartTest_Django/wharttest_django/urls.py /app/wharttest_django/urls.py
+COPY WHartTest_Django/api_testcases/services.py /app/api_testcases/services.py
+COPY WHartTest_Django/api_testtasks/services.py /app/api_testtasks/services.py
+COPY WHartTest_Django/ui_automation/models.py /app/ui_automation/models.py
+COPY WHartTest_Django/ui_automation/consumers.py /app/ui_automation/consumers.py
+COPY WHartTest_Django/testcases/tasks.py /app/testcases/tasks.py
+COPY WHartTest_Django/testcases/models.py /app/testcases/models.py
+COPY WHartTest_Django/testcases/serializers.py /app/testcases/serializers.py
+COPY WHartTest_Django/testcases/manual_execution_views.py /app/testcases/manual_execution_views.py
+COPY WHartTest_Django/testcases/migrations/0026_manual_assignment_testcase_snapshot.py /app/testcases/migrations/0026_manual_assignment_testcase_snapshot.py
+COPY WHartTest_Django/testcases/migrations/0027_alter_testcase_options.py /app/testcases/migrations/0027_alter_testcase_options.py
+COPY WHartTest_Django/orchestrator_integration/agent_loop_view.py /app/orchestrator_integration/agent_loop_view.py
+COPY WHartTest_Django/orchestrator_integration/builtin_tools/skill_tools.py /app/orchestrator_integration/builtin_tools/skill_tools.py
+COPY WHartTest_Django/orchestrator_integration/builtin_tools/persistent_playwright.py /app/orchestrator_integration/builtin_tools/persistent_playwright.py
+COPY WHartTest_Django/langgraph_integration/views.py /app/langgraph_integration/views.py
+COPY WHartTest_Django/mcp_tools/views.py /app/mcp_tools/views.py
+COPY WHartTest_Django/mcp_tools/services.py /app/mcp_tools/services.py

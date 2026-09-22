@@ -49,6 +49,17 @@ export interface TestExecution {
   duration?: number;
   pass_rate: number;
   results?: TestCaseResult[];
+  data_generation_run?: number | null;
+  data_generation_run_detail?: {
+    id: number;
+    status: string;
+    plan_name?: string;
+    output_snapshot?: Record<string, unknown>;
+    error_message?: string;
+    step_logs?: Array<Record<string, unknown>>;
+    started_at?: string;
+    finished_at?: string;
+  } | null;
   created_at: string;
   updated_at: string;
 }
@@ -140,6 +151,9 @@ export const getTestExecutionList = async (
   params?: {
     search?: string;
     ordering?: string;
+    status?: string;
+    page?: number;
+    page_size?: number;
   }
 ): Promise<TestExecutionListResponse> => {
   const authStore = useAuthStore();

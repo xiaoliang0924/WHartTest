@@ -19,6 +19,7 @@ export interface TestCaseModule {
   parent: number | null; // 父模块ID
   parent_id: number | null; // 父模块ID (另一种表示)
   level: number; // 模块层级
+  sort_order: number; // 模块排序
   creator: number; // 创建者ID
   creator_detail?: {
     id: number;
@@ -35,6 +36,7 @@ export interface TestCaseModule {
   // 可能的附加字段
   children_count?: number;
   test_case_count?: number;
+  testcase_count?: number;
   // 前端构建树时可能需要
   children?: TestCaseModule[];
   key?: number | string; // for a-tree
@@ -67,25 +69,39 @@ const getApiBasePath = (projectId: string | number | undefined | null) => {
   return `${APP_API_BASE_URL}/projects/${projectId}/testcase-modules/`;
 };
 
+const extractErrorMessage = (responseData: any, defaultMessage: string): string => {
+  const errors = responseData?.errors;
+  if (Array.isArray(errors) && errors.length > 0) {
+    return errors.join('; ');
+  }
+  if (errors && typeof errors === 'object') {
+    const details = Object.values(errors)
+      .flatMap((value) => (Array.isArray(value) ? value : [value]))
+      .map((value) => String(value))
+      .filter(Boolean);
+    if (details.length > 0) {
+      return details.join('; ');
+    }
+  }
+  if (responseData?.detail) {
+    return responseData.detail;
+  }
+  if (responseData?.message) {
+    return responseData.message;
+  }
+  if (typeof responseData === 'string') {
+    return responseData;
+  }
+  return defaultMessage;
+};
+
 // 辅助函数处理 Axios 错误
 const handleError = (error: any, defaultMessage: string): APIResponse<any> => {
   console.error(defaultMessage, error);
   if (axios.isAxiosError(error)) {
-    const responseData = error.response?.data;
-    // 优先使用 errors 数组中的详细错误信息
-    let message = defaultMessage;
-    if (responseData?.errors && Array.isArray(responseData.errors) && responseData.errors.length > 0) {
-      message = responseData.errors.join('; ');
-    } else if (responseData?.detail) {
-      message = responseData.detail;
-    } else if (responseData?.message) {
-      message = responseData.message;
-    } else if (typeof responseData === 'string') {
-      message = responseData;
-    }
     return {
       success: false,
-      error: message,
+      error: extractErrorMessage(error.response?.data, defaultMessage),
       statusCode: error.response?.status,
     };
   }
@@ -196,7 +212,7 @@ export const createTestCaseModule = async (
     } else {
       return {
         success: false,
-        error: response.data.message || '创建模块失败',
+        error: extractErrorMessage(response.data, '创建模块失败'),
         statusCode: response.data.code,
       };
     }
@@ -354,11 +370,11 @@ export const deleteTestCaseModule = async (
   }
 };
 
-// 移动模块 (拖拽排序)
+// 移动模块：兼容按钮上移/下移和拖拽排序。
 export const moveTestCaseModule = async (
   projectId: string | number | undefined | null,
   moduleId: number,
-  data: { target_id: number | null; drop_position: number }
+  movement: 'up' | 'down' | { target_id: number | null; drop_position: number }
 ): Promise<APIResponse<TestCaseModule>> => {
   if (!projectId) return { success: false, error: '项目ID不能为空' };
 
@@ -376,7 +392,7 @@ export const moveTestCaseModule = async (
     const basePath = getApiBasePath(projectId);
     const response = await axios.post<ApiResponse<TestCaseModule>>(
       `${basePath}${moduleId}/move/`,
-      data,
+      typeof movement === 'string' ? { direction: movement } : movement,
       {
         headers: {
           'Authorization': `Bearer ${accessToken}`,
@@ -393,13 +409,13 @@ export const moveTestCaseModule = async (
         data: response.data.data,
         statusCode: response.data.code,
       };
-    } else {
-      return {
-        success: false,
-        error: response.data.message || '移动模块失败',
-        statusCode: response.data.code,
-      };
     }
+
+    return {
+      success: false,
+      error: response.data.message || '移动模块失败',
+      statusCode: response.data.code,
+    };
   } catch (error: any) {
     return handleError(error, '移动模块失败');
   }

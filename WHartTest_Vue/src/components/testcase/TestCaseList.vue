@@ -7,7 +7,7 @@
           allow-clear
           class="search-input"
           @search="onSearch"
-          :style="{ width: isSmallScreen ? '70px' : '130px' }"
+          :style="{ width: isSmallScreen ? '90px' : '170px' }"
           v-model="localSearchKeyword"
         />
         <a-select
@@ -63,6 +63,41 @@
         </a-button>
         <a-button
           v-if="selectedTestCaseIds.length > 0"
+          type="outline"
+          @click="openMoveModal(selectedTestCaseIds)"
+        >
+          <template #icon><icon-folder /></template>
+          {{ pageText.batchMoveButton(selectedTestCaseIds.length) }}
+        </a-button>
+        <a-dropdown
+          v-if="selectedTestCaseIds.length > 0"
+          trigger="click"
+          @select="handleBatchReviewStatusChange"
+        >
+          <a-button type="outline">
+            {{ pageText.batchReviewStatusButton(selectedTestCaseIds.length) }}
+            <icon-down style="margin-left: 4px;" />
+          </a-button>
+          <template #content>
+            <a-doption
+              v-for="option in reviewStatusOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              <a-tag :color="option.color" size="small">{{ option.label }}</a-tag>
+            </a-doption>
+          </template>
+        </a-dropdown>
+        <a-button
+          v-if="selectedTestCaseIds.length > 0"
+          type="primary"
+          @click="assignSelectedCases"
+        >
+          <template #icon><icon-user-add /></template>
+          分派执行 ({{ selectedTestCaseIds.length }})
+        </a-button>
+        <a-button
+          v-if="selectedTestCaseIds.length > 0"
           type="primary"
           status="danger"
           @click="handleBatchDelete"
@@ -71,15 +106,6 @@
         </a-button>
       </div>
       <div class="action-buttons">
-        <a-badge :count="runningTasksCount" :dot="false" :max-count="99">
-          <a-button type="outline" class="task-queue-btn" @click="emit('open-task-queue')">
-            <template #icon>
-              <icon-sync v-if="runningTasksCount > 0" spin />
-              <icon-list v-else />
-            </template>
-            {{ pageText.taskQueue }}
-          </a-button>
-        </a-badge>
         <a-button type="primary" @click="handleGenerateTestCases">{{ pageText.generateCases }}</a-button>
         <a-button type="primary" @click="handleAddTestCase">{{ pageText.addCase }}</a-button>
       </div>
@@ -101,9 +127,14 @@
       :loading="loading"
       :scroll="tableScroll"
       :bordered="{ cell: true }"
+      row-key="id"
+      :draggable="{ type: 'handle', width: 32 }"
+      column-resizable
       class="test-case-table"
       @page-change="onPageChange"
       @page-size-change="onPageSizeChange"
+@change="handleTableChange"
+      @column-resize="handleColumnResize"
       @sorter-change="onSorterChange"
 
 
@@ -129,7 +160,11 @@
       </template>
       <template #name="{ record }">
         <a-tooltip :content="record.name">
-          <span class="testcase-name-link" @click.stop="handleViewTestCase(record)">
+          <span
+            class="testcase-name-link testcase-text-cell"
+            :style="getTextCellStyle('name')"
+            @click.stop="handleViewTestCase(record)"
+          >
             {{ record.name }}
           </span>
         </a-tooltip>
@@ -157,76 +192,53 @@
         </a-dropdown>
       </template>
       <template #module="{ record }">
-        <span v-if="record.module_detail">{{ record.module_detail }}</span>
-        <span v-else class="text-gray">{{ pageText.unassigned }}</span>
+        <a-tooltip v-if="record.module_detail" :content="record.module_detail">
+          <span class="testcase-text-cell" :style="getTextCellStyle('module_detail')">
+            {{ record.module_detail }}
+          </span>
+        </a-tooltip>
+        <span v-else class="text-gray testcase-text-cell" :style="getTextCellStyle('module_detail')">
+          {{ pageText.unassigned }}
+        </span>
       </template>
-      <template #uiBinding="{ record }">
-        <div v-if="record.ui_test_case_detail" class="ui-bound-badge">
-          <a-tooltip
-            :content="`${record.ui_test_case_detail.module_name ? `[${record.ui_test_case_detail.module_name}] ` : ''}${record.ui_test_case_detail.name} (${record.ui_test_case_detail.step_count || 0} 步)`"
-            position="top"
-          >
-            <a-tag color="green" size="small" class="ui-bound-tag" @click.stop="openQuickBindModal(record)">
-              <template #icon><icon-check-circle-fill /></template>
-              <span class="ui-bound-tag-text">{{ record.ui_test_case_detail.name }}</span>
-            </a-tag>
-          </a-tooltip>
-        </div>
-        <div v-else class="ui-unbound-badge">
-          <a-tooltip :content="tl('点击快速关联 UI 自动化用例')" position="top">
-            <a-tag color="gray" size="small" class="ui-unbound-tag" @click.stop="openQuickBindModal(record)">
-              {{ tl('未绑定') }}
-            </a-tag>
-          </a-tooltip>
-        </div>
+      <template #creator="{ record }">
+        <a-tooltip :content="record.creator_detail?.username || '-'">
+          <span class="testcase-text-cell" :style="getTextCellStyle('creator_detail')">
+            {{ record.creator_detail?.username || '-' }}
+          </span>
+        </a-tooltip>
+      </template>
+      <template #lastExecution="{ record }">
+        <a-tag
+          v-if="record.latest_run"
+          :color="getRunStatusColor(record.latest_run.status)"
+          class="run-status-tag"
+          @click.stop="handleViewExecutionReport(record)"
+        >
+          {{ getRunStatusLabel(record.latest_run.status) }}
+        </a-tag>
+        <span v-else>-</span>
       </template>
       <template #operations="{ record }">
         <a-space :size="4">
           <a-button type="primary" size="mini" @click.stop="handleViewTestCase(record)">{{ pageText.view }}</a-button>
           <a-button type="primary" size="mini" @click.stop="handleEditTestCase(record)">{{ pageText.edit }}</a-button>
+          <a-button type="outline" size="mini" @click.stop="openMoveModal([record.id])">{{ pageText.move }}</a-button>
           <a-button type="outline" size="mini" @click.stop="handleExecuteTestCase(record)">{{ pageText.execute }}</a-button>
+          <a-button
+            v-if="record.latest_run"
+            type="outline"
+            size="mini"
+            status="success"
+            @click.stop="handleViewExecutionReport(record)"
+          >
+            {{ pageText.report }}
+          </a-button>
           <a-button type="outline" size="mini" @click.stop="handleCopyTestCase(record)">{{ pageText.copy }}</a-button>
           <a-button type="primary" status="danger" size="mini" @click.stop="handleDeleteTestCase(record)">{{ pageText.delete }}</a-button>
         </a-space>
       </template>
     </a-table>
-
-    <!-- 快速绑定 UI 自动化用例弹窗 -->
-    <a-modal
-      v-model:visible="quickBindModalVisible"
-      :title="tl('绑定 UI 自动化用例')"
-      :width="460"
-      @ok="handleConfirmQuickBind"
-      :ok-loading="submittingQuickBind"
-    >
-      <a-form layout="vertical">
-        <a-form-item :label="tl('当前功能用例')">
-          <span style="font-weight: 500;">{{ currentBindTestCase?.name }}</span>
-        </a-form-item>
-        <a-form-item :label="tl('关联的 UI 自动化用例')">
-          <a-select
-            v-model="targetUiTestCaseId"
-            :placeholder="tl('请选择 UI 自动化用例（留空表示解绑）')"
-            allow-clear
-            :loading="loadingUiOptions"
-          >
-            <a-option
-              v-for="item in availableUiTestCases"
-              :key="item.id"
-              :value="item.id"
-              :label="`${item.name} (${item.level || 'P2'})`"
-            />
-          </a-select>
-        </a-form-item>
-        <a-form-item :label="tl('默认执行模式')">
-          <a-select v-model="targetExecutionMode">
-            <a-option value="hybrid">{{ tl('智能双模（脚本优先 + 失败 AI 自愈介入）') }}</a-option>
-            <a-option value="script_only">{{ tl('仅脚本执行') }}</a-option>
-            <a-option value="ai_only">{{ tl('纯 AI 探索执行') }}</a-option>
-          </a-select>
-        </a-form-item>
-      </a-form>
-    </a-modal>
 
     <ImportModal
       v-if="currentProjectId"
@@ -242,34 +254,53 @@
       :selected-ids="selectedTestCaseIds"
       :module-tree="moduleTree"
     />
+
+    <a-modal
+      v-model:visible="moveModalVisible"
+      :title="pageText.moveCasesTitle"
+      :ok-text="pageText.move"
+      :ok-loading="isMoving"
+      @before-ok="handleConfirmMove"
+    >
+      <p class="move-modal-hint">{{ pageText.moveCasesHint(movingTestCaseIds.length) }}</p>
+      <a-tree-select
+        v-model="targetModuleId"
+        :data="moduleTree || []"
+        :placeholder="pageText.selectTargetModule"
+        allow-search
+        allow-clear
+        :filter-tree-node="filterTreeNodeByName"
+        :field-names="{ key: 'key', title: 'title', children: 'children' }"
+      />
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, computed, watch, toRefs } from 'vue';
+import { useRouter } from 'vue-router';
 import { Message, Modal } from '@arco-design/web-vue';
-import { IconFolder, IconDownload, IconUpload, IconDown, IconCheckCircleFill, IconList, IconSync } from '@arco-design/web-vue/es/icon';
+import { IconFolder, IconDownload, IconUpload, IconDown } from '@arco-design/web-vue/es/icon';
 import { useAppI18n } from '@/composables/useAppI18n';
-import { useTestCaseExecutionQueue } from '@/composables/useTestCaseExecutionQueue';
 import ImportModal from '@/features/testcase-templates/components/ImportModal.vue';
 import ExportModal from '@/features/testcase-templates/components/ExportModal.vue';
 import {
   getTestCaseList,
-  getAllTestCaseIds,
   deleteTestCase as deleteTestCaseService,
   copyTestCase as copyTestCaseService,
   batchDeleteTestCases,
+  batchMoveTestCases,
+  batchUpdateTestCaseReviewStatus,
+  reorderTestCases,
   updateTestCaseReviewStatus,
-  bindUiTestCase,
   type TestCase,
   type ReviewStatus,
-  type TestCaseNavigationFilters,
 } from '@/services/testcaseService';
-import { testCaseApi } from '@/features/ui-automation/api';
-import type { UiTestCase } from '@/features/ui-automation/types';
-import { extractPaginationData } from '@/features/ui-automation/types';
 import { formatDate, getLevelColor, getReviewStatusColor } from '@/utils/formatters';
-import type { TreeNodeData } from '@arco-design/web-vue';
+import { filterTreeNodeByName } from '@/utils/filterTreeNode';
+import type { TableColumnData, TreeNodeData } from '@arco-design/web-vue';
+
+const router = useRouter();
 
 const props = defineProps<{
   currentProjectId: number | null;
@@ -280,34 +311,53 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'addTestCase'): void;
   (e: 'generate-test-cases'): void;
-  (e: 'open-task-queue'): void;
   (e: 'editTestCase', testCase: TestCase): void;
   (e: 'viewTestCase', testCase: TestCase): void;
   (e: 'testCaseDeleted'): void;
+(e: 'testCasesMoved'): void;
   (e: 'testCaseCopied'): void;
   (e: 'executeTestCase', testCase: TestCase): void;
+  (e: 'viewExecutionReport', testCase: TestCase): void;
   (e: 'module-filter-change', moduleId: number | null): void;
   (e: 'requestOptimization', testCase: TestCase): void;
 }>();
 
+const assignSelectedCases = () => {
+  router.push({
+    name: 'ManualTestExecution',
+    query: { testcase_ids: selectedTestCaseIds.value.join(',') },
+  });
+};
+
 const { currentProjectId, selectedModuleId } = toRefs(props);
-const { isEnglish, tl } = useAppI18n();
-const { runningTasksCount } = useTestCaseExecutionQueue();
+const { isEnglish } = useAppI18n();
 
 const pageText = computed(() => (
   isEnglish.value
     ? {
-        searchPlaceholder: 'Search case name/precondition',
+        searchPlaceholder: 'Search name/ID/precondition',
         priorityShort: 'Priority',
         priorityFilter: 'Filter priority',
         reviewStatusFilter: 'Filter review status',
         typeShort: 'Type',
-        testTypeFilter: 'Filter test type',
+        testTypeFilter: 'Test type',
         updatedAt: 'Updated at',
         export: 'Export',
         import: 'Import',
         batchDeleteButton: (count: number) => `Batch delete (${count})`,
-        taskQueue: 'Task Queue',
+        batchMoveButton: (count: number) => `Move (${count})`,
+        batchReviewStatusButton: (count: number) => `Review status (${count})`,
+        batchReviewStatusSuccess: (count: number, status: string) => `Updated review status to ${status} for ${count} test case(s)`,
+        batchReviewStatusFailed: 'Failed to batch update review status',
+        batchReviewStatusError: 'An error occurred while batch updating review status',
+        move: 'Move',
+        moveCasesTitle: 'Move test cases',
+        moveCasesHint: (count: number) => `Select a target module for ${count} test case(s).`,
+        selectTargetModule: 'Select target module',
+        selectTargetModuleFirst: 'Select a target module first',
+        moveCasesSuccess: (count: number, moduleName: string) => `Moved ${count} test case(s) to ${moduleName}`,
+        moveCasesFailed: 'Failed to move test cases',
+        moveCasesError: 'An error occurred while moving test cases',
         generateCases: 'Generate cases',
         addCase: 'Add case',
         noProjectSelected: 'Select a project from the top bar',
@@ -315,6 +365,7 @@ const pageText = computed(() => (
         view: 'View',
         edit: 'Edit',
         execute: 'Run',
+        report: 'Report',
         delete: 'Delete',
         copy: 'Copy',
         select: 'Select',
@@ -324,7 +375,6 @@ const pageText = computed(() => (
         testType: 'Test type',
         reviewStatus: 'Review status',
         module: 'Module',
-        uiAutomation: 'UI Automation',
         creator: 'Created by',
         createdAt: 'Created at',
         actions: 'Actions',
@@ -350,9 +400,15 @@ const pageText = computed(() => (
         batchDeleteDetails: (details: string) => `Deletion details: ${details}`,
         batchDeleteFailed: 'Failed to batch delete test cases',
         batchDeleteError: 'An error occurred while batch deleting test cases',
+        lastExecution: 'Last run',
+        runRunning: 'Running',
+        runPass: 'Pass',
+        runFail: 'Fail',
+        runError: 'Error',
+        runStopped: 'Stopped',
       }
     : {
-        searchPlaceholder: '搜索用例名称/前置条件',
+        searchPlaceholder: '搜索用例名称/ID/前置条件',
         priorityShort: '优先级',
         priorityFilter: '筛选优先级',
         reviewStatusFilter: '筛选审核状态',
@@ -362,7 +418,19 @@ const pageText = computed(() => (
         export: '导出',
         import: '导入',
         batchDeleteButton: (count: number) => `批量删除 (${count})`,
-        taskQueue: '执行队列',
+        batchMoveButton: (count: number) => `移动 (${count})`,
+        batchReviewStatusButton: (count: number) => `修改审核状态 (${count})`,
+        batchReviewStatusSuccess: (count: number, status: string) => `已将 ${count} 条用例的审核状态更新为「${status}」`,
+        batchReviewStatusFailed: '批量更新审核状态失败',
+        batchReviewStatusError: '批量更新审核状态时发生错误',
+        move: '移动',
+        moveCasesTitle: '移动测试用例',
+        moveCasesHint: (count: number) => `请选择 ${count} 条测试用例的目标模块`,
+        selectTargetModule: '请选择目标模块',
+        selectTargetModuleFirst: '请先选择目标模块',
+        moveCasesSuccess: (count: number, moduleName: string) => `已将 ${count} 条测试用例移动到 ${moduleName}`,
+        moveCasesFailed: '移动测试用例失败',
+        moveCasesError: '移动测试用例时发生错误',
         generateCases: '生成用例',
         addCase: '添加用例',
         noProjectSelected: '请在顶部选择一个项目',
@@ -370,6 +438,7 @@ const pageText = computed(() => (
         view: '查看',
         edit: '编辑',
         execute: '执行',
+        report: '报告',
         delete: '删除',
         copy: '复制',
         select: '选择',
@@ -379,7 +448,6 @@ const pageText = computed(() => (
         testType: '测试类型',
         reviewStatus: '审核状态',
         module: '所属模块',
-        uiAutomation: 'UI自动化',
         creator: '创建者',
         createdAt: '创建时间',
         actions: '操作',
@@ -405,6 +473,12 @@ const pageText = computed(() => (
         batchDeleteDetails: (details: string) => `删除详情: ${details}`,
         batchDeleteFailed: '批量删除测试用例失败',
         batchDeleteError: '批量删除测试用例时发生错误',
+        lastExecution: '最近执行',
+        runRunning: '执行中',
+        runPass: '通过',
+        runFail: '失败',
+        runError: '错误',
+        runStopped: '已停止',
       }
 ));
 
@@ -427,17 +501,19 @@ const levelOptions = computed(() => (
 const reviewStatusOptions = computed(() => (
   isEnglish.value
     ? [
-        { value: 'pending_review', label: 'Pending review', color: 'orange' },
+        { value: 'pending_review', label: 'Pending', color: 'orange' },
         { value: 'approved', label: 'Approved', color: 'green' },
-        { value: 'needs_optimization', label: 'Needs optimization', color: 'blue' },
-        { value: 'optimization_pending_review', label: 'Optimization pending review', color: 'cyan' },
-        { value: 'unavailable', label: 'Unavailable', color: 'red' },
+        { value: 'needs_optimization', label: 'Optimize', color: 'blue' },
+        { value: 'optimization_pending_review', label: 'Re-review', color: 'purple' },
+        { value: 'pending_product_confirmation', label: 'Product confirmation', color: 'cyan' },
+        { value: 'unavailable', label: 'N/A', color: 'red' },
       ]
     : [
         { value: 'pending_review', label: '待审核', color: 'orange' },
         { value: 'approved', label: '通过', color: 'green' },
         { value: 'needs_optimization', label: '优化', color: 'blue' },
-        { value: 'optimization_pending_review', label: '优化待审核', color: 'cyan' },
+        { value: 'optimization_pending_review', label: '优化待审核', color: 'purple' },
+        { value: 'pending_product_confirmation', label: '待产品确认', color: 'cyan' },
         { value: 'unavailable', label: '不可用', color: 'red' },
       ]
 ));
@@ -445,13 +521,13 @@ const reviewStatusOptions = computed(() => (
 const testTypeOptions = computed(() => (
   isEnglish.value
     ? [
-        { value: 'smoke', label: 'Smoke test' },
-        { value: 'functional', label: 'Functional test' },
-        { value: 'boundary', label: 'Boundary test' },
-        { value: 'exception', label: 'Exception test' },
-        { value: 'permission', label: 'Permission test' },
-        { value: 'security', label: 'Security test' },
-        { value: 'compatibility', label: 'Compatibility test' },
+        { value: 'smoke', label: 'Smoke' },
+        { value: 'functional', label: 'Functional' },
+        { value: 'boundary', label: 'Boundary' },
+        { value: 'exception', label: 'Exception' },
+        { value: 'permission', label: 'Permission' },
+        { value: 'security', label: 'Security' },
+        { value: 'compatibility', label: 'Compatibility' },
       ]
     : [
         { value: 'smoke', label: '冒烟测试' },
@@ -485,14 +561,60 @@ const loading = ref(false);
 const localSearchKeyword = ref('');
 const selectedLevel = ref<string>('');
 const selectedTestType = ref<string>('');
-const selectedOrdering = ref<string>('-created_at');
+const selectedOrdering = ref<string>('created_at');
 // 默认选中除"不可用"之外的所有状态
-const DEFAULT_REVIEW_STATUSES: ReviewStatus[] = ['pending_review', 'approved', 'needs_optimization', 'optimization_pending_review'];
+const DEFAULT_REVIEW_STATUSES: ReviewStatus[] = ['pending_review', 'approved', 'needs_optimization', 'optimization_pending_review', 'pending_product_confirmation'];
 const selectedReviewStatuses = ref<ReviewStatus[]>([...DEFAULT_REVIEW_STATUSES]);
 const testCaseData = ref<TestCase[]>([]);
 const selectedTestCaseIds = ref<number[]>([]);
+const movingTestCaseIds = ref<number[]>([]);
+const targetModuleId = ref<number | undefined>();
+const moveModalVisible = ref(false);
+const isMoving = ref(false);
 const importModalRef = ref<InstanceType<typeof ImportModal> | null>(null);
 const exportModalRef = ref<InstanceType<typeof ExportModal> | null>(null);
+const COLUMN_WIDTH_STORAGE_KEY = 'wharttest:testcase-list-column-widths';
+
+const defaultColumnWidths: Record<string, number> = {
+  id: 50,
+  name: 180,
+  precondition: 120,
+  level: 80,
+  test_type: 90,
+  review_status: 120,
+  module_detail: 100,
+  creator_detail: 80,
+  created_at: 130,
+  updated_at: 130,
+};
+
+const getStoredColumnWidths = (): Record<string, number> => {
+  try {
+    const stored = localStorage.getItem(COLUMN_WIDTH_STORAGE_KEY);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored) as Record<string, number>;
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, width]) => Number.isFinite(width) && width >= 40)
+    );
+  } catch {
+    return {};
+  }
+};
+
+const columnWidths = reactive<Record<string, number>>({
+  ...defaultColumnWidths,
+  ...getStoredColumnWidths(),
+});
+
+const getColumnWidth = (key: string): number => columnWidths[key] ?? defaultColumnWidths[key] ?? 100;
+
+const getTextCellStyle = (key: string) => ({
+  maxWidth: `${Math.max(24, getColumnWidth(key) - 24)}px`,
+});
+
+const saveColumnWidths = () => {
+  localStorage.setItem(COLUMN_WIDTH_STORAGE_KEY, JSON.stringify(columnWidths));
+};
 
 // 响应式屏幕宽度检测
 const isSmallScreen = ref(window.innerWidth < 1222);
@@ -505,7 +627,10 @@ const handleResize = () => {
 
 // 表格滚动配置
 const tableScroll = computed(() => ({
-  x: 1070,
+x: Math.max(
+    1070,
+    32 + 36 + Object.keys(defaultColumnWidths).reduce((total, key) => total + getColumnWidth(key), 0) + 240
+  ),
   y: tableContainerHeight.value,
 }));
 
@@ -517,14 +642,6 @@ const paginationConfig = reactive({
   showJumper: true,
   showPageSize: true,
   pageSizeOptions: [10, 20, 50, 100],
-});
-
-const buildCurrentFilters = (): TestCaseNavigationFilters => ({
-  search: localSearchKeyword.value,
-  module_id: localSelectedModuleId.value || undefined,
-  level: selectedLevel.value || undefined,
-  test_type: selectedTestType.value || undefined,
-  review_status_in: selectedReviewStatuses.value.length > 0 ? selectedReviewStatuses.value : undefined,
 });
 
 // 复选框选择相关的计算属性和方法
@@ -600,41 +717,40 @@ const getSortOrder = (field: string): 'ascend' | 'descend' | '' => {
   return '';
 };
 
-const columns = computed(() => [
+const columns = computed(() => ([
   {
     title: pageText.value.select,
     slotName: 'selection',
     width: 36,
-    dataIndex: 'selection',
     titleSlotName: 'selectAll',
     align: 'center'
   },
   {
     title: 'ID',
     dataIndex: 'id',
-    width: 50,
+    width: getColumnWidth('id'),
     align: 'center',
     sortable: { sortDirections: ['ascend', 'descend'], sortOrder: getSortOrder('id') },
   },
-  { title: pageText.value.caseName, dataIndex: 'name', slotName: 'name', width: 180, ellipsis: true, tooltip: false, align: 'center' },
-  { title: pageText.value.precondition, dataIndex: 'precondition', width: 120, ellipsis: true, tooltip: true, align: 'center' },
-  { title: pageText.value.priority, dataIndex: 'level', slotName: 'level', width: 80, align: 'center' },
-  { title: pageText.value.testType, dataIndex: 'test_type', slotName: 'testType', width: 90, align: 'center' },
-  { title: pageText.value.reviewStatus, dataIndex: 'review_status', slotName: 'reviewStatus', width: 120, align: 'center' },
-  { title: pageText.value.module, dataIndex: 'module_detail', slotName: 'module', width: 100, ellipsis: true, tooltip: true, align: 'center' },
-  { title: pageText.value.uiAutomation, dataIndex: 'ui_test_case', slotName: 'uiBinding', width: 140, ellipsis: true, align: 'center' },
+  { title: pageText.value.caseName, dataIndex: 'name', slotName: 'name', width: getColumnWidth('name'), ellipsis: true, tooltip: false, align: 'center' },
+  { title: pageText.value.precondition, dataIndex: 'precondition', width: getColumnWidth('precondition'), ellipsis: true, tooltip: true, align: 'center' },
+  { title: pageText.value.priority, dataIndex: 'level', slotName: 'level', width: getColumnWidth('level'), align: 'center' },
+  { title: pageText.value.testType, dataIndex: 'test_type', slotName: 'testType', width: getColumnWidth('test_type'), align: 'center' },
+  { title: pageText.value.reviewStatus, dataIndex: 'review_status', slotName: 'reviewStatus', width: getColumnWidth('review_status'), align: 'center' },
+  { title: pageText.value.lastExecution, slotName: 'lastExecution', width: 100, align: 'center' },
+  { title: pageText.value.module, dataIndex: 'module_detail', slotName: 'module', width: getColumnWidth('module_detail'), ellipsis: true, tooltip: true, align: 'center' },
   {
     title: pageText.value.creator,
     dataIndex: 'creator_detail',
-    render: ({ record }: { record: TestCase }) => record.creator_detail?.username || '-',
-    width: 80,
+    slotName: 'creator',
+    width: getColumnWidth('creator_detail'),
     align: 'center',
   },
   {
     title: pageText.value.createdAt,
     dataIndex: 'created_at',
     render: ({ record }: { record: TestCase }) => formatDate(record.created_at),
-    width: 130,
+    width: getColumnWidth('created_at'),
     align: 'center',
     sortable: { sortDirections: ['ascend', 'descend'], sortOrder: getSortOrder('created_at') },
   },
@@ -642,61 +758,60 @@ const columns = computed(() => [
     title: pageText.value.updatedAt,
     dataIndex: 'updated_at',
     render: ({ record }: { record: TestCase }) => formatDate(record.updated_at),
-    width: 130,
+    width: getColumnWidth('updated_at') || 130,
     align: 'center',
     sortable: { sortDirections: ['ascend', 'descend'], sortOrder: getSortOrder('updated_at') },
   },
-  { title: pageText.value.actions, slotName: 'operations', width: 240, fixed: 'right', align: 'center' },
-]);
+  { title: pageText.value.actions, slotName: 'operations', width: 300, fixed: 'right', align: 'center' },
+]) as TableColumnData[]);
 
-// 快速绑定 UI 自动化用例相关状态
-const quickBindModalVisible = ref(false);
-const currentBindTestCase = ref<TestCase | null>(null);
-const targetUiTestCaseId = ref<number | undefined>(undefined);
-const targetExecutionMode = ref<'hybrid' | 'script_only' | 'ai_only'>('hybrid');
-const availableUiTestCases = ref<UiTestCase[]>([]);
-const loadingUiOptions = ref(false);
-const submittingQuickBind = ref(false);
-
-const openQuickBindModal = async (record: TestCase) => {
-  currentBindTestCase.value = record;
-  targetUiTestCaseId.value = record.ui_test_case || undefined;
-  targetExecutionMode.value = record.execution_mode || 'hybrid';
-  quickBindModalVisible.value = true;
-
-  if (props.currentProjectId) {
-    loadingUiOptions.value = true;
-    try {
-      const res = await testCaseApi.list({ project: props.currentProjectId });
-      const { items } = extractPaginationData(res);
-      availableUiTestCases.value = items || [];
-    } catch (e) {
-      console.error('加载 UI 用例失败', e);
-    } finally {
-      loadingUiOptions.value = false;
-    }
-  }
+const getRunStatusLabel = (status?: string) => {
+  const map: Record<string, string> = {
+    running: pageText.value.runRunning,
+    pass: pageText.value.runPass,
+    fail: pageText.value.runFail,
+    error: pageText.value.runError,
+    stopped: pageText.value.runStopped,
+  };
+  return map[status || ''] || '-';
 };
 
-const handleConfirmQuickBind = async () => {
-  if (!currentBindTestCase.value || !props.currentProjectId) return;
-  submittingQuickBind.value = true;
+const getRunStatusColor = (status?: string) => {
+  return ({ running: 'arcoblue', pass: 'green', fail: 'red', error: 'orangered', stopped: 'gray' } as Record<string, string>)[status || ''] || 'gray';
+};
+
+const handleViewExecutionReport = (testCase: TestCase) => {
+  emit('viewExecutionReport', testCase);
+};
+
+const handleColumnResize = (dataIndex: string, width: number) => {
+  if (!(dataIndex in defaultColumnWidths) && dataIndex !== 'updated_at') return;
+  columnWidths[dataIndex] = Math.max(40, Math.round(width));
+  saveColumnWidths();
+};
+
+const handleTableChange = async (
+  data: TestCase[],
+  extra: { type?: string }
+) => {
+  if (extra.type !== 'drag' || !currentProjectId.value) return;
+
+  const orderedIds = data.map(item => item.id);
+  if (orderedIds.length === 0) return;
+
+  testCaseData.value = [...data];
+
   try {
-    const res = await bindUiTestCase(props.currentProjectId, currentBindTestCase.value.id, {
-      ui_test_case_id: targetUiTestCaseId.value || null,
-      execution_mode: targetExecutionMode.value,
-    });
-    if (res.success) {
-      Message.success('UI 自动化绑定设置成功');
-      quickBindModalVisible.value = false;
-      fetchTestCases();
+    const response = await reorderTestCases(currentProjectId.value, orderedIds);
+    if (response.success) {
+      Message.success(response.message || '测试用例顺序已保存');
     } else {
-      Message.error(res.error || '绑定失败');
+      Message.error(response.error || '保存测试用例顺序失败');
+      fetchTestCases();
     }
-  } catch (e: any) {
-    Message.error(e.message || '绑定操作出错');
-  } finally {
-    submittingQuickBind.value = false;
+  } catch (error) {
+    Message.error('保存测试用例顺序时发生错误');
+    fetchTestCases();
   }
 };
 
@@ -712,7 +827,13 @@ const fetchTestCases = async () => {
     const response = await getTestCaseList(currentProjectId.value, {
       page: paginationConfig.current,
       pageSize: paginationConfig.pageSize,
-      ...buildCurrentFilters(),
+      search: localSearchKeyword.value,
+      module_id: localSelectedModuleId.value || undefined, // 使用本地模块筛选
+      level: selectedLevel.value || undefined, // 添加优先级筛选
+      test_type: selectedTestType.value || undefined, // 添加测试类型筛选
+      // 多选审核状态筛选：有选中项则传递，否则不限制（显示全部）
+      review_status_in: selectedReviewStatuses.value.length > 0 ? selectedReviewStatuses.value : undefined,
+      ordering: selectedOrdering.value || undefined,
     });
     if (response.success && response.data) {
       testCaseData.value = response.data;
@@ -810,6 +931,43 @@ const handleReviewStatusChange = async (record: TestCase, newStatus: string) => 
     }
   } catch (error) {
     Message.error(pageText.value.reviewStatusUpdateError);
+  }
+};
+
+const handleBatchReviewStatusChange = async (newStatus: string | number | Record<string, unknown> | undefined) => {
+  if (!currentProjectId.value || selectedTestCaseIds.value.length === 0) return;
+
+  const reviewStatus = String(newStatus) as ReviewStatus;
+  if (reviewStatus === 'needs_optimization') {
+    Message.warning(isEnglish.value
+      ? 'Batch update to "Optimize" is not supported. Please update cases individually.'
+      : '批量修改为「优化」暂不支持，请逐条修改并填写优化说明。');
+    return;
+  }
+
+  try {
+    const response = await batchUpdateTestCaseReviewStatus(
+      currentProjectId.value,
+      selectedTestCaseIds.value,
+      reviewStatus,
+    );
+    if (!response.success) {
+      Message.error(response.error || pageText.value.batchReviewStatusFailed);
+      return;
+    }
+
+    const updatedCount = response.data?.updated_count ?? selectedTestCaseIds.value.length;
+    const statusLabel = getReviewStatusLabel(reviewStatus);
+    Message.success(pageText.value.batchReviewStatusSuccess(updatedCount, statusLabel));
+
+    const selectedIdSet = new Set(selectedTestCaseIds.value);
+    testCaseData.value.forEach((testCase) => {
+      if (selectedIdSet.has(testCase.id)) {
+        testCase.review_status = reviewStatus;
+      }
+    });
+  } catch (error) {
+    Message.error(pageText.value.batchReviewStatusError);
   }
 };
 
@@ -946,6 +1104,48 @@ const handleBatchDelete = () => {
   });
 };
 
+const openMoveModal = (testCaseIds: number[]) => {
+  if (!currentProjectId.value || testCaseIds.length === 0) return;
+  movingTestCaseIds.value = [...new Set(testCaseIds)];
+  targetModuleId.value = undefined;
+  moveModalVisible.value = true;
+};
+
+const handleConfirmMove = async (): Promise<boolean> => {
+  if (!currentProjectId.value || !targetModuleId.value) {
+    Message.warning(pageText.value.selectTargetModuleFirst);
+    return false;
+  }
+
+  isMoving.value = true;
+  try {
+    const response = await batchMoveTestCases(
+      currentProjectId.value,
+      movingTestCaseIds.value,
+      targetModuleId.value,
+    );
+    if (!response.success) {
+      Message.error(response.error || pageText.value.moveCasesFailed);
+      return false;
+    }
+
+    const movedCount = response.data?.moved_count ?? movingTestCaseIds.value.length;
+    const moduleName = response.data?.target_module?.name || '';
+    Message.success(pageText.value.moveCasesSuccess(movedCount, moduleName));
+    selectedTestCaseIds.value = selectedTestCaseIds.value.filter(
+      (testCaseId) => !movingTestCaseIds.value.includes(testCaseId),
+    );
+    fetchTestCases();
+    emit('testCasesMoved');
+    return true;
+  } catch (error) {
+    Message.error(pageText.value.moveCasesError);
+    return false;
+  } finally {
+    isMoving.value = false;
+  }
+};
+
 
 
 // 导出处理函数
@@ -969,20 +1169,6 @@ const onImportSuccess = () => {
   fetchTestCases();
 };
 
-const getNavigationTestCaseIds = async () => {
-  if (!currentProjectId.value) {
-    return [];
-  }
-
-  const response = await getAllTestCaseIds(currentProjectId.value, buildCurrentFilters());
-  if (response.success && response.data) {
-    return response.data;
-  }
-
-  Message.error(response.error || pageText.value.fetchCasesFailed);
-  return testCaseData.value.map(tc => tc.id);
-};
-
 onMounted(() => {
   handleResize(); // 初始化表格高度
   fetchTestCases();
@@ -998,7 +1184,7 @@ watch(currentProjectId, () => {
   localSearchKeyword.value = '';
   selectedLevel.value = ''; // 项目切换时清空优先级筛选
   selectedTestType.value = ''; // 项目切换时清空测试类型筛选
-  selectedOrdering.value = '-created_at'; // 项目切换时重置排序
+  selectedOrdering.value = 'created_at'; // 项目切换时重置为最早创建在前
   selectedReviewStatuses.value = [...DEFAULT_REVIEW_STATUSES]; // 项目切换时重置审核状态筛选
   fetchTestCases();
 });
@@ -1016,7 +1202,7 @@ watch(selectedModuleId, (newVal) => {
 defineExpose({
   refreshTestCases: fetchTestCases,
   // 获取当前筛选后的用例ID列表（用于编辑页面导航）
-  getTestCaseIds: getNavigationTestCaseIds,
+  getTestCaseIds: () => testCaseData.value.map(tc => tc.id),
 });
 
 </script>
@@ -1209,16 +1395,32 @@ defineExpose({
   height: 100%;
 }
 
+:deep(.test-case-table .arco-table-tr-draggable) {
+  cursor: grab;
+}
+
+:deep(.test-case-table .arco-table-tr-drag) {
+  opacity: 0.72;
+}
+
+:deep(.test-case-table .arco-table-operation .arco-icon) {
+  cursor: grab;
+}
+
 .testcase-name-link {
-  display: inline-block;
-  max-width: 160px;
   color: var(--theme-accent);
   cursor: pointer;
   text-decoration: none;
   transition: color 0.2s;
+}
+
+.testcase-text-cell {
+  display: inline-block;
+  width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  vertical-align: middle;
 }
 
 .testcase-name-link:hover {
@@ -1226,40 +1428,7 @@ defineExpose({
   text-decoration: underline;
 }
 
-.ui-bound-badge,
-.ui-unbound-badge {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  width: 100%;
-}
-
-.ui-bound-tag {
-  cursor: pointer;
-  max-width: 100%;
-  display: inline-flex;
-  align-items: center;
-}
-
-:deep(.ui-bound-tag .arco-tag-content) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 86px;
-  display: inline-block;
-  vertical-align: middle;
-}
-
-.ui-bound-tag-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  display: inline-block;
-  max-width: 86px;
-  vertical-align: middle;
-}
-
-.ui-unbound-tag {
+.run-status-tag {
   cursor: pointer;
 }
 

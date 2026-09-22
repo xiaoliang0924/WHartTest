@@ -7,7 +7,7 @@ import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 
-from asgiref.sync import sync_to_async
+from channels.db import database_sync_to_async as sync_to_async
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from .models import RemoteMCPConfig, MCPTool

@@ -19,6 +19,7 @@ INTERNAL_PLATFORM_SKILL_NAMES = frozenset(
         "whart-test",
         "api-automation",
         "ui-automation",
+        "data-generation",
     }
 )
 

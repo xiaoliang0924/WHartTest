@@ -4,9 +4,8 @@
     <a-layout-header class="header">
       <div class="left-section">
         <div class="logo" unselectable="on">
-          <img :src="brandLogoUrl" alt="WHartTest Logo" class="logo-icon" />
-          <span class="logo-text">WHartTest</span>
-          <img :src="brandBadgeUrl" alt="CE" class="logo-ce-icon" />
+          <img :src="brandLogoUrl" alt="BaiYunTest Logo" class="logo-icon" />
+          <span class="logo-text">BaiYunTest</span>
         </div>
         <div class="project-selector" v-if="showProjectSelector">
           <a-select
@@ -77,7 +76,7 @@
         <a-popover v-if="hasUpdate" position="bottom" trigger="hover" content-class="version-popover">
           <a 
             class="version-badge update-available" 
-            :href="versionInfo?.releaseUrl || 'https://github.com/mgdaaslab/WHartTest/releases'"
+            :href="versionInfo?.releaseUrl || 'https://github.com/mgdaaslab/BaiYunTest/releases'"
             target="_blank"
           >
             {{ tl('当前版本:') }} {{ currentVersion }}
@@ -94,7 +93,7 @@
               </div>
               <a 
                 class="version-update-footer"
-                :href="versionInfo?.releaseUrl || 'https://github.com/mgdaaslab/WHartTest/releases'"
+                :href="versionInfo?.releaseUrl || 'https://github.com/mgdaaslab/BaiYunTest/releases'"
                 target="_blank"
               >
                 {{ tl('点击查看完整更新日志') }}
@@ -125,7 +124,7 @@
       </div>
     </a-layout-header>
 
-    <a-layout class="inner-layout">
+    <a-layout class="inner-layout" has-sider>
       <!-- 左侧菜单栏 -->
       <a-layout-sider
         :width="170"
@@ -198,6 +197,29 @@
             <a-menu-item key="test-executions" v-if="hasTestExecutionsPermission">
               <template #icon><icon-history /></template>
               <a href="#" @click="checkProjectAndNavigate($event, '/test-executions')">{{ executionHistoryMenuLabel }}</a>
+            </a-menu-item>
+            <a-menu-item key="manual-test-executions" v-if="hasTestcasesPermission">
+              <template #icon><icon-check-circle /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/manual-test-executions')">{{ manualExecutionMenuLabel }}</a>
+            </a-menu-item>
+          </a-sub-menu>
+
+          <a-sub-menu key="data-generation" v-if="hasDataGenerationPermission">
+            <template #icon><icon-storage /></template>
+            <template #title>
+              <span @click="handleDataGenerationClick">{{ dataGenerationMenuLabel }}</span>
+            </template>
+            <a-menu-item key="data-generation-plans">
+              <template #icon><icon-file /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/data-generation')">{{ dataGenerationPlansLabel }}</a>
+            </a-menu-item>
+            <a-menu-item key="data-generation-runs">
+              <template #icon><icon-history /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/data-generation?tab=runs')">{{ dataGenerationRunsLabel }}</a>
+            </a-menu-item>
+            <a-menu-item key="data-generation-quick">
+              <template #icon><icon-thunderbolt /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/data-generation?tab=quick')">{{ dataGenerationQuickLabel }}</a>
             </a-menu-item>
           </a-sub-menu>
 
@@ -336,6 +358,7 @@ import {
   IconMoonFill,
   IconList,
   IconRelation,
+  IconThunderbolt,
 } from '@arco-design/web-vue/es/icon';
 import '@arco-design/web-vue/dist/arco.css'; // 引入 Arco Design 样式
 
@@ -379,6 +402,11 @@ const testManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Test
 const caseManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Cases' : tl('用例管理')));
 const suitesMenuLabel = computed(() => (locale.value === 'en-US' ? 'Suites' : tl('测试套件')));
 const executionHistoryMenuLabel = computed(() => (locale.value === 'en-US' ? 'History' : tl('执行历史')));
+const dataGenerationMenuLabel = computed(() => (locale.value === 'en-US' ? 'Data Gen' : '造数管理'));
+const dataGenerationPlansLabel = computed(() => (locale.value === 'en-US' ? 'Plans' : '造数计划'));
+const dataGenerationRunsLabel = computed(() => (locale.value === 'en-US' ? 'Runs' : '执行记录'));
+const dataGenerationQuickLabel = computed(() => (locale.value === 'en-US' ? 'Quick Run' : '快速造数'));
+const manualExecutionMenuLabel = computed(() => (locale.value === 'en-US' ? 'Case Execution' : tl('用例执行')));
 const chatMenuLabel = computed(() => (locale.value === 'en-US' ? 'Chat' : tl('LLM对话')));
 const systemMenuLabel = computed(() => (locale.value === 'en-US' ? 'Admin' : tl('系统管理')));
 const usersMenuLabel = computed(() => (locale.value === 'en-US' ? 'Users' : tl('用户管理')));
@@ -434,7 +462,14 @@ const activeMenu = computed(() => {
   if (path.startsWith('/api-testing')) return 'api-testing';
   if (path.startsWith('/ui-automation')) return 'ui-automation';
   if (path.startsWith('/testsuites')) return 'testsuites'; // 添加对测试套件路由的识别
+  if (path.startsWith('/data-generation')) {
+    const tab = router.currentRoute.value.query.tab;
+    if (tab === 'runs') return 'data-generation-runs';
+    if (tab === 'quick') return 'data-generation-quick';
+    return 'data-generation-plans';
+  }
   if (path.startsWith('/test-executions')) return 'test-executions'; // 添加对执行历史路由的识别
+  if (path.startsWith('/manual-test-executions')) return 'manual-test-executions';
   if (path.startsWith('/testcases')) return 'testcases';
   if (path.startsWith('/users')) return 'users';
   if (path.startsWith('/organizations')) return 'organizations';
@@ -476,6 +511,11 @@ const hasTestSuitesPermission = computed(() => {
 
 const hasTestExecutionsPermission = computed(() => {
   return authStore.hasPermission('testcases.view_testexecution');
+});
+
+const hasDataGenerationPermission = computed(() => {
+  return authStore.hasPermission('data_generation.view_datagenerationplan')
+    || authStore.hasPermission('testcases.view_testsuite');
 });
 
 const hasLangGraphChatPermission = computed(() => {
@@ -596,6 +636,20 @@ const handleTestManagementClick = (event: MouseEvent) => {
   });
 };
 
+const handleDataGenerationClick = (event: MouseEvent) => {
+  if (event) {
+    event.stopPropagation();
+  }
+  if (collapsed.value) {
+    collapsed.value = false;
+    openKeys.value = ['data-generation'];
+  } else if (openKeys.value.includes('data-generation')) {
+    openKeys.value = openKeys.value.filter((key) => key !== 'data-generation');
+  } else {
+    openKeys.value.push('data-generation');
+  }
+};
+
 // 处理点击系统管理图标的事件
 const handleSystemManagementClick = (event: MouseEvent) => {
   // 阻止事件冒泡，防止触发其他事件
@@ -625,8 +679,8 @@ const handleSystemManagementClick = (event: MouseEvent) => {
 
 // 检查是否选择了项目，用于需要项目的菜单项
 const checkProjectAndNavigate = (event: MouseEvent, path: string) => {
+  event.preventDefault();
   if (!projectStore.currentProjectId) {
-    event.preventDefault();
     Message.warning(tl('请先选择或创建项目'));
     return;
   }
@@ -704,6 +758,16 @@ watch(showEnvironmentSelector, (show) => {
   }
 });
 
+watch(
+  () => router.currentRoute.value.path,
+  (path) => {
+    if (path.startsWith('/data-generation') && !openKeys.value.includes('data-generation')) {
+      openKeys.value = [...openKeys.value, 'data-generation'];
+    }
+  },
+  { immediate: true },
+);
+
 // 在组件挂载时检查认证状态并加载项目列表
 onMounted(async () => {
   // 确保用户信息在组件挂载时被正确加载
@@ -712,7 +776,7 @@ onMounted(async () => {
 
   // 加载项目列表
   await projectStore.fetchProjects();
-  
+
   // 检查版本更新（后台执行，不阻塞页面）
   checkVersion();
 });
@@ -1059,6 +1123,9 @@ onMounted(async () => {
   border-radius: 8px;
   box-shadow: 0 0 12px rgba(0, 0, 0, 0.25), 0 0 4px rgba(0, 0, 0, 0.15);
   height: auto; /* 让 flex 自动撑开 */
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 2;
 }
 
 .menu {
@@ -1210,6 +1277,9 @@ onMounted(async () => {
 }
 
 .inner-layout {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
   height: calc(100vh - 71px); /* Header(56px) + header-margin-top(10px) + header-margin-bottom(5px) = 71px */
 }
 
@@ -1221,6 +1291,8 @@ onMounted(async () => {
   overflow: hidden; /* 让子组件自行控制滚动 */
   border-radius: 8px;
   box-shadow: 0 0 12px rgba(0, 0, 0, 0.25), 0 0 4px rgba(0, 0, 0, 0.15);
+  flex: 1;
+  min-width: 0;
 }
 
 .sider-footer {
@@ -1268,5 +1340,11 @@ onMounted(async () => {
   background-color: var(--theme-surface-soft) !important;
   border-radius: 6px;
   padding: 2px;
+}
+
+.menu-link-with-badge {
+  display: inline-block;
+  color: inherit;
+  text-decoration: none;
 }
 </style>

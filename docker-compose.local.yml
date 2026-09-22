@@ -85,6 +85,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-wharttest}
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - DB_CONN_MAX_AGE=${DB_CONN_MAX_AGE:-0}
       # 其他配置
       - MEDIA_ROOT=${MEDIA_ROOT:-/app/data/media}
       - LANGGRAPH_CHECKPOINT_SQLITE_PATH=${LANGGRAPH_CHECKPOINT_SQLITE_PATH:-/app/data/chat_history.sqlite}
@@ -92,7 +93,7 @@ services:
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-django-insecure-change-this-in-production}
       - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-*}
       - DJANGO_CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173,http://localhost:80,http://*:8913
-      - USER_AGENT=${USER_AGENT:-WHartTest/2.7.2-ce}
+      - USER_AGENT=${USER_AGENT:-WHartTest/2.8.0-ce}
       - DJANGO_ADMIN_USERNAME=${DJANGO_ADMIN_USERNAME:-admin}
       - DJANGO_ADMIN_EMAIL=${DJANGO_ADMIN_EMAIL:-admin@example.com}
       - DJANGO_ADMIN_PASSWORD=${DJANGO_ADMIN_PASSWORD:-admin123456}
@@ -101,13 +102,28 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       # 内部API基础URL - 使用localhost因为在同一容器
       - DJANGO_BASE_URL=http://localhost:8000
+      # Skill 执行脚本访问内部 API 所需的认证信息
+      - WHARTTEST_API_KEY=${WHARTTEST_API_KEY:-wharttest-default-mcp-key-2025}
+      - WHARTTEST_SYNC_BUSINESS_TEMPLATES=${WHARTTEST_SYNC_BUSINESS_TEMPLATES:-1}
+      - WHARTTEST_TICKET_PROJECT_ID=${WHARTTEST_TICKET_PROJECT_ID:-1}
+      - WHARTTEST_TICKET_API_ENV_ID=${WHARTTEST_TICKET_API_ENV_ID:-4}
+      - WHARTTEST_API_ADMIN_USERNAME=${WHARTTEST_API_ADMIN_USERNAME:-18275072446}
+      - WHARTTEST_API_ADMIN_PASSWORD=${WHARTTEST_API_ADMIN_PASSWORD:-000000}
+      - FRONTEND_BASE_URL=${FRONTEND_BASE_URL:-http://localhost:80}
       - WEIXIN_PLUGIN_HOST_URL=http://weixin-plugin-host:3001
+      - WECHAT_WORK_BOT_WEBHOOK=${WECHAT_WORK_BOT_WEBHOOK:-}
+      - WECHAT_WORK_BOT_WEBHOOKS=${WECHAT_WORK_BOT_WEBHOOKS:-}
       - DOCX_EDITOR_BASE_URL=${DOCX_EDITOR_BASE_URL:-http://host.docker.internal:18080}
       - DOCX_EDITOR_PUBLIC_BASE_URL=${DOCX_EDITOR_PUBLIC_BASE_URL:-}
       - DOCX_EDITOR_SERVICE_KEY=${DOCX_EDITOR_SERVICE_KEY:-docx-editor-default-integration-key-2026}
       # Qdrant向量数据库
       - QDRANT_URL=http://qdrant:6333
       - HF_ENDPOINT=${DOCKER_HF_ENDPOINT:-https://huggingface.co}
+      - DISABLE_GA=true
+      - PLAYWRIGHT_BROWSER_MAX_CONCURRENT_EXECUTIONS=${PLAYWRIGHT_BROWSER_MAX_CONCURRENT_EXECUTIONS:-1}
+      - PLAYWRIGHT_BROWSER_MAX_SESSIONS=${PLAYWRIGHT_BROWSER_MAX_SESSIONS:-2}
+      - PLAYWRIGHT_BROWSER_SESSION_IDLE_TIMEOUT_SECONDS=${PLAYWRIGHT_BROWSER_SESSION_IDLE_TIMEOUT_SECONDS:-180}
+      - PLAYWRIGHT_BROWSER_EXEC_QUEUE_TIMEOUT_SECONDS=${PLAYWRIGHT_BROWSER_EXEC_QUEUE_TIMEOUT_SECONDS:-600}
     depends_on:
       postgres:
         condition: service_healthy
@@ -121,7 +137,7 @@ services:
       - wharttest-network
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/admin/login/')" ]
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/')" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -313,3 +329,8 @@ volumes:
 
 # 一步到位命令（如有需要）:
 # docker compose -f docker-compose.local.yml build && docker compose -f docker-compose.local.yml up -d --force-recreate
+#
+# 快速本地部署（跳过完整 backend Dockerfile 的 apt 构建，与服务器 custom 镜像策略一致）:
+# docker build -f Dockerfile.backend-custom -t wharttest-backend:latest .
+# docker compose -f docker-compose.local.yml build frontend
+# docker compose -f docker-compose.local.yml -f docker-compose.local.override.yml up -d --no-build --force-recreate backend frontend

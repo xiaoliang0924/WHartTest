@@ -5,7 +5,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 MODULE_PATH = Path(__file__).with_name("whart_tools.py")
@@ -121,6 +121,135 @@ class WhartToolsScreenshotResolutionTests(unittest.TestCase):
         self.assertIn("已搜索目录", result["error"])
         self.assertIn(screenshot_dir, result["error"])
         self.assertIn(os.path.join(tmpdir, "screenshots"), result["error"])
+
+    @patch.object(whart_tools.requests, "post", return_value=_DummyResponse())
+    def test_upload_screenshot_falls_back_to_recent_file_when_name_mismatch(self, mock_post):
+        with tempfile.TemporaryDirectory() as temp_root:
+            screenshot_dir = os.path.join(temp_root, "skill_runtime", "screenshots", "1", "1520")
+            actual_file = os.path.join(screenshot_dir, "case_1520_step1.png")
+            self._write_file(actual_file)
+
+            with patch.dict(
+                os.environ,
+                {"SCREENSHOT_DIR": screenshot_dir},
+                clear=False,
+            ):
+                result = whart_tools.upload_screenshot(
+                    1, 1520, "步骤1_登录成功.png", "步骤1 登录成功"
+                )
+
+        self.assertEqual(result, {"message": "截图 '步骤1 登录成功' 上传成功"})
+        mock_post.assert_called_once()
+
+    @patch.object(whart_tools.requests, "post", return_value=_DummyResponse())
+    def test_upload_screenshot_does_not_fallback_to_last_png_for_unrelated_name(self, mock_post):
+        with tempfile.TemporaryDirectory() as temp_root:
+            screenshot_dir = os.path.join(temp_root, "skill_runtime", "screenshots", "1", "1523")
+            self._write_file(os.path.join(screenshot_dir, "last.png"))
+            self._write_file(os.path.join(screenshot_dir, "case_1523_step1.png"))
+
+            with patch.dict(
+                os.environ,
+                {"SCREENSHOT_DIR": screenshot_dir},
+                clear=False,
+            ):
+                result = whart_tools.upload_screenshot(
+                    1, 1523, "步骤5_点击文件.png", "步骤5 点击文件"
+                )
+
+        self.assertIn("文件不存在", result["error"])
+        mock_post.assert_not_called()
+
+    @patch.object(whart_tools.requests, "post", return_value=_DummyResponse())
+    def test_upload_screenshot_does_not_fallback_case_step_to_step_xx(self, mock_post):
+        with tempfile.TemporaryDirectory() as temp_root:
+            screenshot_dir = os.path.join(temp_root, "skill_runtime", "screenshots", "1", "1332")
+            os.makedirs(screenshot_dir, exist_ok=True)
+            blank_file = os.path.join(screenshot_dir, "case_1332_step4.png")
+            good_file = os.path.join(screenshot_dir, "step_04.png")
+            with open(blank_file, "wb") as handle:
+                handle.write(b"x" * 4000)
+            with open(good_file, "wb") as handle:
+                handle.write(b"x" * 200000)
+
+            with patch.dict(
+                os.environ,
+                {"SCREENSHOT_DIR": screenshot_dir},
+                clear=False,
+            ):
+                result = whart_tools.upload_screenshot(
+                    1,
+                    1332,
+                    blank_file,
+                    "步骤4 操作列",
+                    step_number=4,
+                )
+
+        self.assertEqual(result, {"message": "截图 '步骤4 操作列' 上传成功"})
+        uploaded_name = mock_post.call_args.kwargs["files"]["screenshots"][0]
+        self.assertEqual(uploaded_name, "case_1332_step4.png")
+        mock_post.assert_called_once()
+
+    @patch.object(whart_tools.requests, "post", return_value=_DummyResponse())
+    def test_upload_screenshot_case_step_missing_does_not_fallback(self, mock_post):
+        with tempfile.TemporaryDirectory() as temp_root:
+            screenshot_dir = os.path.join(temp_root, "skill_runtime", "screenshots", "1", "1332")
+            self._write_file(os.path.join(screenshot_dir, "step_03.png"))
+
+            with patch.dict(
+                os.environ,
+                {"SCREENSHOT_DIR": screenshot_dir},
+                clear=False,
+            ):
+                result = whart_tools.upload_screenshot(
+                    1,
+                    1332,
+                    "case_1332_step3.png",
+                    "步骤3 筛选",
+                    step_number=3,
+                )
+
+        self.assertIn("文件不存在", result["error"])
+        mock_post.assert_not_called()
+
+    @patch.object(whart_tools.requests, "get")
+    def test_get_testcases_returns_api_total_and_case_ids(self, mock_get):
+        response = MagicMock()
+        response.json.return_value = {
+            "total": 51,
+            "data": [
+                {"id": 457, "name": "Case A"},
+                {"id": 458, "name": "Case B"},
+            ],
+        }
+        mock_get.return_value = response
+
+        result = whart_tools.get_testcases(1, 32)
+
+        self.assertEqual(result["total"], 51)
+        self.assertEqual(result["returned_count"], 2)
+        self.assertEqual(result["case_id_range"], [457, 458])
+        self.assertEqual(result["case_ids"], [457, 458])
+        self.assertIn("共有 51 条用例", result["authoritative_summary"])
+        self.assertIn("Use total", result["counting_rule"])
+
+    @patch.object(whart_tools.requests, "post")
+    def test_add_testcase_converts_literal_newline_sequences(self, mock_post):
+        response = MagicMock()
+        response.json.return_value = {"code": 201, "data": {"id": 1, "name": "Case"}}
+        mock_post.return_value = response
+
+        whart_tools.add_testcase(
+            1,
+            1,
+            "Case",
+            precondition="First line\\nSecond line",
+            notes="Source\\r\\nReview complete",
+        )
+
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["precondition"], "First line\nSecond line")
+        self.assertEqual(payload["notes"], "Source\nReview complete")
 
 
 class WhartToolsAddModuleTests(unittest.TestCase):

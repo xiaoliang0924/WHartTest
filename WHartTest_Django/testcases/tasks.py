@@ -18,7 +18,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import TestExecution, TestSuite, TestCaseResult, TestCase
 from prompts.models import UserPrompt, PromptType
-from asgiref.sync import sync_to_async
+from channels.db import database_sync_to_async as sync_to_async
+from wharttest_django.notification_service import notify_test_suite_execution
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,39 @@ def execute_test_suite(self, execution_id):
         execution.started_at = timezone.now()
         execution.celery_task_id = self.request.id
         execution.save(update_fields=['status', 'started_at', 'celery_task_id', 'updated_at'])
+
+        # 套件执行前自动造数
+        if suite.pre_data_plan_id:
+            from data_generation.services import DataGenerationError, run_suite_pre_data_generation
+
+            try:
+                pre_run = run_suite_pre_data_generation(
+                    suite,
+                    execution,
+                    triggered_by=execution.executor,
+                )
+                if pre_run and pre_run.status != 'success' and suite.pre_data_fail_fast:
+                    execution.status = 'failed'
+                    execution.completed_at = timezone.now()
+                    execution.save(update_fields=['status', 'completed_at', 'updated_at'])
+                    notify_test_suite_execution(execution)
+                    return {
+                        'execution_id': execution.id,
+                        'suite_name': suite.name,
+                        'status': execution.status,
+                        'error': pre_run.error_message or '造数失败，已阻断套件执行',
+                    }
+            except DataGenerationError as exc:
+                execution.status = 'failed'
+                execution.completed_at = timezone.now()
+                execution.save(update_fields=['status', 'completed_at', 'updated_at'])
+                notify_test_suite_execution(execution)
+                return {
+                    'execution_id': execution.id,
+                    'suite_name': suite.name,
+                    'status': execution.status,
+                    'error': str(exc),
+                }
         
         # 1. 获取套件中的所有测试用例
         testcases = suite.testcases.all().order_by('level', 'id')  # 按优先级排序
@@ -85,6 +119,28 @@ def execute_test_suite(self, execution_id):
         execution.status = 'completed' if execution.status != 'cancelled' else 'cancelled'
         execution.completed_at = timezone.now()
         execution.save(update_fields=['status', 'completed_at', 'updated_at'])
+
+        if getattr(suite, 'post_data_cleanup', False):
+            from data_generation.services import run_suite_post_data_cleanup
+            try:
+                parent_run = run_suite_post_data_cleanup(suite, execution, triggered_by=execution.executor)
+                if parent_run is not None:
+                    parent_run.refresh_from_db()
+                    if parent_run.cleanup_status == 'failed':
+                        logger.warning(
+                            'Suite post-data cleanup failed: execution_id=%s run_id=%s error=%s',
+                            execution.id,
+                            parent_run.id,
+                            parent_run.cleanup_error_message,
+                        )
+            except Exception as cleanup_exc:
+                logger.warning(
+                    'Suite post-data cleanup failed: execution_id=%s error=%s',
+                    execution.id,
+                    cleanup_exc,
+                )
+
+        notify_test_suite_execution(execution)
         
         logger.info(f"测试套件执行完成: {suite.name}, "
                    f"通过: {execution.passed_count}, "
@@ -120,6 +176,7 @@ def execute_test_suite(self, execution_id):
             execution.status = 'failed'
             execution.completed_at = timezone.now()
             execution.save(update_fields=['status', 'completed_at', 'updated_at'])
+            notify_test_suite_execution(execution)
         except:
             pass
             
@@ -457,6 +514,11 @@ async def _execute_testcase_via_chat_api(result: TestCaseResult):
         steps_text = ""
         for step in steps:
             steps_text += f"{step.step_number}. {step.description}\n   预期结果: {step.expected_result}\n"
+
+        data_context_text = "无"
+        data_run = await sync_to_async(lambda: execution.data_generation_run, thread_sensitive=False)()
+        if data_run and isinstance(data_run.output_snapshot, dict) and data_run.output_snapshot:
+            data_context_text = json.dumps(data_run.output_snapshot, ensure_ascii=False, indent=2)
         
         # 4. 格式化提示词，填充测试用例信息
         from string import Template
@@ -466,8 +528,11 @@ async def _execute_testcase_via_chat_api(result: TestCaseResult):
             testcase_id=testcase.id,
             testcase_name=testcase.name,
             precondition=testcase.precondition or "无",
-            steps=steps_text.strip()
+            steps=steps_text.strip(),
+            test_data=data_context_text,
         )
+        if data_context_text != "无":
+            formatted_prompt += f"\n\n【本次测试数据】\n{data_context_text}\n"
         
         logger.info(f"格式化后的提示词长度: {len(formatted_prompt)} 字符")
         execution_log.append(f"✓ 准备执行 {len(steps)} 个测试步骤")
@@ -741,10 +806,16 @@ def cancel_test_execution(execution_id):
             execution.completed_at = timezone.now()
             execution.save(update_fields=['status', 'completed_at', 'updated_at'])
             
-            # 取消所有pending状态的测试用例结果
+            # 取消未结束的用例结果（含卡住的 running）
+            now = timezone.now()
             execution.results.filter(status='pending').update(
                 status='skip',
-                completed_at=timezone.now()
+                completed_at=now,
+            )
+            execution.results.filter(status='running').update(
+                status='error',
+                error_message='测试执行已取消（用例执行中被终止）',
+                completed_at=now,
             )
             
             logger.info(f"测试执行已取消: {execution_id}")

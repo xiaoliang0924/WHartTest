@@ -1,4 +1,5 @@
 import json
+from unittest.mock import patch
 
 from django.contrib.auth.models import Permission, User
 from django.core.exceptions import ValidationError
@@ -1037,3 +1038,134 @@ class ApiEnvironmentModelLayerTest(TestCase):
         self.env.parent = self.env
         with self.assertRaises(ValidationError):
             self.env.clean()
+
+
+class TokenRefreshTest(TestCase):
+    """Environment token refresh before API execution."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='tokenuser', password='testpass')
+        self.project = Project.objects.create(name='Token Project', creator=self.user)
+        self.env = ApiEnvironment.objects.create(
+            name='Test Env',
+            base_url='http://test.example.com',
+            project=self.project,
+            created_by=self.user,
+        )
+        ApiEnvironmentVariable.objects.create(
+            environment=self.env,
+            name='adminUsername',
+            value='admin',
+        )
+        ApiEnvironmentVariable.objects.create(
+            environment=self.env,
+            name='adminPassword',
+            value='admin123',
+        )
+        ApiEnvironmentVariable.objects.create(
+            environment=self.env,
+            name='accessToken',
+            value='stale-token',
+        )
+        ApiEnvironmentVariable.objects.create(
+            environment=self.env,
+            name='adminToken',
+            value='stale-token',
+        )
+
+    @patch('api_environments.token_refresh.requests.post')
+    def test_refresh_environment_tokens_updates_shared_token_vars(self, mock_post):
+        from api_environments.token_refresh import refresh_environment_tokens
+
+        mock_response = mock_post.return_value
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {'accessToken': 'fresh-token'}
+
+        updated = refresh_environment_tokens(
+            base_url=self.env.base_url,
+            variables=self.env.get_all_variables(),
+            environment_id=self.env.id,
+            persist=True,
+        )
+
+        self.assertEqual(updated['accessToken'], 'fresh-token')
+        self.assertEqual(updated['adminToken'], 'fresh-token')
+        self.assertEqual(mock_post.call_count, 1)
+
+        access_var = ApiEnvironmentVariable.objects.get(
+            environment=self.env,
+            name='accessToken',
+        )
+        self.assertEqual(access_var.value, 'fresh-token')
+
+    @patch('api_environments.token_refresh.requests.post')
+    def test_refresh_environment_tokens_deduplicates_same_credentials(self, mock_post):
+        from api_environments.token_refresh import refresh_environment_tokens
+
+        mock_response = mock_post.return_value
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {'accessToken': 'fresh-token'}
+
+        variables = {
+            'adminUsername': 'admin',
+            'adminPassword': 'admin123',
+            'accessToken': 'old',
+            'adminToken': 'old',
+            'noCommonUsername': '15013910786',
+            'noCommonPassword': '000000',
+            'noCommonToken': 'old',
+            'noPermissionToken': 'old',
+        }
+
+        updated = refresh_environment_tokens(
+            base_url=self.env.base_url,
+            variables=variables,
+            persist=False,
+        )
+
+        self.assertEqual(updated['noCommonToken'], 'fresh-token')
+        self.assertEqual(updated['noPermissionToken'], 'fresh-token')
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch('api_environments.token_refresh.requests.post')
+    def test_refresh_skips_login_when_token_still_valid(self, mock_post):
+        from api_environments.token_refresh import refresh_environment_tokens
+
+        valid_token = (
+            'eyJhbGciOiJIUzI1NiJ9.'
+            'eyJleHAiOjk5OTk5OTk5OTl9.'
+            'signature'
+        )
+        variables = {
+            'adminUsername': 'admin',
+            'adminPassword': 'admin123',
+            'accessToken': valid_token,
+            'adminToken': valid_token,
+        }
+
+        updated = refresh_environment_tokens(
+            base_url=self.env.base_url,
+            variables=variables,
+            persist=False,
+        )
+
+        self.assertEqual(updated['accessToken'], valid_token)
+        mock_post.assert_not_called()
+
+    @patch('api_environments.token_refresh.refresh_environment_tokens')
+    def test_refresh_environment_tokens_for_execution_returns_updated_payload(self, mock_refresh):
+        from api_environments.token_refresh import refresh_environment_tokens_for_execution
+
+        mock_refresh.return_value = {'accessToken': 'fresh-token'}
+
+        payload = {
+            'id': self.env.id,
+            'base_url': self.env.base_url,
+            'variables': {'accessToken': 'stale-token'},
+            'verify_ssl': False,
+        }
+
+        refreshed = refresh_environment_tokens_for_execution(payload, persist=True)
+
+        self.assertEqual(refreshed['variables']['accessToken'], 'fresh-token')
+        mock_refresh.assert_called_once()

@@ -9,27 +9,389 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase
 from django.test import TestCase
 from django.test.utils import override_settings
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGenerationChunk
 
 from . import agent_loop_view
 from .agent_loop_view import (
+    _is_final_testcase_step_pass,
+    _extract_helper_testcase_progress,
+    _extract_helper_result_reason,
+    _build_helper_step_commentary,
+    _latest_passed_helper_step_from_messages,
+    _build_incomplete_testcase_resume_prompt,
+    _build_sanitized_messages,
     _extract_linked_image_urls,
     _is_linked_image_url_allowed,
     _normalize_uploaded_image_base64_list,
     _prepare_agent_loop_human_message,
+    _run_and_stream_remaining_helper_steps,
 )
+
+
+class FinalTestcaseStepTests(SimpleTestCase):
+    def test_final_fixed_helper_pass_is_terminal(self):
+        self.assertTrue(
+            _is_final_testcase_step_pass(
+                tool_name="execute_skill_script",
+                content="[执行进度] 正在执行步骤 4/4\nRESULT=PASS: 步骤4通过",
+                helper_step=4,
+                total_steps=4,
+            )
+        )
+
+    def test_non_final_or_failed_step_is_not_terminal(self):
+        self.assertFalse(
+            _is_final_testcase_step_pass(
+                tool_name="execute_skill_script",
+                content="RESULT=PASS: 步骤3通过",
+                helper_step=3,
+                total_steps=4,
+            )
+        )
+        self.assertFalse(
+            _is_final_testcase_step_pass(
+                tool_name="execute_skill_script",
+                content="RESULT=FAIL: 步骤4失败",
+                helper_step=4,
+                total_steps=4,
+            )
+        )
+
+    def test_progress_uses_latest_declared_screenshot(self):
+        case_id, step = _extract_helper_testcase_progress(
+            "[CASE_SCREENSHOT] /tmp/case_1402_step1.png\n"
+            "[SCREENSHOT_SAVED] /media/skill_runtime/screenshots/1/1402/case_1402_step7.png"
+        )
+        self.assertEqual(case_id, 1402)
+        self.assertEqual(step, 7)
+
+    def test_latest_passed_helper_step_from_tool_messages(self):
+        messages = [
+            ToolMessage(
+                content=(
+                    "[CASE_SCREENSHOT] /tmp/case_1401_step6.png\n"
+                    "RESULT=PASS: 步骤6已取消领取"
+                ),
+                tool_call_id="1",
+                name="execute_skill_script",
+            ),
+            AIMessage(content="接下来执行步骤7并输出报告"),
+        ]
+        self.assertEqual(_latest_passed_helper_step_from_messages(messages), 6)
+
+    def test_incomplete_resume_prompt_forbids_report(self):
+        prompt = _build_incomplete_testcase_resume_prompt(done_step=6, total_steps=7)
+        self.assertIn("步骤 7", prompt)
+        self.assertIn("禁止输出测试报告", prompt)
+        self.assertIn("runClaimableTicketCaseStep(page, 7)", prompt)
+
+    def test_helper_result_reason_ignores_skill_doc_samples(self):
+        status, reason = _extract_helper_result_reason(
+            "RESULT=PASS: 步骤2已进入我的工单列表\n"
+        )
+        self.assertEqual(status, "PASS")
+        self.assertEqual(reason, "步骤2已进入我的工单列表")
+
+    def test_helper_result_reason_treats_playwright_timeout_as_fail(self):
+        status, reason = _extract_helper_result_reason(
+            "[执行进度] 正在执行步骤 7/7\n"
+            "Playwright exec timed out after 45000ms\n"
+            "浏览器已重置。请先重新打开该步骤所在页面\n"
+        )
+        self.assertEqual(status, "FAIL")
+        self.assertIn("超时", reason)
+
+    def test_claimable_steps_3_to_7_use_long_playwright_timeout(self):
+        ms, seconds = _playwright_exec_timeout_for_helper_code(
+            "await helpers.runClaimableTicketCaseStep(page, 7);"
+        )
+        self.assertEqual(ms, 120000)
+        self.assertEqual(seconds, 150)
+        fast_ms, fast_sec = _playwright_exec_timeout_for_helper_code(
+            "await helpers.runClaimableTicketCaseStep(page, 1);"
+        )
+        self.assertEqual(fast_ms, 45000)
+        self.assertEqual(fast_sec, 55)
+
+    def test_helper_step_commentary_matches_live_chat(self):
+        text = _build_helper_step_commentary(
+            prev_step=1,
+            prev_status="PASS",
+            prev_reason="使用自动处理人登录成功",
+            next_step=2,
+            next_action="进入我的工单列表页面",
+        )
+        self.assertIn("步骤 1 通过: 使用自动处理人登录成功", text)
+        self.assertIn("步骤 2: 进入我的工单列表页面", text)
+
+    def test_auto_resume_streams_ai_line_then_tool_card(self):
+        async def collect():
+            events = []
+            with patch(
+                "orchestrator_integration.builtin_tools.skill_tools.auto_run_missing_testcase_helper_steps",
+                return_value={
+                    "plain": (
+                        "[PERSISTENT_SESSION] session_id=case_1402\n"
+                        "[CASE_SCREENSHOT] /tmp/case_1402_step2.png\n"
+                        "RESULT=PASS: 步骤2已进入我的工单列表"
+                    ),
+                    "display": (
+                        "[PERSISTENT_SESSION] session_id=case_1402\n"
+                        "[CASE_SCREENSHOT] /tmp/case_1402_step2.png\n"
+                        "RESULT=PASS: 步骤2已进入我的工单列表"
+                    ),
+                },
+            ), patch(
+                "orchestrator_integration.agent_loop_view._get_testcase_step_names",
+                return_value={2: "进入我的工单列表页面", 3: "筛选待处理工单"},
+            ), patch(
+                "orchestrator_integration.builtin_tools.skill_tools.infer_fixed_helper_call_template",
+                return_value="await helpers.runClaimableTicketCaseStep(page, {step});",
+            ):
+                async for event in _run_and_stream_remaining_helper_steps(
+                    test_case_id=1402,
+                    user_id=1,
+                    project_id=1,
+                    session_id="sess",
+                    from_step=2,
+                    to_step=2,
+                    messages=[],
+                    previous_output="RESULT=PASS: 使用自动处理人登录成功",
+                ):
+                    events.append(event)
+            return events
+
+        events = async_to_sync(collect)()
+        types = [event.get("type") for event in events]
+        self.assertEqual(types[0], "stream")
+        self.assertIn("步骤 1 通过", events[0]["data"])
+        self.assertIn("步骤 2: 进入我的工单列表页面", events[0]["data"])
+        self.assertEqual(types[1], "testcase_progress")
+        self.assertEqual(events[1]["step"], 2)
+        self.assertEqual(types[2], "tool_result")
+        self.assertEqual(events[2]["tool_name"], "execute_skill_script")
+        self.assertIn("RESULT=PASS", events[2]["tool_output"])
+        self.assertEqual(types[-1], "_auto_run_bundle")
 from .builtin_tools.skill_tools import (
+    _auto_upload_case_screenshots,
     _build_skill_artifacts_dir,
     _collect_skill_artifacts,
     _build_skill_screenshots_dir,
     _finalize_skill_result,
+    _get_skill_runtime_env,
+    _playwright_exec_timeout_for_helper_code,
     _prepare_skill_screenshots_dir,
     _SKILL_DIR_STALE_SECONDS,
     _sanitize_runtime_path_segment,
+    _with_failure_reminder,
 )
 from .builtin_tools.output_sanitizer import strip_terminal_control_sequences
-from .middleware_config import get_user_friendly_llm_error, _model_retry_should_retry
+from .middleware_config import (
+    extract_llm_failure_message_from_text,
+    get_user_friendly_llm_error,
+    _model_retry_should_retry,
+)
 from projects.models import Project, ProjectMember
 from requirements.models import DocumentImage, RequirementDocument
+
+
+class SkillRuntimeEnvTests(SimpleTestCase):
+    @override_settings(WHARTTEST_API_KEY="", WHARTTEST_BACKEND_URL="")
+    def test_runtime_environment_preserves_configured_api_key(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WHARTTEST_API_KEY": "runtime-api-key",
+                "WHARTTEST_BACKEND_URL": "http://runtime-backend:8000",
+            },
+        ):
+            env = _get_skill_runtime_env()
+
+        self.assertEqual(env["WHARTTEST_API_KEY"], "runtime-api-key")
+        self.assertEqual(
+            env["WHARTTEST_BACKEND_URL"], "http://runtime-backend:8000"
+        )
+
+
+class ToolCallHistorySanitizerTests(SimpleTestCase):
+    def test_repairs_ai_tool_call_without_id_and_inserts_interrupted_result(self):
+        message = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "id": None,
+                    "name": "knowledge_search",
+                    "args": {"query": "test"},
+                }
+            ],
+        )
+
+        sanitized, fixed_count = _build_sanitized_messages([message])
+
+        self.assertEqual(len(sanitized), 2)
+        self.assertTrue(sanitized[0].tool_calls[0]["id"])
+        self.assertIsInstance(sanitized[1], ToolMessage)
+        self.assertEqual(
+            sanitized[1].tool_call_id, sanitized[0].tool_calls[0]["id"]
+        )
+        self.assertEqual(fixed_count, 2)
+
+    def test_repairs_raw_tool_call_history_before_next_user_message(self):
+        message = AIMessage(
+            content="",
+            additional_kwargs={
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "knowledge_search",
+                            "arguments": '{"query":"test"}',
+                        },
+                    }
+                ]
+            },
+        )
+
+        sanitized, fixed_count = _build_sanitized_messages(
+            [HumanMessage(content="search"), message, HumanMessage(content="continue")]
+        )
+
+        self.assertEqual(fixed_count, 1)
+        self.assertEqual(len(sanitized), 4)
+        self.assertIsInstance(sanitized[2], ToolMessage)
+        self.assertEqual(sanitized[2].tool_call_id, "call_123")
+        self.assertIsInstance(sanitized[3], HumanMessage)
+
+
+class CompatibleToolCallChunkTests(SimpleTestCase):
+    def test_filters_duplicate_tool_call_chunk_without_id(self):
+        from langgraph_integration.openai_compatible_chat_model import (
+            repair_tool_call_chunks,
+        )
+
+        message = AIMessageChunk(
+            content="",
+            tool_call_chunks=[
+                {
+                    "name": "knowledge_search",
+                    "args": '{"query":"test"}',
+                    "id": "call_123",
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                },
+                {
+                    "name": None,
+                    "args": '{"query":"test"}',
+                    "id": None,
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                },
+            ],
+        )
+
+        self.assertTrue(repair_tool_call_chunks(message, {0: "call_123"}))
+        self.assertEqual(len(message.tool_call_chunks), 1)
+        self.assertEqual(
+            message.tool_calls,
+            [
+                {
+                    "name": "knowledge_search",
+                    "args": {"query": "test"},
+                    "id": "call_123",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+    def test_attaches_id_to_later_tool_argument_fragments(self):
+        from langgraph_integration.openai_compatible_chat_model import (
+            repair_tool_call_chunks,
+        )
+
+        ids = {}
+        first = AIMessageChunk(
+            content="",
+            tool_call_chunks=[
+                {
+                    "name": "knowledge_search",
+                    "args": None,
+                    "id": "call_123",
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                }
+            ],
+        )
+        second = AIMessageChunk(
+            content="",
+            tool_call_chunks=[
+                {
+                    "name": None,
+                    "args": '{"query":"test"}',
+                    "id": None,
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                }
+            ],
+        )
+
+        self.assertFalse(repair_tool_call_chunks(first, ids))
+        self.assertTrue(repair_tool_call_chunks(second, ids))
+        combined = first + second
+
+        self.assertEqual(combined.tool_calls[0]["id"], "call_123")
+        self.assertEqual(combined.tool_calls[0]["name"], "knowledge_search")
+        self.assertEqual(combined.tool_calls[0]["args"], {"query": "test"})
+
+    def test_async_stream_repairs_later_tool_argument_fragments(self):
+        from langgraph_integration.openai_compatible_chat_model import (
+            ToolCallCompatibleChatOpenAI,
+        )
+        from langchain_openai import ChatOpenAI
+
+        first = AIMessageChunk(
+            content="",
+            tool_call_chunks=[
+                {
+                    "name": "knowledge_search",
+                    "args": None,
+                    "id": "call_123",
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                }
+            ],
+        )
+        second = AIMessageChunk(
+            content="",
+            tool_call_chunks=[
+                {
+                    "name": None,
+                    "args": '{"query":"test"}',
+                    "id": None,
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                }
+            ],
+        )
+
+        async def fake_astream(self, *args, **kwargs):
+            yield ChatGenerationChunk(message=first)
+            yield ChatGenerationChunk(message=second)
+
+        async def collect_chunks(model):
+            chunks = []
+            async for chunk in model._astream([]):
+                chunks.append(chunk.message)
+            return chunks
+
+        model = ToolCallCompatibleChatOpenAI(model="test", api_key="test")
+        with patch.object(ChatOpenAI, "_astream", fake_astream):
+            chunks = async_to_sync(collect_chunks)(model)
+
+        combined = chunks[0] + chunks[1]
+        self.assertEqual(combined.tool_calls[0]["id"], "call_123")
+        self.assertEqual(combined.tool_calls[0]["args"], {"query": "test"})
 
 
 class LLMFriendlyErrorTests(SimpleTestCase):
@@ -60,6 +422,24 @@ class LLMFriendlyErrorTests(SimpleTestCase):
         self.assertEqual(result["status_code"], 429)
         self.assertEqual(result["error_code"], "rate_limit")
         self.assertEqual(result["message"], "当前模型服务请求过于频繁，请稍后重试。")
+
+    def test_api_timeout_returns_friendly_payload(self):
+        exc = Exception("Request timed out.")
+        exc.__class__.__name__ = "APITimeoutError"
+
+        result = get_user_friendly_llm_error(exc)
+
+        if result is None:
+            raise AssertionError("expected friendly timeout payload")
+        self.assertEqual(result["status_code"], 504)
+        self.assertEqual(result["error_code"], "llm_timeout")
+        self.assertIn("超时", result["message"])
+
+    def test_extract_model_retry_failure_text(self):
+        text = "Model call failed after 4 attempts with APITimeoutError: Request timed out."
+        message = extract_llm_failure_message_from_text(text)
+        self.assertIsNotNone(message)
+        self.assertIn("超时", message or "")
 
     def test_model_cooldown_error_will_not_retry(self):
         exc = Exception(
@@ -268,6 +648,26 @@ class SkillScreenshotDirectoryTests(SimpleTestCase):
         self.assertTrue(screenshots_dir.startswith(temp_media_root))
         self.assertNotIn("..", screenshots_dir)
 
+    def test_auto_upload_uses_last_png_when_named_file_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            last_png = os.path.join(tmp, "last.png")
+            with open(last_png, "wb") as handle:
+                handle.write(b"\x89PNG" + b"x" * 80)
+            with patch(
+                "testcases.run_record_service.attach_testcase_step_screenshot",
+                return_value=True,
+            ) as attach:
+                notes = _auto_upload_case_screenshots(
+                    "[CASE_SCREENSHOT] /missing/case_1401_step7.png",
+                    project_id=1,
+                    case_id=1401,
+                    env={"SCREENSHOT_DIR": tmp},
+                )
+            self.assertIn("上传成功", notes)
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "case_1401_step7.png")))
+            attach.assert_called_once()
+            self.assertEqual(attach.call_args.kwargs["step_number"], 7)
+
     def test_prepare_skill_screenshots_dir_clears_idle_dir(self):
         with tempfile.TemporaryDirectory() as temp_media_root:
             with override_settings(MEDIA_ROOT=temp_media_root):
@@ -350,3 +750,21 @@ class TerminalOutputSanitizerTests(SimpleTestCase):
         raw = "\x1b[32m✓\x1b[0m Browser closed"
 
         self.assertEqual(strip_terminal_control_sequences(raw), "✓ Browser closed")
+
+
+class SkillFailureReminderTests(SimpleTestCase):
+    def test_result_fail_appends_full_report_reminder(self):
+        output = _with_failure_reminder(
+            "RESULT=FAIL: 筛选未生效，列表仍为混合状态",
+            skill_name="playwright-skill",
+        )
+        self.assertIn("必须输出完整测试报告", output)
+        self.assertIn("## 测试执行结果: 不通过", output)
+
+    def test_missing_file_on_whart_test_appends_retry_then_report_reminder(self):
+        output = _with_failure_reminder(
+            "文件不存在: /tmp/case_1520_step1.png",
+            skill_name="whart-test",
+        )
+        self.assertIn("脚本错误，请修正后重试", output)
+        self.assertIn("测试执行结果: 不通过", output)

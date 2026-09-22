@@ -1,5 +1,8 @@
 <template>
-  <div class="module-panel-wrapper">
+  <div
+    class="module-panel-wrapper"
+    :style="{ width: `${panelWidth}px` }"
+  >
     <a-card
       class="module-panel"
       :bordered="false"
@@ -15,14 +18,37 @@
             @input="onModuleSearch"
           />
           <div class="module-actions">
+            <a-button-group size="small" class="module-move-buttons">
+              <a-tooltip content="上移">
+                <a-button
+                  type="outline"
+                  :disabled="!canMoveUp || movingModule"
+                  :loading="movingModule && movingDirection === 'up'"
+                  @click="handleMoveSelectedModule('up')"
+                >
+                  <template #icon><icon-up /></template>
+                </a-button>
+              </a-tooltip>
+              <a-tooltip content="下移">
+                <a-button
+                  type="outline"
+                  :disabled="!canMoveDown || movingModule"
+                  :loading="movingModule && movingDirection === 'down'"
+                  @click="handleMoveSelectedModule('down')"
+                >
+                  <template #icon><icon-down /></template>
+                </a-button>
+              </a-tooltip>
+            </a-button-group>
             <a-dropdown @select="handleModuleAction" trigger="hover" position="bottom" :popup-max-width="false" class="module-dropdown">
               <a-button type="primary" size="small" class="module-action-button">
                 操作
               </a-button>
               <template #content>
                 <a-doption value="addRoot" class="centered-dropdown-item">添加根模块</a-doption>
-                <a-doption value="addChild" :disabled="!selectedModuleKey" class="centered-dropdown-item">添加子模块</a-doption>
+                <a-doption value="addChild" :disabled="!canAddChildModule" class="centered-dropdown-item">添加子模块</a-doption>
                 <a-doption value="edit" :disabled="!selectedModuleKey" class="centered-dropdown-item">编辑模块</a-doption>
+                <a-doption value="moveModule" :disabled="!selectedModuleKey" class="centered-dropdown-item">移动模块</a-doption>
                 <a-doption value="delete" :disabled="!selectedModuleKey" class="centered-dropdown-item">删除模块</a-doption>
               </template>
             </a-dropdown>
@@ -46,7 +72,9 @@
             @expand="onTreeExpand"
           >
             <template #title="nodeData">
-              <span>{{ nodeData.name }}</span>
+              <span class="module-title" @dblclick.stop="openEditModule(nodeData.id as number)">
+                {{ nodeData.name }}
+              </span>
               <span class="module-count"> ({{ nodeData.testcase_count || nodeData.test_case_count || 0 }})</span>
             </template>
           </a-tree>
@@ -63,12 +91,37 @@
         @submit="handleModuleSubmit"
         @close="closeModuleModal"
       />
+      <a-modal
+        v-model:visible="moveModuleModalVisible"
+        title="移动模块"
+        ok-text="移动"
+        :ok-loading="movingModuleTree"
+        @before-ok="handleConfirmMoveModule"
+      >
+        <p v-if="selectedModule" class="batch-move-modal-hint">
+          将模块「{{ selectedModule.name }}」及其所有子模块（共 {{ selectedSubmoduleCount }} 个子模块、{{ getModuleCaseCount(selectedModule) }} 条用例）移动到：
+        </p>
+        <a-tree-select
+          v-model="moveModuleTargetId"
+          :data="moduleTreeForMoveTarget"
+          placeholder="请选择目标模块"
+          allow-search
+          allow-clear
+          :filter-tree-node="filterTreeNodeByName"
+          :field-names="{ key: 'key', title: 'title', children: 'children' }"
+        />
+      </a-modal>
     </a-card>
+    <div
+      class="module-panel-resizer"
+      title="拖动调整宽度"
+      @mousedown="startResize"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, watch, toRefs } from 'vue';
+import { ref, reactive, onMounted, onUnmounted, computed, watch, toRefs } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import type { TreeNodeData } from '@arco-design/web-vue';
 import {
@@ -78,7 +131,9 @@ import {
   type TestCaseModule,
   type CreateTestCaseModuleRequest,
 } from '@/services/testcaseModuleService';
+import { IconUp, IconDown } from '@arco-design/web-vue/es/icon';
 import ModuleEditModal from './ModuleEditModal.vue'; // 引入模块编辑模态框
+import { filterTreeNodeByName } from '@/utils/filterTreeNode';
 
 const props = defineProps<{
   currentProjectId: number | null;
@@ -91,6 +146,63 @@ const emit = defineEmits<{
 
 const { currentProjectId } = toRefs(props);
 
+const MODULE_PANEL_WIDTH_STORAGE_KEY = 'wharttest_module_panel_width';
+const DEFAULT_PANEL_WIDTH = 280;
+const MIN_PANEL_WIDTH = 200;
+const MAX_PANEL_WIDTH = 600;
+
+const clampPanelWidth = (width: number): number => (
+  Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, width))
+);
+
+const getStoredPanelWidth = (): number => {
+  try {
+    const stored = localStorage.getItem(MODULE_PANEL_WIDTH_STORAGE_KEY);
+    if (!stored) return DEFAULT_PANEL_WIDTH;
+    const parsed = Number.parseInt(stored, 10);
+    return Number.isFinite(parsed) ? clampPanelWidth(parsed) : DEFAULT_PANEL_WIDTH;
+  } catch {
+    return DEFAULT_PANEL_WIDTH;
+  }
+};
+
+const panelWidth = ref(getStoredPanelWidth());
+let isResizing = false;
+let resizeStartX = 0;
+let resizeStartWidth = DEFAULT_PANEL_WIDTH;
+
+const savePanelWidth = () => {
+  localStorage.setItem(MODULE_PANEL_WIDTH_STORAGE_KEY, String(panelWidth.value));
+};
+
+const handleResizeMove = (event: MouseEvent) => {
+  if (!isResizing) return;
+  const diff = event.clientX - resizeStartX;
+  panelWidth.value = clampPanelWidth(resizeStartWidth + diff);
+};
+
+const stopResize = () => {
+  if (!isResizing) return;
+  isResizing = false;
+  document.removeEventListener('mousemove', handleResizeMove);
+  document.removeEventListener('mouseup', stopResize);
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+  savePanelWidth();
+};
+
+const startResize = (event: MouseEvent) => {
+  if (window.innerWidth <= 768) return;
+  event.preventDefault();
+  isResizing = true;
+  resizeStartX = event.clientX;
+  resizeStartWidth = panelWidth.value;
+  document.addEventListener('mousemove', handleResizeMove);
+  document.addEventListener('mouseup', stopResize);
+  document.body.style.cursor = 'col-resize';
+  document.body.style.userSelect = 'none';
+};
+
 // 加载状态
 const moduleLoading = ref(false); // 模块列表加载状态
 
@@ -102,6 +214,8 @@ const testCaseModules = ref<TestCaseModule[]>([]);
 const selectedModuleKey = ref<number | null>(null);
 const selectedModuleKeys = ref<(number|string)[]>([]); // For a-tree v-model:selected-keys
 const expandedKeys = ref<(string | number)[]>([]); // 树节点展开状态 - 默认收起
+const movingModule = ref(false);
+const movingDirection = ref<'up' | 'down' | null>(null);
 
 // 模块编辑模态框相关
 const moduleModalVisible = ref(false);
@@ -110,6 +224,11 @@ const moduleForm = reactive<CreateTestCaseModuleRequest & { id?: number }>({
   parent: undefined,
 });
 const isEditingModule = ref(false);
+
+// 移动模块（含子模块树）相关
+const moveModuleModalVisible = ref(false);
+const moveModuleTargetId = ref<number | undefined>(undefined);
+const movingModuleTree = ref(false);
 
 
 // 获取模块列表
@@ -133,10 +252,25 @@ const fetchTestCaseModules = async () => {
   }
 };
 
+const getModuleParentId = (module: TestCaseModule): number | null => {
+  return module.parent_id ?? module.parent ?? null;
+};
+
+const getModuleCaseCount = (module: TestCaseModule): number => (
+  module.testcase_count ?? module.test_case_count ?? 0
+);
+
+const sortModules = (modules: TestCaseModule[]): TestCaseModule[] => {
+  return [...modules].sort((a, b) => {
+    const orderDiff = (a.sort_order ?? 0) - (b.sort_order ?? 0);
+    return orderDiff !== 0 ? orderDiff : a.id - b.id;
+  });
+};
+
 // 构建模块树 (扁平列表转树形)
 const buildModuleTree = (modules: TestCaseModule[], parentId: number | null = null): TreeNodeData[] => {
-  return modules
-    .filter(module => module.parent === parentId || module.parent_id === parentId)
+  return sortModules(modules)
+    .filter(module => getModuleParentId(module) === parentId)
     .map(module => ({
       ...module,
       id: module.id, // 确保 id 作为 key
@@ -150,6 +284,51 @@ const buildModuleTree = (modules: TestCaseModule[], parentId: number | null = nu
 // 模块树数据
 const moduleTreeData = computed(() => {
   return buildModuleTree(testCaseModules.value);
+});
+
+const selectedModule = computed(() => {
+  if (!selectedModuleKey.value) return null;
+  return testCaseModules.value.find(module => module.id === selectedModuleKey.value) || null;
+});
+
+const MAX_MODULE_LEVEL = 6;
+
+const canAddChildModule = computed(() => {
+  if (!selectedModule.value) return false;
+  return (selectedModule.value.level ?? 1) < MAX_MODULE_LEVEL;
+});
+
+const selectedSiblingModules = computed(() => {
+  if (!selectedModule.value) return [];
+  const parentId = getModuleParentId(selectedModule.value);
+  return sortModules(testCaseModules.value.filter(module => getModuleParentId(module) === parentId));
+});
+
+const selectedSiblingIndex = computed(() => {
+  if (!selectedModule.value) return -1;
+  return selectedSiblingModules.value.findIndex(module => module.id === selectedModule.value?.id);
+});
+
+const canMoveUp = computed(() => selectedSiblingIndex.value > 0);
+const canMoveDown = computed(() => (
+  selectedSiblingIndex.value >= 0 &&
+  selectedSiblingIndex.value < selectedSiblingModules.value.length - 1
+));
+
+const selectedSubmoduleCount = computed(() => {
+  if (!selectedModuleKey.value) return 0;
+  return getAllChildModuleIds(testCaseModules.value, selectedModuleKey.value).size;
+});
+
+// 用于移动模块的目标模块树（排除源模块及其子模块）
+const moduleTreeForMoveTarget = computed(() => {
+  if (!selectedModuleKey.value) return moduleTreeData.value;
+  const excludeIds = getAllChildModuleIds(testCaseModules.value, selectedModuleKey.value);
+  excludeIds.add(selectedModuleKey.value);
+  const filteredModules = testCaseModules.value.filter(
+    module => !excludeIds.has(module.id),
+  );
+  return buildModuleTree(filteredModules);
 });
 
 // 用于 TreeSelect 的模块树数据 (排除当前编辑的模块及其子模块，防止循环引用)
@@ -225,6 +404,35 @@ const onTreeExpand = (newExpandedKeys: (string | number)[]) => {
   expandedKeys.value = newExpandedKeys;
 };
 
+const handleMoveSelectedModule = async (direction: 'up' | 'down') => {
+  if (!currentProjectId.value || !selectedModuleKey.value) {
+    Message.warning('请先选择要移动的模块');
+    return;
+  }
+  if ((direction === 'up' && !canMoveUp.value) || (direction === 'down' && !canMoveDown.value)) {
+    return;
+  }
+
+  movingModule.value = true;
+  movingDirection.value = direction;
+  try {
+    const response = await moveTestCaseModule(currentProjectId.value, selectedModuleKey.value, direction);
+    if (response.success) {
+      Message.success(direction === 'up' ? '模块上移成功' : '模块下移成功');
+      await fetchTestCaseModules();
+      selectedModuleKeys.value = [selectedModuleKey.value];
+      emit('moduleUpdated');
+    } else {
+      Message.error(response.error || '移动模块失败');
+    }
+  } catch (error) {
+    Message.error('移动模块时发生错误');
+  } finally {
+    movingModule.value = false;
+    movingDirection.value = null;
+  }
+};
+
 // 拖拽排序/移动模块
 const onDrop = async (info: {
   e: DragEvent;
@@ -237,7 +445,7 @@ const onDrop = async (info: {
 
   if (dragNode.id === dropNode.id) return;
 
-  // 检查移动后的深度是否超过5级限制
+  // 检查移动后的深度是否超过 6 级限制
   let newLevel = dropNode.level as number;
   if (dropPosition === 0) {
     newLevel = (dropNode.level as number) + 1;
@@ -249,8 +457,8 @@ const onDrop = async (info: {
   };
 
   const subtreeDepth = getSubtreeDepth(dragNode);
-  if (newLevel + subtreeDepth - 1 > 5) {
-    Message.error('移动后模块层级将超过5级限制');
+  if (newLevel + subtreeDepth - 1 > MAX_MODULE_LEVEL) {
+    Message.error('移动后模块层级将超过6级限制');
     return;
   }
 
@@ -279,6 +487,19 @@ const onDrop = async (info: {
 };
 
 // 模块操作处理
+const openEditModule = (moduleId: number) => {
+  const moduleToEdit = testCaseModules.value.find(m => m.id === moduleId);
+  if (!moduleToEdit) return;
+
+  selectedModuleKey.value = moduleToEdit.id;
+  selectedModuleKeys.value = [moduleToEdit.id];
+  isEditingModule.value = true;
+  moduleForm.id = moduleToEdit.id;
+  moduleForm.name = moduleToEdit.name;
+  moduleForm.parent = getModuleParentId(moduleToEdit);
+  moduleModalVisible.value = true;
+};
+
 const handleModuleAction = async (action: string | number | Record<string, any> | undefined) => {
   const actionValue = action as string;
   switch (actionValue) {
@@ -290,15 +511,19 @@ const handleModuleAction = async (action: string | number | Record<string, any> 
       moduleModalVisible.value = true;
       break;
     case 'addChild':
-      if (selectedModuleKey.value) {
-        isEditingModule.value = false;
-        moduleForm.id = undefined;
-        moduleForm.name = '';
-        moduleForm.parent = selectedModuleKey.value;
-        moduleModalVisible.value = true;
-      } else {
+      if (!selectedModuleKey.value) {
         Message.warning('请先选择一个父模块');
+        break;
       }
+      if (!canAddChildModule.value) {
+        Message.warning('模块最多支持 6 级，当前模块已是第 6 级，无法再添加子模块');
+        break;
+      }
+      isEditingModule.value = false;
+      moduleForm.id = undefined;
+      moduleForm.name = '';
+      moduleForm.parent = selectedModuleKey.value;
+      moduleModalVisible.value = true;
       break;
     case 'edit':
       if (selectedModuleKey.value) {
@@ -307,12 +532,20 @@ const handleModuleAction = async (action: string | number | Record<string, any> 
           isEditingModule.value = true;
           moduleForm.id = moduleToEdit.id;
           moduleForm.name = moduleToEdit.name;
-          moduleForm.parent = moduleToEdit.parent || undefined;
+          moduleForm.parent = getModuleParentId(moduleToEdit);
           moduleModalVisible.value = true;
         }
       } else {
         Message.warning('请先选择要编辑的模块');
       }
+      break;
+    case 'moveModule':
+      if (!selectedModuleKey.value || !selectedModule.value) {
+        Message.warning('请先选择要移动的模块');
+        break;
+      }
+      moveModuleTargetId.value = undefined;
+      moveModuleModalVisible.value = true;
       break;
     case 'delete':
       if (selectedModuleKey.value) {
@@ -360,6 +593,44 @@ const handleModuleAction = async (action: string | number | Record<string, any> 
   }
 };
 
+const handleConfirmMoveModule = async (): Promise<boolean> => {
+  if (!currentProjectId.value || !selectedModuleKey.value || !selectedModule.value) {
+    Message.warning('请先选择源模块');
+    return false;
+  }
+  if (!moveModuleTargetId.value) {
+    Message.warning('请选择目标模块');
+    return false;
+  }
+
+  movingModuleTree.value = true;
+  try {
+    const response = await moveTestCaseModule(
+      currentProjectId.value,
+      selectedModuleKey.value,
+      { target_id: moveModuleTargetId.value, drop_position: 0 },
+    );
+    if (!response.success) {
+      Message.error(response.error || '移动模块失败');
+      return false;
+    }
+
+    const targetModule = testCaseModules.value.find(module => module.id === moveModuleTargetId.value);
+    const targetModuleName = targetModule?.name || '';
+    Message.success(`已将模块「${selectedModule.value.name}」及其子模块移动到「${targetModuleName}」下`);
+    await fetchTestCaseModules();
+    selectedModuleKeys.value = [selectedModuleKey.value];
+    emit('moduleUpdated');
+    return true;
+  } catch (error) {
+    console.error('移动模块出错:', error);
+    Message.error('移动模块时发生错误');
+    return false;
+  } finally {
+    movingModuleTree.value = false;
+  }
+};
+
 // 关闭模块模态框
 const closeModuleModal = () => {
   moduleModalVisible.value = false;
@@ -378,6 +649,10 @@ onMounted(() => {
   if (currentProjectId.value) {
     fetchTestCaseModules();
   }
+});
+
+onUnmounted(() => {
+  stopResize();
 });
 
 watch(currentProjectId, (newProjectId) => {
@@ -403,20 +678,53 @@ defineExpose({
 
 <style scoped>
 .module-panel-wrapper {
-  width: 280px;
+  position: relative;
   min-width: 200px;
-  max-width: 100%;
+  max-width: 600px;
   height: 100%;
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
 }
 
+.module-panel-resizer {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  width: 10px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+
+.module-panel-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: transparent;
+  transition: background-color 0.15s ease;
+}
+
+.module-panel-resizer:hover::after,
+.module-panel-wrapper:active .module-panel-resizer::after {
+  background: rgba(var(--theme-accent-rgb, 59, 130, 246), 0.45);
+}
+
 @media (max-width: 768px) {
   .module-panel-wrapper {
-    width: 100%;
+    width: 100% !important;
+    max-width: 100%;
     height: 200px;
     min-height: 150px;
+  }
+
+  .module-panel-resizer {
+    display: none;
   }
 }
 
@@ -492,6 +800,10 @@ defineExpose({
   margin-left: 4px;
 }
 
+.module-title {
+  cursor: text;
+}
+
 .module-panel-header {
   flex-shrink: 0;
   padding: 16px;
@@ -501,14 +813,20 @@ defineExpose({
 .module-actions {
   display: flex;
   justify-content: center; /* 居中对齐 */
+  align-items: center;
+  gap: 8px;
   margin-top: 8px;
   margin-bottom: 16px;
   /* flex-shrink 已移动到父级 .module-panel-header */
 }
 
+.module-move-buttons {
+  flex-shrink: 0;
+}
+
 /* 下拉菜单相关样式 */
 .module-dropdown {
-  width: 100%;
+  width: auto;
 }
 
 .module-action-button {
@@ -547,5 +865,10 @@ defineExpose({
 :deep(.arco-dropdown-menu) {
   width: 100%;
   padding: 4px 0;
+}
+
+.batch-move-modal-hint {
+  margin-bottom: 12px;
+  color: var(--color-text-2);
 }
 </style>

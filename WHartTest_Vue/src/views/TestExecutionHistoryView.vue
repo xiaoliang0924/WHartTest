@@ -76,6 +76,24 @@
           </a-tag>
         </template>
 
+        <template #data-gen="{ record }">
+          <a-tooltip
+            v-if="record.data_generation_run_detail?.error_message"
+            :content="record.data_generation_run_detail.error_message"
+          >
+            <a-tag :color="record.data_generation_run_detail.status === 'success' ? 'green' : 'red'">
+              {{ record.data_generation_run_detail.status === 'success' ? '成功' : '失败' }}
+            </a-tag>
+          </a-tooltip>
+          <a-tag
+            v-else-if="record.data_generation_run_detail"
+            color="green"
+          >
+            成功
+          </a-tag>
+          <span v-else>-</span>
+        </template>
+
         <!-- 统计 -->
         <template #statistics="{ record }">
           <div class="statistics">
@@ -304,6 +322,7 @@ const columns = computed(() => [
   { title: 'ID', dataIndex: 'id', width: 50, align: 'center' as const },
   { title: pageText.value.suiteName, slotName: 'suite', width: 200, align: 'center' as const },
   { title: pageText.value.status, slotName: 'status', width: 80, align: 'center' as const },
+  { title: '造数', slotName: 'data-gen', width: 90, align: 'center' as const },
   { title: pageText.value.statistics, slotName: 'statistics', width: 210, align: 'center' as const },
   { title: pageText.value.passRate, slotName: 'pass-rate', width: 90, align: 'center' as const },
   { title: pageText.value.duration, slotName: 'duration', width: 110, align: 'center' as const },
@@ -331,18 +350,16 @@ const fetchExecutions = async () => {
   loading.value = true;
   try {
     const response = await getTestExecutionList(currentProjectId.value, {
-      search: searchKeyword.value,
+      search: searchKeyword.value || undefined,
       ordering: '-created_at',
+      status: statusFilter.value || undefined,
+      page: paginationConfig.current,
+      page_size: paginationConfig.pageSize,
     });
 
     if (response.success && response.data) {
-      // 筛选状态
-      const filteredData = statusFilter.value
-        ? response.data.filter(item => item.status === statusFilter.value)
-        : response.data;
-      
-      executionData.value = filteredData;
-      paginationConfig.total = filteredData.length;
+      executionData.value = response.data;
+      paginationConfig.total = response.total ?? response.data.length;
     } else {
       Message.error(response.error || pageText.value.fetchExecutionsFailed);
       executionData.value = [];
@@ -365,11 +382,13 @@ const handleSearch = () => {
 // 分页处理
 const handlePageChange = (page: number) => {
   paginationConfig.current = page;
+  fetchExecutions();
 };
 
 const handlePageSizeChange = (pageSize: number) => {
   paginationConfig.pageSize = pageSize;
   paginationConfig.current = 1;
+  fetchExecutions();
 };
 
 // 刷新

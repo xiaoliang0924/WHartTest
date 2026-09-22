@@ -1,0 +1,351 @@
+import logging
+
+from django.shortcuts import get_object_or_404
+from rest_framework import permissions, status
+from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
+from rest_framework.response import Response
+
+from projects.models import Project
+from testcases.models import TestSuite
+from wharttest_django.api_permissions import IsProjectMemberForResource
+from wharttest_django.permissions import HasModelPermission
+from wharttest_django.viewsets import BaseModelViewSet
+
+from .analysis import analyze_suite_variable_gaps
+from .assignee_resolver import AssigneeResolutionError
+from .llm_plan_generator import generate_plan_from_description_with_llm
+from .models import DataGenerationPlan, DataGenerationRun
+from .serializers import (
+    DataGenerationAnalyzeSuiteSerializer,
+    DataGenerationBindSuiteSerializer,
+    DataGenerationGeneratePlanSerializer,
+    DataGenerationPlanSerializer,
+    DataGenerationRunRequestSerializer,
+    DataGenerationRunSerializer,
+    DataGenerationTemplateRunSerializer,
+)
+from .plan_validation import ensure_plan_has_environment
+from .services import bind_suite_pre_data_plan, execute_cleanup_steps, execute_plan, execute_plan_async
+from .templates import get_builtin_templates, get_template_by_key
+
+logger = logging.getLogger(__name__)
+
+
+def _start_plan_run(
+    plan,
+    *,
+    input_params,
+    triggered_by,
+    default_environment_id,
+    run_async=False,
+    parent_run=None,
+):
+    common_kwargs = {
+        'trigger_type': DataGenerationRun.TRIGGER_MANUAL,
+        'input_params': input_params,
+        'triggered_by': triggered_by,
+        'default_environment_id': default_environment_id,
+        'parent_run': parent_run,
+    }
+    if run_async:
+        return execute_plan_async(plan, **common_kwargs)
+    return execute_plan(plan, **common_kwargs)
+
+
+def _build_run_response(run, *, run_async=False):
+    serializer = DataGenerationRunSerializer(run)
+    if run_async:
+        return Response(
+            {
+                'status': 'accepted',
+                'message': '造数任务已提交，请轮询执行记录查看进度',
+                'data': serializer.data,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+    if run.status == DataGenerationRun.STATUS_SUCCESS:
+        return Response({'status': 'success', 'data': serializer.data})
+    return Response(
+        {
+            'status': 'error',
+            'message': run.error_message or '造数失败',
+            'data': serializer.data,
+        },
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+class DataGenerationPlanViewSet(BaseModelViewSet):
+    serializer_class = DataGenerationPlanSerializer
+
+    def get_permissions(self):
+        return [
+            permissions.IsAuthenticated(),
+            HasModelPermission(),
+            IsProjectMemberForResource(),
+        ]
+
+    def get_queryset(self):
+        project_pk = self.kwargs.get('project_pk')
+        queryset = DataGenerationPlan.objects.filter(project_id=project_pk)
+        is_active = self.request.query_params.get('is_active')
+        if is_active in ('true', '1'):
+            queryset = queryset.filter(is_active=True)
+        elif is_active in ('false', '0'):
+            queryset = queryset.filter(is_active=False)
+        is_template = self.request.query_params.get('is_template')
+        if is_template in ('true', '1'):
+            queryset = queryset.filter(is_template=True)
+        elif is_template in ('false', '0'):
+            queryset = queryset.filter(is_template=False)
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(name__icontains=search.strip())
+        return queryset.select_related('default_environment', 'created_by')
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['project_id'] = self.kwargs.get('project_pk')
+        return context
+
+    def perform_create(self, serializer):
+        project = get_object_or_404(Project, pk=self.kwargs.get('project_pk'))
+        serializer.save(project=project, created_by=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def run(self, request, **kwargs):
+        plan = self.get_object()
+        ensure_plan_has_environment(
+            steps=plan.steps,
+            cleanup_steps=plan.cleanup_steps,
+            default_environment_id=plan.default_environment_id,
+        )
+        payload = DataGenerationRunRequestSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        validated = payload.validated_data
+        run = _start_plan_run(
+            plan,
+            input_params=validated.get('input_params') or {},
+            triggered_by=request.user,
+            default_environment_id=plan.default_environment_id,
+            run_async=validated.get('run_async', False),
+        )
+        return _build_run_response(run, run_async=validated.get('run_async', False))
+
+    @action(detail=False, methods=['get'])
+    def templates(self, request, **kwargs):
+        project_pk = self.kwargs.get('project_pk')
+        builtin = get_builtin_templates()
+        saved = DataGenerationPlan.objects.filter(
+            project_id=project_pk,
+            is_template=True,
+            is_active=True,
+        )
+        saved_data = DataGenerationPlanSerializer(saved, many=True).data
+        return Response({
+            'builtin': builtin,
+            'saved': saved_data,
+        })
+
+    @action(detail=False, methods=['post'])
+    def run_template(self, request, **kwargs):
+        project_pk = self.kwargs.get('project_pk')
+        payload = DataGenerationTemplateRunSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        validated = payload.validated_data
+        template_key = validated['template_key']
+        input_params = validated.get('input_params') or {}
+        default_environment_id = validated.get('default_environment')
+        run_async = validated.get('run_async', False)
+
+        plan = DataGenerationPlan.objects.filter(
+            project_id=project_pk,
+            template_key=template_key,
+            is_template=True,
+            is_active=True,
+        ).first()
+
+        template = None
+        if plan is None:
+            template = get_template_by_key(
+                template_key,
+                project_id=project_pk,
+                default_environment_id=default_environment_id,
+            )
+            if template is None:
+                return Response(
+                    {'status': 'error', 'message': f'模板不存在: {template_key}'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+        ensure_plan_has_environment(
+            steps=plan.steps if plan is not None else template.get('steps'),
+            cleanup_steps=plan.cleanup_steps if plan is not None else template.get('cleanup_steps'),
+            default_environment_id=(
+                default_environment_id
+                or (plan.default_environment_id if plan is not None else None)
+                or (template or {}).get('default_environment_id')
+            ),
+        )
+
+        if plan is None:
+            project = get_object_or_404(Project, pk=project_pk)
+            bindings = template.get('template_bindings') if isinstance(template.get('template_bindings'), dict) else {}
+            plan = DataGenerationPlan.objects.create(
+                project=project,
+                name=template['name'],
+                description=template.get('description', ''),
+                target_type=template.get('target_type', 'both'),
+                steps=template.get('steps') or [],
+                cleanup_steps=template.get('cleanup_steps') or [],
+                default_environment_id=default_environment_id,
+                is_template=True,
+                template_key=template_key,
+                template_icon=template.get('icon', ''),
+                template_params_schema=template.get('params_schema') or {},
+                template_bindings=bindings,
+                created_by=request.user,
+            )
+
+        run = _start_plan_run(
+            plan,
+            input_params=input_params,
+            triggered_by=request.user,
+            default_environment_id=default_environment_id or plan.default_environment_id,
+            run_async=run_async,
+        )
+        return _build_run_response(run, run_async=run_async)
+
+    @action(detail=False, methods=['post'])
+    def generate(self, request, **kwargs):
+        project_pk = self.kwargs.get('project_pk')
+        payload = DataGenerationGeneratePlanSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            generated = generate_plan_from_description_with_llm(
+                payload.validated_data['description'],
+                project_id=project_pk,
+                default_environment_id=payload.validated_data.get('default_environment'),
+                suite_id=payload.validated_data.get('suite_id'),
+                use_llm=payload.validated_data.get('use_llm', True),
+            )
+        except AssigneeResolutionError as exc:
+            raise ValidationError({'description': [str(exc)]}) from exc
+        return Response({'status': 'success', 'data': generated})
+
+    @action(detail=False, methods=['post'])
+    def analyze_suite(self, request, **kwargs):
+        project_pk = self.kwargs.get('project_pk')
+        payload = DataGenerationAnalyzeSuiteSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        suite = get_object_or_404(
+            TestSuite,
+            pk=payload.validated_data['suite_id'],
+            project_id=project_pk,
+        )
+        result = analyze_suite_variable_gaps(
+            suite,
+            environment_id=payload.validated_data.get('environment_id'),
+        )
+        return Response({'status': 'success', 'data': result})
+
+    @action(detail=False, methods=['post'], url_path='generate_and_bind_suite')
+    def generate_and_bind_suite(self, request, **kwargs):
+        project_pk = self.kwargs.get('project_pk')
+        payload = DataGenerationBindSuiteSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        suite = get_object_or_404(
+            TestSuite,
+            pk=payload.validated_data['suite_id'],
+            project_id=project_pk,
+        )
+        try:
+            result = bind_suite_pre_data_plan(
+                suite,
+                created_by=request.user,
+                default_environment_id=payload.validated_data.get('environment_id'),
+                use_llm=payload.validated_data.get('use_llm', True),
+                enable_post_cleanup=payload.validated_data.get('enable_post_cleanup', True),
+                description=payload.validated_data.get('description') or None,
+            )
+        except AssigneeResolutionError as exc:
+            raise ValidationError({'description': [str(exc)]}) from exc
+
+        plan = result['plan']
+        plan_data = DataGenerationPlanSerializer(plan).data
+        gap = result['gap_analysis']
+        return Response({
+            'status': 'success',
+            'data': {
+                'plan': plan_data,
+                'gap_analysis': gap,
+                'bound': result['bound'],
+                'post_data_cleanup_enabled': result['post_data_cleanup_enabled'],
+                'generation_method': (result.get('generation') or {}).get('generation_method'),
+            },
+            'message': f'已生成并绑定造数计划「{plan.name}」',
+        })
+
+
+class DataGenerationRunViewSet(BaseModelViewSet):
+    serializer_class = DataGenerationRunSerializer
+    http_method_names = ['get', 'head', 'options', 'post']
+
+    def get_permissions(self):
+        return [
+            permissions.IsAuthenticated(),
+            HasModelPermission(),
+            IsProjectMemberForResource(),
+        ]
+
+    def get_queryset(self):
+        project_pk = self.kwargs.get('project_pk')
+        queryset = DataGenerationRun.objects.filter(project_id=project_pk)
+        plan_id = self.request.query_params.get('plan_id')
+        if plan_id:
+            queryset = queryset.filter(plan_id=plan_id)
+        test_execution_id = self.request.query_params.get('test_execution_id')
+        if test_execution_id:
+            queryset = queryset.filter(test_execution_id=test_execution_id)
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            queryset = queryset.filter(status=status_param.strip())
+        return queryset.select_related('plan', 'triggered_by')
+
+    @action(detail=True, methods=['post'])
+    def rerun(self, request, **kwargs):
+        run = self.get_object()
+        plan = run.plan
+        run_async = bool((request.data or {}).get('run_async', False))
+        new_run = _start_plan_run(
+            plan,
+            input_params=run.input_params if isinstance(run.input_params, dict) else {},
+            triggered_by=request.user,
+            default_environment_id=plan.default_environment_id,
+            run_async=run_async,
+            parent_run=run,
+        )
+        return _build_run_response(new_run, run_async=run_async)
+
+    @action(detail=True, methods=['post'])
+    def cleanup(self, request, **kwargs):
+        run = self.get_object()
+        if run.is_cleaned:
+            return Response(
+                {'status': 'success', 'message': '该记录已清理', 'data': DataGenerationRunSerializer(run).data},
+            )
+        updated = execute_cleanup_steps(run, triggered_by=request.user)
+        serializer = DataGenerationRunSerializer(updated)
+        if updated.cleanup_status == DataGenerationRun.CLEANUP_SUCCESS:
+            return Response({'status': 'success', 'data': serializer.data})
+        if updated.cleanup_status == DataGenerationRun.CLEANUP_SKIPPED:
+            return Response({'status': 'success', 'message': '该计划未配置清理步骤', 'data': serializer.data})
+        return Response(
+            {
+                'status': 'error',
+                'message': updated.cleanup_error_message or '清理失败',
+                'data': serializer.data,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )

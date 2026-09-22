@@ -19,6 +19,7 @@ import {
   type TestTaskCaseType
 } from '../../services/testTaskService'
 import { toArray } from '../../services/responseHelpers'
+import { sortApiTestCaseTags } from '../../utils/tagSort'
 
 const props = defineProps({
   mode: {
@@ -273,7 +274,7 @@ const columns = [
       if (!record.tags_info?.length) return '-'
       return h('div', {
         class: 'flex flex-wrap gap-1 justify-center'
-      }, record.tags_info.map(tag => 
+      }, sortApiTestCaseTags(record.tags_info).map(tag => 
         h(ATag, {
           color: tag.color,
           class: 'whitespace-nowrap'

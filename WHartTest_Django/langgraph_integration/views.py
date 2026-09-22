@@ -18,6 +18,28 @@ from asgiref.sync import async_to_sync, sync_to_async
 logger = logging.getLogger(__name__)
 _background_title_tasks = set()
 
+
+def _friendly_llm_http_error_message(raw: str, api_url: str = "") -> str:
+    """Turn HTML / Cloudflare / typo responses into actionable Chinese hints."""
+    text = (raw or "").strip()
+    lowered = text.lower()
+    url = (api_url or "").lower()
+    if "justwoker.co" in lowered or url.rstrip("/").endswith("justwoker.co"):
+        return (
+            "API 地址有误：JustDoWork 请填写 https://api.justwoker.icu/v1 "
+            "（域名是 .icu，不是 .co）。"
+        )
+    if "<html" in lowered or "cloudflare" in lowered or "attention required" in lowered:
+        return (
+            "请求被 Cloudflare 安全策略拦截（云服务器 IP 常见）。"
+            "请确认 API 为 https://api.justwoker.icu/v1，"
+            "并在 JustDoWork / Cloudflare 侧放行 WHartTest 服务器出口 IP，"
+            "或暂时改用火山方舟等可从本机直连的模型。"
+        )
+    if len(text) > 320:
+        return text[:320] + "…"
+    return text or "未知错误"
+
 # 项目相关导入
 from projects.models import Project, ProjectMember
 from projects.permissions import IsProjectMember
@@ -76,6 +98,7 @@ from langchain_core.messages import (
     SystemMessage,
 )
 from langchain_openai import ChatOpenAI
+from .openai_compatible_chat_model import ToolCallCompatibleChatOpenAI
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages  # Correct import for add_messages
 from langchain.agents import create_agent  # For agent with tools (v1 API)
@@ -363,7 +386,7 @@ def create_llm_instance(active_config, temperature=0.7):
                 "timeout": request_timeout,  # 单次请求超时
                 "max_retries": max_retries,  # 自动重试次数
             }
-            llm = ChatOpenAI(**llm_kwargs)
+            llm = ToolCallCompatibleChatOpenAI(**llm_kwargs)
 
         logger.info(
             "Initialized LLM: provider=%s, model=%s, base_url=%s, timeout=%ss, max_retries=%s",
@@ -581,7 +604,7 @@ class LLMConfigViewSet(BaseModelViewSet):
                 status=status.HTTP_200_OK,
             )
         except Exception as e:
-            msg = str(e)
+            msg = _friendly_llm_http_error_message(str(e), config.api_url or "")
             return Response(
                 {"status": "error", "message": f"连接失败: {msg}"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -653,7 +676,8 @@ class LLMConfigViewSet(BaseModelViewSet):
                 try:
                     msg = e.response.json().get("error", {}).get("message", str(e))
                 except Exception:
-                    msg = e.response.text[:200] if e.response.text else str(e)
+                    msg = e.response.text if e.response.text else str(e)
+            msg = _friendly_llm_http_error_message(msg, api_url)
             return Response(
                 {"status": "error", "message": f"获取模型列表失败: {msg}"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -2014,7 +2038,7 @@ def sync_chat_messages_from_checkpointer(chat_session, user, thread_id):
                 )
 
             if messages_to_create:
-                ChatMessage.objects.bulk_create(messages_to_create, ignore_conflicts=True)
+                ChatMessage.objects.bulk_create(messages_to_create)
                 logger.info(f"sync_chat_messages_from_checkpointer: Successfully bulk-created {len(messages_to_create)} ChatMessage records.")
 
     except Exception as e:

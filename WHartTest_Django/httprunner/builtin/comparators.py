@@ -13,24 +13,32 @@ def equal(check_value: Any, expect_value: Any, message: Text = ""):
 def greater_than(
     check_value: Union[int, float], expect_value: Union[int, float], message: Text = ""
 ):
+    if check_value is None or expect_value is None:
+        raise AssertionError(message or "comparison value is None")
     assert check_value > expect_value, message
 
 
 def less_than(
     check_value: Union[int, float], expect_value: Union[int, float], message: Text = ""
 ):
+    if check_value is None or expect_value is None:
+        raise AssertionError(message or "comparison value is None")
     assert check_value < expect_value, message
 
 
 def greater_or_equals(
     check_value: Union[int, float], expect_value: Union[int, float], message: Text = ""
 ):
+    if check_value is None or expect_value is None:
+        raise AssertionError(message or "comparison value is None")
     assert check_value >= expect_value, message
 
 
 def less_or_equals(
     check_value: Union[int, float], expect_value: Union[int, float], message: Text = ""
 ):
+    if check_value is None or expect_value is None:
+        raise AssertionError(message or "comparison value is None")
     assert check_value <= expect_value, message
 
 
@@ -44,6 +52,8 @@ def string_equals(check_value: Text, expect_value: Any, message: Text = ""):
 
 def length_equal(check_value: Text, expect_value: int, message: Text = ""):
     assert isinstance(expect_value, int), "expect_value should be int type"
+    if check_value is None:
+        raise AssertionError(message or "check_value is None")
     assert len(check_value) == expect_value, message
 
 
@@ -53,6 +63,8 @@ def length_greater_than(
     assert isinstance(
         expect_value, (int, float)
     ), "expect_value should be int/float type"
+    if check_value is None:
+        raise AssertionError(message or "check_value is None")
     assert len(check_value) > expect_value, message
 
 
@@ -62,6 +74,8 @@ def length_greater_or_equals(
     assert isinstance(
         expect_value, (int, float)
     ), "expect_value should be int/float type"
+    if check_value is None:
+        raise AssertionError(message or "check_value is None")
     assert len(check_value) >= expect_value, message
 
 
@@ -71,6 +85,8 @@ def length_less_than(
     assert isinstance(
         expect_value, (int, float)
     ), "expect_value should be int/float type"
+    if check_value is None:
+        raise AssertionError(message or "check_value is None")
     assert len(check_value) < expect_value, message
 
 
@@ -80,6 +96,8 @@ def length_less_or_equals(
     assert isinstance(
         expect_value, (int, float)
     ), "expect_value should be int/float type"
+    if check_value is None:
+        raise AssertionError(message or "check_value is None")
     assert len(check_value) <= expect_value, message
 
 
@@ -127,3 +145,35 @@ def startswith(check_value: Any, expect_value: Any, message: Text = ""):
 
 def endswith(check_value: Text, expect_value: Any, message: Text = ""):
     assert str(check_value).endswith(str(expect_value)), message
+
+
+def is_not_none(check_value: Any, expect_value: Any = True, message: Text = ""):
+    assert check_value is not None, message
+
+
+def exists(check_value: Any, expect_value: Any = True, message: Text = ""):
+    assert check_value is not None, message
+
+
+def is_same(check_value: Any, expect_value: Any, message: Text = ""):
+    assert check_value is expect_value, message
+
+
+def all_match(check_value: Any, expect_value: Any, message: Text = ""):
+    if not isinstance(check_value, list):
+        raise AssertionError(message or "check_value should be list")
+    if (
+        not isinstance(expect_value, list)
+        or len(expect_value) != 2
+        or not isinstance(expect_value[0], str)
+    ):
+        raise AssertionError(message or "expect_value should be [field, expected]")
+    field, expected = expect_value[0], expect_value[1]
+    for index, item in enumerate(check_value):
+        if not isinstance(item, dict):
+            raise AssertionError(message or f"check_value[{index}] should be dict")
+        if item.get(field) != expected:
+            raise AssertionError(
+                message
+                or f"check_value[{index}].{field} expected {expected!r}, got {item.get(field)!r}"
+            )

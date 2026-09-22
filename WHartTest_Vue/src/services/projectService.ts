@@ -590,6 +590,7 @@ export interface ProjectStatistics {
       approved: number;
       needs_optimization: number;
       optimization_pending_review: number;
+      pending_product_confirmation: number;
       unavailable: number;
     };
   };

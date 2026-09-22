@@ -56,7 +56,14 @@ class FileAssetViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']
     http_method_names = ['get', 'post', 'delete', 'head', 'options']
 
+    # 项目成员可列出/上传/选用附件；删除与设置仍走模型权限
+    _MEMBER_FILE_ACTIONS = {
+        'list', 'create', 'retrieve', 'validate', 'download', 'preview',
+    }
+
     def get_permissions(self):
+        if getattr(self, 'action', None) in self._MEMBER_FILE_ACTIONS:
+            return [IsAuthenticated(), IsProjectMemberForResource()]
         return [IsAuthenticated(), HasModelPermission(), IsProjectMemberForResource()]
 
     def get_project(self):

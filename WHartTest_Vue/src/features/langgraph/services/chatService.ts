@@ -11,6 +11,17 @@ import type {
 } from '@/features/langgraph/types/chat';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
 import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolResultParser';
+import {
+  clearSessionRunning,
+  markSessionRunning,
+  notifyStreamComplete,
+} from '@/features/langgraph/utils/runningSession';
+import {
+  extractFirstExecutionReport,
+  isExecutionReportContent,
+  parseExecutionReportStatus,
+  stripExecutionReportFromText,
+} from '@/features/langgraph/utils/executionReport';
 
 // --- 全局流式状态管理 ---
 interface StreamMessage {
@@ -34,10 +45,19 @@ interface StreamState {
   error?: string;
   isComplete: boolean;
   messages: StreamMessage[]; // 存储所有消息,包括工具消息
+  executionReport?: {
+    status: 'pass' | 'fail';
+    content: string;
+  };
   contextTokenCount?: number; // 当前上下文Token数
   contextLimit?: number; // 上下文Token限制
   currentStep?: number;  // Agent Loop 当前步骤
   maxSteps?: number;     // Agent Loop 最大步骤数
+  testcaseStep?: number; // 手工测试用例当前步骤
+  testcaseTotal?: number;
+  testcaseStepState?: 'pending' | 'running' | 'completed' | 'waiting_llm';
+  testcaseProgressMessage?: string;
+  testcaseStartedAt?: number;
   userMessage?: string;  // 用户发送的消息内容
   userMessageTime?: string;  // 用户消息时间（会话创建时间）
   taskId?: number;       // Agent Task ID
@@ -69,8 +89,10 @@ export interface AgentLoopSseEvent {
   context_token_count?: number;
   max_steps?: number | string;
   step?: number | string;
-  summary?: string | Record<string, unknown>;
+  total_steps?: number | string;
+  state?: 'pending' | 'running' | 'completed' | 'waiting_llm';
   message?: string;
+  summary?: string | Record<string, unknown>;
   data?: string | { content?: string } | Record<string, unknown> | null;
 }
 
@@ -79,6 +101,35 @@ const formatStreamTime = (): string => {
   const now = new Date();
   return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 };
+
+interface TestCaseRunPayload {
+  status?: string;
+  summary?: string;
+}
+
+/** 将用例执行报告存到 stream.executionReport，仅在执行完成时展示（避免报告后还有工具日志） */
+export function applyTestCaseRunReportToStream(
+  stream: StreamState,
+  testCaseRun?: TestCaseRunPayload | Record<string, unknown> | null
+) {
+  if (!testCaseRun || typeof testCaseRun !== 'object') return;
+  const rawSummary = typeof (testCaseRun as TestCaseRunPayload).summary === 'string'
+    ? (testCaseRun as TestCaseRunPayload).summary!.trim()
+    : '';
+  const summary = extractFirstExecutionReport(rawSummary);
+  if (!summary || !isExecutionReportContent(summary)) return;
+
+  const status = (testCaseRun as TestCaseRunPayload).status === 'pass'
+    || parseExecutionReportStatus(summary) === 'pass'
+    ? 'pass'
+    : 'fail';
+
+  stream.executionReport = { status, content: summary };
+  stream.content = stripExecutionReportFromText(stream.content || '');
+  stream.messages = stream.messages.filter(
+    (msg) => !(msg.type === 'ai' && isExecutionReportContent(msg.content))
+  );
+}
 
 // 格式化 ISO 时间字符串为显示格式
 const formatIsoTime = (isoString: string | null | undefined): string => {
@@ -374,17 +425,49 @@ async function refreshAccessToken(): Promise<string | null> {
   }
 }
 
+async function readHttpErrorMessage(response: Response, fallback: string) {
+  let detail = fallback;
+  try {
+    const errBody = await response.json();
+    detail = errBody.message || errBody.detail || errBody.error || detail;
+  } catch {
+    // ignore non-json error bodies
+  }
+  if (response.status === 400 || response.status === 413) {
+    if (detail.includes('DATA_UPLOAD') || detail.includes('too large') || detail.includes('Request body exceeded')) {
+      return '图片或附件过大，请压缩后重试（建议单张小于 5MB）';
+    }
+  }
+  return detail;
+}
+
 /**
  * 发送流式对话消息
  */
+export type ChatStreamHooks = {
+  onComplete?: (sessionId: string, payload?: Record<string, unknown>) => void;
+  onError?: (sessionId: string, message: string) => void;
+};
+
 export async function sendChatMessageStream(
   data: ChatRequest,
   onStart: (sessionId: string) => void, // 简化回调，只保留 onStart
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  hooks?: ChatStreamHooks
 ): Promise<void> {
   const authStore = useAuthStore();
   let token = authStore.getAccessToken;
   let streamSessionId: string | null = data.session_id || null;
+  let onStartInvoked = false;
+
+  const invokeOnStart = (sessionId: string) => {
+    if (onStartInvoked) {
+      return;
+    }
+    onStartInvoked = true;
+    markSessionRunning(sessionId);
+    onStart(sessionId);
+  };
 
   // 错误处理函数，用于更新全局状态
   const handleError = (error: any, sessionId: string | null) => {
@@ -401,14 +484,26 @@ export async function sendChatMessageStream(
         activeStreams.value[sessionId].isComplete = true;
         // 不设置 error，避免显示错误提示
       }
+      if (sessionId) {
+        clearSessionRunning(sessionId);
+      }
       return;
     }
 
     // 真正的错误
     console.error('Stream error:', error);
+    const message = error?.message || '流式请求失败';
     if (sessionId && activeStreams.value[sessionId]) {
-      activeStreams.value[sessionId].error = error.message || '流式请求失败';
+      activeStreams.value[sessionId].error = message;
       activeStreams.value[sessionId].isComplete = true;
+      if (/超时|timed out|APITimeout|模型服务/i.test(message)) {
+        activeStreams.value[sessionId].testcaseStepState = 'waiting_llm';
+        activeStreams.value[sessionId].testcaseProgressMessage = message;
+      }
+    }
+    if (sessionId) {
+      clearSessionRunning(sessionId);
+      hooks?.onError?.(sessionId, message);
     }
   };
 
@@ -450,7 +545,7 @@ export async function sendChatMessageStream(
     }
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      throw new Error(await readHttpErrorMessage(response, `HTTP error! status: ${response.status}`));
     }
 
     const reader = response.body?.getReader();
@@ -490,6 +585,10 @@ export async function sendChatMessageStream(
               }
               
               if (parsed.type === 'complete' && streamSessionId && activeStreams.value[streamSessionId]) {
+                applyTestCaseRunReportToStream(
+                  activeStreams.value[streamSessionId],
+                  parsed.test_case_run as Record<string, unknown> | undefined
+                );
                 activeStreams.value[streamSessionId].isComplete = true;
               }
             } catch (e) {
@@ -509,6 +608,7 @@ export async function sendChatMessageStream(
             // 设置错误状态而非完成状态，让用户知道可能需要重试
             activeStreams.value[streamSessionId].error = '连接意外中断，请重试';
             activeStreams.value[streamSessionId].isComplete = true;
+            clearSessionRunning(streamSessionId);
         }
         break;
       }
@@ -524,8 +624,10 @@ export async function sendChatMessageStream(
         if (jsonData === '[DONE]') {
             if (streamSessionId && activeStreams.value[streamSessionId]) {
                 // HITL: 如果正在等待审批，不设置 isComplete，让 resumeAgentLoop 处理后续流程
-                if (!activeStreams.value[streamSessionId].isWaitingForApproval) {
+                if (!activeStreams.value[streamSessionId].isWaitingForApproval
+                    && !activeStreams.value[streamSessionId].isComplete) {
                     activeStreams.value[streamSessionId].isComplete = true;
+                    clearSessionRunning(streamSessionId);
                 }
             }
             continue;
@@ -535,8 +637,40 @@ export async function sendChatMessageStream(
           const parsed = JSON.parse(jsonData);
 
           if (parsed.type === 'error') {
+            if (parsed.pre_data_status === 'failed' && streamSessionId && activeStreams.value[streamSessionId]) {
+              const stream = activeStreams.value[streamSessionId];
+              stream.userMessage = '测试数据准备失败，已中止执行';
+              stream.messages.push({
+                content: '测试数据准备失败，已中止执行',
+                type: 'system',
+                time: formatStreamTime()
+              });
+              stream.isComplete = true;
+            }
             handleError(new Error(parsed.message || '流式请求失败'), streamSessionId);
             return;
+          }
+
+          if (parsed.type === 'pre_data_start' && parsed.session_id) {
+            streamSessionId = parsed.session_id;
+            // 前置造数可能在正常的 start 事件之前失败。此时先建立流状态，
+            // 才能把失败原因显示在当前会话，而不是留下一个永久加载的空白页面。
+            if (!activeStreams.value[streamSessionId]) {
+              activeStreams.value[streamSessionId] = {
+                content: '',
+                isComplete: false,
+                messages: [],
+                contextTokenCount: 0,
+                contextLimit: 128000,
+                currentStep: 0,
+                maxSteps: 0,
+                testcaseStep: 0,
+                testcaseStartedAt: Date.now(),
+                userMessage: data.message,
+                userMessageTime: formatStreamTime()
+              };
+            }
+            invokeOnStart(parsed.session_id);
           }
 
           if (parsed.type === 'start' && parsed.session_id) {
@@ -557,12 +691,15 @@ export async function sendChatMessageStream(
                 contextLimit: contextLimit,
                 currentStep: 0,
                 maxSteps: initialMaxSteps,
+                testcaseStep: 0,
+                testcaseTotal: Number((typeof parsed.display_message === 'string' && parsed.display_message.match(/共\s*(\d+)\s*个步骤/))?.[1]) || undefined,
+                testcaseStartedAt: Date.now(),
                 userMessage: typeof parsed.display_message === 'string' && parsed.display_message.trim()
                   ? parsed.display_message
                   : data.message, // 优先使用后端规范化后的展示文本
                 userMessageTime: formatIsoTime(parsed.created_at) // 使用会话创建时间
               };
-              onStart(streamSessionId);
+              invokeOnStart(streamSessionId);
             }
           }
 
@@ -602,6 +739,19 @@ export async function sendChatMessageStream(
             }
             if (stepNumber !== undefined) {
               activeStreams.value[streamSessionId].currentStep = stepNumber;
+              const stream = activeStreams.value[streamSessionId];
+              const baseStatus = (stream.userMessage || '').replace(/\n正在执行步骤 \d+\/\d+$/, '');
+              const total = maxSteps !== undefined ? maxSteps : stream.maxSteps;
+              stream.userMessage = total
+                ? `${baseStatus}\n正在执行步骤 ${stepNumber}/${total}`
+                : `${baseStatus}\n正在执行步骤 ${stepNumber}`;
+              stream.messages.push({
+                content: total
+                  ? `正在执行步骤 ${stepNumber}/${total}`
+                  : `正在执行步骤 ${stepNumber}`,
+                type: 'system',
+                time: formatStreamTime()
+              });
             }
             activeStreams.value[streamSessionId].messages.push({
               content: '',
@@ -625,13 +775,53 @@ export async function sendChatMessageStream(
             // step_start已经插入了分隔符,step_complete不需要再显示
           }
 
+          if (parsed.type === 'testcase_progress' && streamSessionId && activeStreams.value[streamSessionId]) {
+            const stream = activeStreams.value[streamSessionId];
+            const stepNumber = normalizeNumericField(parsed.step);
+            if (stepNumber !== undefined) {
+              const total = normalizeNumericField(parsed.total_steps) || stream.testcaseTotal;
+              stream.currentStep = stepNumber;
+              stream.testcaseStep = stepNumber;
+              if (total !== undefined) stream.testcaseTotal = total;
+              stream.testcaseStepState = parsed.state || 'running';
+              stream.testcaseProgressMessage = typeof parsed.message === 'string' ? parsed.message : undefined;
+            }
+          }
+
           // 处理 Agent Loop 工具结果事件
           if (parsed.type === 'tool_result' && streamSessionId && activeStreams.value[streamSessionId]) {
             // 优先使用 tool_output（完整内容），fallback 到 summary（截断摘要）
             const toolOutput = parsed.tool_output || parsed.content || parsed.summary;
             const toolPayload = parseToolResultDisplayPayload(toolOutput);
+            // `testcase_progress` 是首选实时来源；但 SSE 在代理工具调用期间可能
+            // 被浏览器或代理断开/重连而丢失。工具返回中的 CASE_SCREENSHOT 是后端
+            // 已成功写盘的确定性证据，可作为兜底，绝不根据 AI 的自然语言推断步骤。
+            const rawToolOutput = typeof toolOutput === 'string'
+              ? toolOutput
+              : JSON.stringify(toolOutput || '');
+            // 工具正文有时只保留 last.png；原始步骤图则以附件返回。
+            // 两者都是后端已确认的结果，附件名才是稳定的步骤编号来源。
+            const screenshotReferences = [
+              rawToolOutput,
+              toolPayload.content,
+              ...(toolPayload.fileAttachments || []).flatMap((file) => [file.name, file.path, file.url]),
+            ].filter(Boolean).join('\n');
+            const testcaseStepMatch = screenshotReferences.match(/case_(\d+)_step(\d+)\.png/i);
+            if (testcaseStepMatch) {
+              const stream = activeStreams.value[streamSessionId];
+              const stepNumber = Number(testcaseStepMatch[2]);
+              if (!stream.testcaseStep || stepNumber >= stream.testcaseStep) {
+                stream.currentStep = stepNumber;
+                stream.testcaseStep = stepNumber;
+                stream.testcaseStepState = 'completed';
+                stream.testcaseProgressMessage = '步骤截图已保存，正在准备下一步';
+              }
+            }
             if (toolPayload.content || toolPayload.imageDataUrl) {
               const time = formatStreamTime();
+              const displayContent = toolPayload.content
+                .replace(/^\[执行进度\][^\n]*\n?/m, '')
+                .trim();
               // 如果当前有AI流式内容,先将其固化为独立消息
               if (activeStreams.value[streamSessionId].content && activeStreams.value[streamSessionId].content.trim()) {
                 activeStreams.value[streamSessionId].messages.push({
@@ -643,7 +833,7 @@ export async function sendChatMessageStream(
                 activeStreams.value[streamSessionId].content = '';
               }
               activeStreams.value[streamSessionId].messages.push({
-                content: toolPayload.content || '[工具返回了图片]',
+                content: displayContent || '[工具返回了图片]',
                 type: 'tool',
                 time: time,
                 toolName: typeof parsed.tool_name === 'string' ? parsed.tool_name : undefined,
@@ -700,6 +890,11 @@ export async function sendChatMessageStream(
             const content = parsed.data;
             if (content) {
               activeStreams.value[streamSessionId].content += content;
+              if (/Model call failed after|APITimeoutError|Request timed out/i.test(content)) {
+                const stream = activeStreams.value[streamSessionId];
+                stream.testcaseStepState = 'waiting_llm';
+                stream.testcaseProgressMessage = '模型调用超时或失败，正在结束本次执行…';
+              }
             }
           }
 
@@ -729,6 +924,10 @@ export async function sendChatMessageStream(
           }
 
           if (parsed.type === 'complete' && streamSessionId && activeStreams.value[streamSessionId]) {
+            applyTestCaseRunReportToStream(
+              activeStreams.value[streamSessionId],
+              parsed.test_case_run as Record<string, unknown> | undefined
+            );
             // ✅ 修复：标记完成，保持content不变（Vue组件会从content读取最终消息）
             // 不清空content，因为displayedMessages和watch都依赖stream.content来显示最终AI回复
             activeStreams.value[streamSessionId].isComplete = true;
@@ -747,6 +946,10 @@ export async function sendChatMessageStream(
               };
               console.log('[ChatService] Script generation available:', parsed.script_generation);
             }
+
+            clearSessionRunning(streamSessionId);
+            notifyStreamComplete(streamSessionId);
+            hooks?.onComplete?.(streamSessionId, parsed as Record<string, unknown>);
           }
         } catch (e) {
           console.warn('Failed to parse SSE data:', jsonData);
@@ -1194,6 +1397,10 @@ export async function resumeAgentLoop(
             try {
               const parsed = JSON.parse(jsonData);
               if (parsed.type === 'complete' && activeStreams.value[sessionId]) {
+                applyTestCaseRunReportToStream(
+                  activeStreams.value[sessionId],
+                  parsed.test_case_run as Record<string, unknown> | undefined
+                );
                 activeStreams.value[sessionId].isComplete = true;
               }
             } catch {
@@ -1275,11 +1482,43 @@ export async function resumeAgentLoop(
             }
           }
 
+          if (parsed.type === 'testcase_progress' && activeStreams.value[sessionId]) {
+            const stream = activeStreams.value[sessionId];
+            const stepNumber = normalizeNumericField(parsed.step);
+            if (stepNumber !== undefined) {
+              const total = normalizeNumericField(parsed.total_steps) || stream.testcaseTotal;
+              stream.currentStep = stepNumber;
+              stream.testcaseStep = stepNumber;
+              if (total !== undefined) stream.testcaseTotal = total;
+              stream.testcaseStepState = parsed.state || 'running';
+              stream.testcaseProgressMessage = typeof parsed.message === 'string' ? parsed.message : undefined;
+            }
+          }
+
           // 处理工具结果事件
           if (parsed.type === 'tool_result' && activeStreams.value[sessionId]) {
             // 优先使用 tool_output（完整内容），fallback 到 summary（截断摘要）
             const toolOutput = parsed.tool_output || parsed.content || parsed.summary;
             const toolPayload = parseToolResultDisplayPayload(toolOutput);
+            const rawToolOutput = typeof toolOutput === 'string'
+              ? toolOutput
+              : JSON.stringify(toolOutput || '');
+            const screenshotReferences = [
+              rawToolOutput,
+              toolPayload.content,
+              ...(toolPayload.fileAttachments || []).flatMap((file) => [file.name, file.path, file.url]),
+            ].filter(Boolean).join('\n');
+            const testcaseStepMatch = screenshotReferences.match(/case_(\d+)_step(\d+)\.png/i);
+            if (testcaseStepMatch) {
+              const stream = activeStreams.value[sessionId];
+              const stepNumber = Number(testcaseStepMatch[2]);
+              if (!stream.testcaseStep || stepNumber >= stream.testcaseStep) {
+                stream.currentStep = stepNumber;
+                stream.testcaseStep = stepNumber;
+                stream.testcaseStepState = 'completed';
+                stream.testcaseProgressMessage = '步骤截图已保存，正在准备下一步';
+              }
+            }
             if (toolPayload.content || toolPayload.imageDataUrl) {
               const time = formatStreamTime();
               // 先固化当前 AI 内容
@@ -1325,6 +1564,10 @@ export async function resumeAgentLoop(
 
           // 处理完成事件
           if (parsed.type === 'complete' && activeStreams.value[sessionId]) {
+            applyTestCaseRunReportToStream(
+              activeStreams.value[sessionId],
+              parsed.test_case_run as Record<string, unknown> | undefined
+            );
             activeStreams.value[sessionId].isComplete = true;
           }
         } catch (e) {

@@ -1,0 +1,517 @@
+<template>
+  <a-drawer
+    v-model:visible="drawerVisible"
+    :width="860"
+    :footer="false"
+    :closable="false"
+    :mask-closable="true"
+    unmount-on-close
+    @cancel="handleClose"
+  >
+    <template #title>
+      <div class="drawer-title">
+        <span class="drawer-title-text">{{ text.title }} · {{ testCase?.name || '-' }}</span>
+        <a-button type="text" class="drawer-close-btn" :aria-label="text.close" @click="handleClose">
+          <template #icon><icon-close /></template>
+        </a-button>
+      </div>
+    </template>
+
+    <div v-if="!testCase" class="empty-wrap">
+      <a-empty :description="text.noCase" />
+    </div>
+    <div v-else class="execution-drawer">
+      <div class="status-bar">
+        <div class="status-meta">
+          <a-tag :color="statusColor">{{ statusLabel }}</a-tag>
+          <span v-if="record?.started_at" class="meta">{{ text.startedAt }}：{{ formatTime(record.started_at) }}</span>
+          <span v-if="record?.completed_at" class="meta">{{ text.completedAt }}：{{ formatTime(record.completed_at) }}</span>
+          <a-spin v-if="isRunning" size="small" />
+        </div>
+        <a-space class="top-actions" :size="8">
+          <a-button
+            type="outline"
+            :disabled="!effectiveSessionId"
+            @click="openChatInCurrentPage"
+          >
+            {{ text.openChatCurrentPage }}
+          </a-button>
+          <a-button
+            type="primary"
+            :disabled="!effectiveSessionId"
+            @click="openChatInNewWindow"
+          >
+            {{ text.openChatNewWindow }}
+          </a-button>
+        </a-space>
+      </div>
+
+      <a-alert v-if="streamError" type="error" :title="streamError" show-icon class="block" />
+      <a-alert
+        v-if="record?.status === 'fail' || record?.status === 'error'"
+        type="error"
+        :title="text.failedHint"
+        show-icon
+        class="block"
+      >
+        {{ failReasonText }}
+      </a-alert>
+      <a-alert v-if="isRunning" type="info" :title="text.runningHint" show-icon class="block" />
+
+      <a-card v-if="record?.summary" :title="text.summary" size="small" class="block">
+        <div class="summary-text">{{ record.summary }}</div>
+      </a-card>
+
+      <a-card v-if="record?.data_usage" :title="text.dataUsage" size="small" class="block">
+        <a-alert :type="dataUsageAlertType" :title="dataUsageMessage" show-icon />
+        <div v-if="record.data_usage.matched_identifier" class="usage-detail">
+          {{ text.dataIdentifier }}：{{ record.data_usage.matched_identifier.value }}
+        </div>
+        <div v-if="record.data_usage.evidence" class="usage-evidence">
+          {{ text.dataEvidence }}：{{ record.data_usage.evidence }}
+        </div>
+      </a-card>
+
+      <a-card :title="text.stepResults" size="small" class="block">
+        <a-table
+          v-if="displaySteps.length > 0"
+          :data="displaySteps"
+          :columns="stepColumns"
+          :pagination="false"
+          row-key="key"
+          size="small"
+        >
+          <template #status="{ record: step }">
+            <a-tag :color="stepStatusColor(step.status)">{{ stepStatusLabel(step.status) }}</a-tag>
+          </template>
+        </a-table>
+        <a-empty v-else :description="isRunning ? text.waitingSteps : isPreDataBlocked ? text.preDataNoSteps : text.noSteps" />
+      </a-card>
+
+      <a-card v-if="screenshots.length > 0" :title="text.screenshots" size="small" class="block">
+        <a-image-preview-group infinite>
+          <a-space wrap>
+            <a-image
+              v-for="shot in screenshots"
+              :key="shot.id"
+              :src="shot.screenshot_url || shot.screenshot"
+              width="120"
+              height="90"
+              fit="cover"
+            />
+          </a-space>
+        </a-image-preview-group>
+      </a-card>
+
+      <div class="footer-actions">
+        <a-button @click="handleClose">{{ text.close }}</a-button>
+        <a-button type="primary" @click="refreshRecord" :loading="loading">{{ text.refresh }}</a-button>
+      </div>
+    </div>
+  </a-drawer>
+</template>
+
+<script setup lang="ts">
+import { computed, ref, watch, onBeforeUnmount } from 'vue';
+import { useRouter } from 'vue-router';
+import type { TableColumnData } from '@arco-design/web-vue';
+import { IconClose } from '@arco-design/web-vue/es/icon';
+import {
+  getLatestTestCaseRunRecord,
+  getTestCaseScreenshots,
+  type TestCase,
+  type TestCaseRunRecord,
+  type TestCaseRunStepResult,
+  type TestCaseScreenshot,
+} from '@/services/testcaseService';
+import { useAppI18n } from '@/composables/useAppI18n';
+import {
+  openLangGraphChatInCurrentPage,
+  openLangGraphChatInNewWindow,
+} from '@/features/langgraph/utils/openLangGraphChat';
+
+const props = defineProps<{
+  visible: boolean;
+  projectId: number | null;
+  testCase: TestCase | null;
+  sessionId?: string | null;
+  preparing?: boolean;
+}>();
+
+const emit = defineEmits<{
+  (e: 'update:visible', value: boolean): void;
+  (e: 'finished'): void;
+}>();
+
+const router = useRouter();
+const { isEnglish } = useAppI18n();
+
+const record = ref<TestCaseRunRecord | null>(null);
+const screenshots = ref<TestCaseScreenshot[]>([]);
+const loading = ref(false);
+const streamError = ref('');
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+const drawerVisible = computed({
+  get: () => props.visible,
+  set: (value: boolean) => emit('update:visible', value),
+});
+
+const text = computed(() => (
+  isEnglish.value
+    ? {
+        title: 'Execution Result',
+        noCase: 'No test case selected',
+        startedAt: 'Started',
+        completedAt: 'Completed',
+        runningHint: 'Execution in progress. Results will refresh automatically.',
+        failedHint: 'Execution failed',
+        summary: 'Summary',
+        dataUsage: 'Generated Data Usage',
+        dataIdentifier: 'Matched identifier',
+        dataEvidence: 'Evidence',
+        stepResults: 'Step Results',
+        waitingSteps: 'Waiting for execution results...',
+        noSteps: 'No structured step results',
+        preDataNoSteps: 'Prerequisite data failed; no test steps ran',
+        preparing: 'Preparing test data',
+        preDataFailed: 'Prerequisite data failed',
+        screenshots: 'Screenshots',
+        openChat: 'Open in LLM Chat',
+        openChatCurrentPage: 'Open on this page',
+        openChatNewWindow: 'Open in new window',
+        refresh: 'Refresh',
+        close: 'Close',
+        step: 'Step',
+        description: 'Description',
+        expected: 'Expected',
+        actual: 'Actual',
+        status: 'Status',
+        running: 'Running',
+        pass: 'Pass',
+        fail: 'Fail',
+        error: 'Error',
+        stopped: 'Stopped',
+        unknown: 'Unknown',
+      }
+    : {
+        title: '执行结果',
+        noCase: '未选择测试用例',
+        startedAt: '开始时间',
+        completedAt: '完成时间',
+        runningHint: '用例正在执行中，结果将自动刷新。',
+        failedHint: '用例执行失败',
+        summary: '结果摘要',
+        dataUsage: '造数数据使用情况',
+        dataIdentifier: '匹配标识',
+        dataEvidence: '执行证据',
+        stepResults: '步骤结果',
+        waitingSteps: '等待执行结果...',
+        noSteps: '暂无结构化步骤结果',
+        preDataNoSteps: '前置数据准备失败，尚未执行任何测试步骤',
+        preparing: '正在准备前置数据',
+        preDataFailed: '前置数据准备失败',
+        screenshots: '执行截图',
+        openChat: '在 LLM 对话中查看',
+        openChatCurrentPage: '当前页打开',
+        openChatNewWindow: '打开新窗口',
+        refresh: '刷新',
+        close: '关闭',
+        step: '步骤',
+        description: '描述',
+        expected: '预期结果',
+        actual: '实际结果',
+        status: '状态',
+        running: '执行中',
+        pass: '通过',
+        fail: '失败',
+        error: '错误',
+        stopped: '已停止',
+        unknown: '未知',
+      }
+));
+
+const isRunning = computed(() => record.value?.status === 'running' || (props.preparing && !record.value));
+const isPreDataBlocked = computed(() => record.value?.summary?.startsWith('测试数据准备失败') || false);
+
+const dataUsageMessage = computed(() => record.value?.data_usage?.message || '');
+const dataUsageAlertType = computed(() => {
+  const status = record.value?.data_usage?.status;
+  if (status === 'verified_used') return 'success';
+  if (status === 'referenced') return 'warning';
+  return 'info';
+});
+
+const resolveSessionId = (): string | null => {
+  if (props.preparing) return props.sessionId?.trim() || null;
+  const candidates = [
+    props.sessionId,
+    record.value?.session_id,
+    props.testCase?.latest_run?.session_id,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return null;
+};
+
+const effectiveSessionId = computed(() => resolveSessionId());
+
+const failReasonText = computed(() => {
+  const summary = record.value?.summary || '';
+  const reasonMatch = summary.match(/失败原因[:：]\s*([\s\S]+?)(?:\n\s*\n|###|结论|$)/);
+  const text = (reasonMatch?.[1] || summary).replace(/[#|*`-]/g, ' ').replace(/\s+/g, ' ').trim();
+  return text.slice(0, 240);
+});
+
+const statusLabel = computed(() => {
+  if (isPreDataBlocked.value) return text.value.preDataFailed;
+  if (props.preparing && !record.value) return text.value.preparing;
+  const status = record.value?.status;
+  if (!status) return text.value.unknown;
+  const map: Record<string, string> = {
+    running: text.value.running,
+    pass: text.value.pass,
+    fail: text.value.fail,
+    error: text.value.error,
+    stopped: text.value.stopped,
+  };
+  return map[status] || text.value.unknown;
+});
+
+const statusColor = computed(() => {
+  if (isPreDataBlocked.value) return 'orangered';
+  if (props.preparing && !record.value) return 'arcoblue';
+  const status = record.value?.status;
+  return ({ running: 'arcoblue', pass: 'green', fail: 'red', error: 'orangered', stopped: 'gray' } as Record<string, string>)[status || ''] || 'gray';
+});
+
+const stepColumns = computed<TableColumnData[]>(() => [
+  { title: text.value.step, dataIndex: 'step_number', width: 70, align: 'center' },
+  { title: text.value.description, dataIndex: 'description', ellipsis: true, tooltip: true },
+  { title: text.value.expected, dataIndex: 'expected_result', ellipsis: true, tooltip: true },
+  { title: text.value.actual, dataIndex: 'actual_result', ellipsis: true, tooltip: true },
+  { title: text.value.status, slotName: 'status', width: 90, align: 'center' },
+]);
+
+const displaySteps = computed(() => {
+  const steps = record.value?.step_results || [];
+  return steps.map((step: TestCaseRunStepResult, index: number) => ({
+    key: `${step.step_number || index + 1}-${index}`,
+    step_number: step.step_number || index + 1,
+    description: step.description || '-',
+    expected_result: step.expected_result || '-',
+    actual_result: step.actual_result || step.error || '-',
+    status: step.status || 'unknown',
+  }));
+});
+
+const stepStatusLabel = (status?: string) => {
+  if (status === 'pass') return text.value.pass;
+  if (status === 'fail') return text.value.fail;
+  if (status === 'skip' || status === 'not_executed') {
+    return isEnglish.value ? 'Not executed' : '未执行';
+  }
+  return text.value.unknown;
+};
+
+const stepStatusColor = (status?: string) => (
+  status === 'pass' ? 'green' : status === 'fail' ? 'red' : 'gray'
+);
+
+const formatTime = (value: string) => {
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return value;
+  }
+};
+
+const stopPolling = () => {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+};
+
+const loadScreenshots = async () => {
+  if (!props.projectId || !props.testCase) return;
+  const response = await getTestCaseScreenshots(props.projectId, props.testCase.id);
+  if (response.success && response.data) {
+    screenshots.value = response.data;
+  }
+};
+
+const refreshRecord = async () => {
+  if (!props.projectId || !props.testCase) return;
+  if (props.preparing && !props.sessionId) return;
+  loading.value = true;
+  try {
+    const preferredSessionId = resolveSessionId() || undefined;
+    let response = await getLatestTestCaseRunRecord(
+      props.projectId,
+      props.testCase.id,
+      preferredSessionId,
+    );
+    if (!response.success && preferredSessionId && !props.preparing) {
+      response = await getLatestTestCaseRunRecord(
+        props.projectId,
+        props.testCase.id,
+      );
+    }
+    if (response.success && response.data) {
+      record.value = response.data;
+      if (response.data.status !== 'running') {
+        stopPolling();
+        emit('finished');
+      }
+    }
+    if (!props.preparing || record.value?.status !== 'running') await loadScreenshots();
+  } finally {
+    loading.value = false;
+  }
+};
+
+const startPolling = () => {
+  stopPolling();
+  pollTimer = setInterval(() => {
+    if (isRunning.value) {
+      refreshRecord();
+    } else {
+      stopPolling();
+    }
+  }, 2500);
+};
+
+watch(
+  () => [props.visible, props.projectId, props.testCase?.id, props.sessionId, props.preparing] as const,
+  async ([visible, , testCaseId]) => {
+    if (!visible) {
+      stopPolling();
+      return;
+    }
+    streamError.value = '';
+    const shouldResetRecord = props.preparing
+      ? !props.sessionId || record.value?.session_id !== props.sessionId
+      : !record.value || record.value.testcase !== testCaseId;
+    if (shouldResetRecord) {
+      record.value = props.preparing ? null : props.testCase?.latest_run || null;
+      if (props.preparing) screenshots.value = [];
+    }
+    await refreshRecord();
+    if (isRunning.value) {
+      startPolling();
+    }
+  },
+  { immediate: true }
+);
+
+onBeforeUnmount(() => stopPolling());
+
+const handleClose = () => {
+  drawerVisible.value = false;
+};
+
+const openChatInCurrentPage = () => {
+  openLangGraphChatInCurrentPage(router, effectiveSessionId.value, props.projectId);
+};
+
+const openChatInNewWindow = () => {
+  openLangGraphChatInNewWindow(router, effectiveSessionId.value, props.projectId);
+};
+
+defineExpose({
+  setStreamError(message: string) {
+    streamError.value = message;
+  },
+  async markCompleted() {
+    await refreshRecord();
+    emit('finished');
+  },
+});
+</script>
+
+<style scoped>
+.execution-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.usage-detail,
+.usage-evidence {
+  margin-top: 8px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.status-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.status-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.meta {
+  color: var(--color-text-3);
+  font-size: 12px;
+}
+
+.top-actions {
+  flex-shrink: 0;
+}
+
+.block {
+  width: 100%;
+}
+
+.summary-text {
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+.footer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.empty-wrap {
+  padding: 48px 0;
+}
+
+.drawer-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+
+.drawer-title-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer-close-btn {
+  flex-shrink: 0;
+  color: var(--color-text-2);
+}
+</style>

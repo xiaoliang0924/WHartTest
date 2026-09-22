@@ -1062,6 +1062,11 @@ class VectorStoreManager:
 
         kwargs = {
             "model": config.model_name or "text-embedding-ada-002",
+            # Some OpenAI-compatible providers reject token-array inputs generated
+            # by LangChain's local context-length check. Send raw strings instead.
+            "check_embedding_ctx_length": False,
+            # Alibaba MaaS text-embedding endpoints reject batches larger than 10.
+            "chunk_size": 10,
         }
 
         if config.api_key:

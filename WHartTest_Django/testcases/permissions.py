@@ -216,3 +216,34 @@ class IsProjectMemberForTestExecution(permissions.BasePermission):
             user=request.user,
             role__in=["owner", "admin", "member"],
         ).exists()
+
+
+class IsProjectMemberForManualTestRun(permissions.BasePermission):
+    """确保人工执行数据仅在所属项目内访问。"""
+
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser:
+            return True
+        try:
+            project_id = int(view.kwargs.get("project_pk"))
+        except (TypeError, ValueError):
+            return False
+        return ProjectMember.objects.filter(
+            project_id=project_id,
+            user=request.user,
+            role__in=["owner", "admin", "member"],
+        ).exists()
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_superuser:
+            return True
+        project_id = getattr(obj, "project_id", None)
+        if project_id is None and hasattr(obj, "run"):
+            project_id = obj.run.project_id
+        return ProjectMember.objects.filter(
+            project_id=project_id,
+            user=request.user,
+            role__in=["owner", "admin", "member"],
+        ).exists()

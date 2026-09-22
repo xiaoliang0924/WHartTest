@@ -195,6 +195,7 @@
           </a-table-column>
         </template>
       </a-table>
+      <a-empty v-if="!fileChooseLoading && fileChooseFiles.length === 0" :description="text.noManagedFiles" />
     </a-modal>
   </div>
 </template>
@@ -279,6 +280,7 @@ const text = computed(() => (
         attachmentUploadSuccess: (count: number) => `${count} attachment(s) uploaded`,
         attachmentUploadFailed: 'Attachment upload failed',
         attachmentLoadFailed: 'Failed to load files',
+        noManagedFiles: 'No project files yet. Upload via Files or choose a local file.',
         attachmentLimitExceeded: (limit: number) => `Up to ${limit} attachments can be selected`,
         attachmentAlreadySelected: 'This file is already selected',
         attachmentTooLarge: 'File size cannot exceed 100MB',
@@ -320,6 +322,7 @@ const text = computed(() => (
         attachmentUploadSuccess: (count: number) => `已上传 ${count} 个附件`,
         attachmentUploadFailed: '附件上传失败',
         attachmentLoadFailed: '加载文件失败',
+        noManagedFiles: '暂无项目文件，请先在「文件管理」上传，或选择「上传本地文件」',
         attachmentLimitExceeded: (limit: number) => `单次最多选择 ${limit} 个附件`,
         attachmentAlreadySelected: '该文件已选择',
         attachmentTooLarge: '文件大小不能超过 100MB',
@@ -589,7 +592,7 @@ const loadManagedFilesForChoose = async () => {
     const payload = res?.data?.data || res?.data || res;
     fileChooseFiles.value = Array.isArray(payload) ? payload : (payload.results || payload.data || []);
   } catch (error: any) {
-    Message.error(error?.message || text.value.attachmentLoadFailed);
+    Message.error(error?.error || error?.message || text.value.attachmentLoadFailed);
   } finally {
     fileChooseLoading.value = false;
   }

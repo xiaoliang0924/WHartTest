@@ -255,6 +255,7 @@ class ProjectViewSet(BaseModelViewSet):
             approved=Count('id', filter=Q(review_status='approved')),
             needs_optimization=Count('id', filter=Q(review_status='needs_optimization')),
             optimization_pending_review=Count('id', filter=Q(review_status='optimization_pending_review')),
+            pending_product_confirmation=Count('id', filter=Q(review_status='pending_product_confirmation')),
             unavailable=Count('id', filter=Q(review_status='unavailable')),
         )
 
@@ -382,6 +383,7 @@ class ProjectViewSet(BaseModelViewSet):
                     'approved': testcase_stats['approved'],
                     'needs_optimization': testcase_stats['needs_optimization'],
                     'optimization_pending_review': testcase_stats['optimization_pending_review'],
+                    'pending_product_confirmation': testcase_stats['pending_product_confirmation'],
                     'unavailable': testcase_stats['unavailable'],
                 },
             },

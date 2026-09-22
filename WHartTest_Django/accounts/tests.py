@@ -7,6 +7,7 @@ from rest_framework.test import APIRequestFactory
 
 from accounts.serializers import ContentTypeSerializer
 from accounts.views import MyTokenObtainPairView
+from wharttest_django.health import health_check
 
 
 class MyTokenObtainPairViewTests(SimpleTestCase):
@@ -31,6 +32,28 @@ class MyTokenObtainPairViewTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.data['detail'], '认证服务正在启动，请稍后重试。')
+
+
+class HealthCheckTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+
+    @patch('wharttest_django.health.database_is_available', return_value=True)
+    def test_returns_ok_when_database_query_succeeds(self, database_check_mock):
+        response = health_check(self.factory.get('/api/health/'))
+
+        self.assertEqual(response.status_code, 200)
+        database_check_mock.assert_called_once_with()
+
+    @patch(
+        'wharttest_django.health.database_is_available',
+        return_value=False,
+    )
+    def test_returns_503_when_database_is_unavailable(self, database_check_mock):
+        response = health_check(self.factory.get('/api/health/'))
+
+        self.assertEqual(response.status_code, 503)
+        database_check_mock.assert_called_once_with()
 
 
 class ContentTypeSerializerMenuGroupingTests(SimpleTestCase):

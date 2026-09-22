@@ -75,6 +75,10 @@ WHartTest_Actuator/browsers/
 .github/copilot-instructions.md
 WHartTest_Django/celerybeat-schedule
 AGENTS.md
+/_upgrade/
+WHartTest_IDEA_Plugin/
+WHartTest_VSCode_Extension/
+docx-editor/
 architecture/
 .roo/mcp.json
 docs/superpowers/

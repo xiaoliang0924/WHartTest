@@ -570,6 +570,23 @@ class TestCaseRunner(HttpRunner):
         elif isinstance(self.variables, dict):
             self.config.variables(**case_variables)
 
+        # Auto-inject API Key for internal API calls
+        try:
+            import os
+            api_key = os.environ.get('WHARTTEST_API_KEY', 'wharttest-default-mcp-key-2025')
+            for step in self.testcase.steps.all().order_by('order'):
+                interface_data = step.interface_data
+                if 'headers' not in interface_data:
+                    interface_data['headers'] = {}
+                headers_dict = interface_data['headers']
+                if isinstance(headers_dict, dict):
+                    if 'X-API-Key' not in headers_dict and 'x-api-key' not in headers_dict:
+                        headers_dict['X-API-Key'] = api_key
+                    if 'Authorization' not in headers_dict:
+                        pass  # keep existing auth if set
+        except Exception as e:
+            logger.error(f"Error auto-injecting API key: {str(e)}")
+
         # Apply global request headers
         try:
             from api_environments.models import ApiGlobalRequestHeader

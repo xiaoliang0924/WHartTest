@@ -145,7 +145,16 @@ function getContextOptionsWithHeaders(options = {}) {
 (async () => {
   try {
     ${code}
+    if (typeof page !== 'undefined' && page && helpers.dismissBlockingDialogs) {
+      await helpers.dismissBlockingDialogs(page);
+    }
   } catch (error) {
+    const message = error && error.message ? String(error.message) : String(error);
+    const isTimeout = error && (error.name === 'TimeoutError' || /Timeout \d+ms exceeded/i.test(message));
+    if (isTimeout) {
+      console.log(`RESULT=FAIL: 操作超时 - ${message}`);
+      return;
+    }
     console.error('❌ Automation error:', error.message);
     if (error.stack) {
       console.error(error.stack);
@@ -163,6 +172,12 @@ function getContextOptionsWithHeaders(options = {}) {
   try {
     ${code}
   } catch (error) {
+    const message = error && error.message ? String(error.message) : String(error);
+    const isTimeout = error && (error.name === 'TimeoutError' || /Timeout \d+ms exceeded/i.test(message));
+    if (isTimeout) {
+      console.log(`RESULT=FAIL: 操作超时 - ${message}`);
+      return;
+    }
     console.error('❌ Automation error:', error.message);
     if (error.stack) {
       console.error(error.stack);

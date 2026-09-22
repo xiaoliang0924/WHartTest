@@ -4,6 +4,7 @@ import type { TableColumnData } from '@arco-design/web-vue'
 import { IconCopy, IconDelete, IconEdit, IconMore } from '@arco-design/web-vue/es/icon'
 import { useAppI18n } from '@/composables/useAppI18n'
 import type { ApiInterfaceCase } from '../../types/interfaceCase'
+import { sortApiTestCaseTags } from '../../utils/tagSort'
 
 interface Props {
   data: ApiInterfaceCase[]
@@ -143,7 +144,7 @@ defineExpose({ clearSelection, selectedRowKeys })
       <template #tags="{ record }">
         <div class="flex flex-wrap gap-1 justify-center">
           <a-tag
-            v-for="tag in record.tags_info || []"
+            v-for="tag in sortApiTestCaseTags(record.tags_info)"
             :key="tag.id"
             :color="tag.color"
             size="small"

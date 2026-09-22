@@ -41,6 +41,99 @@
         </div>
       </a-form-item>
 
+      <a-divider orientation="left">套件跑前造数</a-divider>
+      <a-row :gutter="16">
+        <a-col :span="12">
+          <a-form-item label="造数计划">
+            <a-select
+              v-model="formData.pre_data_plan"
+              placeholder="可选：执行套件前自动造数"
+              allow-clear
+              :loading="planLoading"
+            >
+              <a-option v-for="plan in dataPlans" :key="plan.id" :value="plan.id">
+                {{ plan.name }}
+              </a-option>
+            </a-select>
+          </a-form-item>
+        </a-col>
+        <a-col :span="12">
+          <a-form-item label="造数 API 环境">
+            <a-select
+              v-model="formData.pre_data_environment"
+              placeholder="选择 API 环境"
+              allow-clear
+              :loading="envLoading"
+            >
+              <a-option v-for="env in environments" :key="env.id" :value="env.id">
+                {{ env.name }}
+              </a-option>
+            </a-select>
+          </a-form-item>
+        </a-col>
+      </a-row>
+      <a-form-item label="造数参数 (JSON)">
+        <a-textarea
+          v-model="preDataParamsJson"
+          :auto-size="{ minRows: 2, maxRows: 5 }"
+          placeholder='例如 {"count": 1}'
+        />
+      </a-form-item>
+      <a-form-item label="造数失败阻断执行">
+        <a-switch v-model="formData.pre_data_fail_fast" />
+      </a-form-item>
+      <a-form-item label="套件完成后自动清理">
+        <a-switch v-model="formData.post_data_cleanup" />
+      </a-form-item>
+      <a-alert
+        v-if="formData.post_data_cleanup && selectedPlanCleanupCount === 0"
+        type="warning"
+        style="margin-bottom: 12px"
+        title="当前造数计划未配置清理步骤"
+      >
+        开启自动清理后，套件跑完将尝试执行计划的 cleanup_steps；请为计划添加清理步骤或关闭此开关。
+      </a-alert>
+      <a-space v-if="isEditing && props.suiteId" style="margin-bottom: 12px">
+        <a-button size="small" html-type="button" :loading="gapAnalyzing" @click="handleAnalyzeGaps">
+          分析变量缺口
+        </a-button>
+        <a-button
+          size="small"
+          type="primary"
+          html-type="button"
+          :loading="bindingPlan"
+          :disabled="!canOneClickBind"
+          @click="handleGenerateAndBind"
+        >
+          一键生成并绑定
+        </a-button>
+      </a-space>
+      <a-alert
+        v-if="gapAnalysis"
+        :type="missingVariableCount > 0 ? 'warning' : 'success'"
+        style="margin-bottom: 12px"
+        :title="gapAlertTitle"
+      >
+        <div v-if="missingVariableCount > 0">
+          缺失：{{ gapAnalysis.missing_variables.join('、') }}
+        </div>
+        <div v-else>当前套件引用的变量已在公共数据/环境变量中找到。</div>
+        <div v-if="gapAnalysis.suggestions?.length" class="gap-suggestions">
+          <div v-for="(item, index) in gapAnalysis.suggestions" :key="index" class="gap-suggestion-item">
+            {{ formatSuggestion(item) }}
+          </div>
+        </div>
+        <div v-if="gapAnalysis.testcases?.length" class="gap-testcases">
+          <a-collapse :bordered="false">
+            <a-collapse-item header="按用例查看变量" key="cases">
+              <div v-for="tc in gapAnalysis.testcases" :key="tc.id" class="gap-testcase-row">
+                {{ tc.name }}：{{ tc.variables.join('、') }}
+              </div>
+            </a-collapse-item>
+          </a-collapse>
+        </div>
+      </a-alert>
+
       <!-- 选择测试用例 -->
       <a-form-item required>
         <template #label>
@@ -117,6 +210,8 @@ import {
   getTestSuiteDetail,
   type CreateTestSuiteRequest,
 } from '@/services/testSuiteService';
+import { getEnvironments } from '@/features/api-testing/services/environmentService';
+import { getDataGenerationPlans, analyzeSuiteVariableGaps, generateAndBindSuitePreData, getDataGenerationPlan, type SuiteVariableGapAnalysis } from '@/features/data-generation/services/dataGenerationService';
 import { getTestCaseDetail, type TestCase } from '@/services/testcaseService';
 import TestCaseSelectorTable from './TestCaseSelectorTable.vue';
 
@@ -216,12 +311,38 @@ const showTestCaseSelector = ref(false);
 const selectedTestCaseIds = ref<number[]>([]);
 const selectedTestCases = ref<TestCase[]>([]);
 const loading = ref(false);
+const planLoading = ref(false);
+const envLoading = ref(false);
+const dataPlans = ref<Array<{ id: number; name: string; cleanup_step_count?: number }>>([]);
+const environments = ref<Array<{ id: number; name: string }>>([]);
+const preDataParamsJson = ref('{}');
+const gapAnalyzing = ref(false);
+const bindingPlan = ref(false);
+const gapAnalysis = ref<SuiteVariableGapAnalysis | null>(null);
+const selectedPlanCleanupCount = ref<number | null>(null);
+
+const canOneClickBind = computed(() => Boolean(isEditing.value && props.suiteId && props.currentProjectId));
+
+const missingVariableCount = computed(
+  () => gapAnalysis.value?.missing_variables?.length ?? 0,
+);
+
+const gapAlertTitle = computed(() => {
+  if (!gapAnalysis.value) return '';
+  if (missingVariableCount.value > 0) return `缺失变量 ${missingVariableCount.value} 个`;
+  return '变量缺口已满足';
+});
 
 const formData = ref<CreateTestSuiteRequest>({
   name: '',
   description: '',
   testcase_ids: [],
   max_concurrent_tasks: 1,
+  pre_data_plan: null,
+  pre_data_environment: null,
+  pre_data_params: {},
+  pre_data_fail_fast: true,
+  post_data_cleanup: false,
 });
 
 const rules = computed(() => ({
@@ -287,6 +408,15 @@ const handleSubmit = async () => {
   try {
     await formRef.value?.validate();
 
+    try {
+      formData.value.pre_data_params = preDataParamsJson.value
+        ? JSON.parse(preDataParamsJson.value)
+        : {};
+    } catch {
+      Message.error('造数参数 JSON 格式无效');
+      return false;
+    }
+
     loading.value = true;
     formData.value.testcase_ids = selectedTestCaseIds.value;
 
@@ -316,8 +446,126 @@ const handleCancel = () => {
   formRef.value?.resetFields();
   selectedTestCaseIds.value = [];
   selectedTestCases.value = [];
+  preDataParamsJson.value = '{}';
+  gapAnalysis.value = null;
+  selectedPlanCleanupCount.value = null;
   emit('update:visible', false);
 };
+
+function formatSuggestion(item: Record<string, unknown>) {
+  if (item.template_key) {
+    return `建议模板：${item.template_key}（${item.reason || ''}）`;
+  }
+  if (item.action === 'bind_pre_data_plan') {
+    return String(item.reason || '建议绑定前置造数计划');
+  }
+  return String(item.reason || JSON.stringify(item));
+}
+
+async function refreshSelectedPlanCleanupCount(planId?: number | null) {
+  if (!props.currentProjectId || !planId) {
+    selectedPlanCleanupCount.value = null;
+    return;
+  }
+  try {
+    const plan = await getDataGenerationPlan(props.currentProjectId, planId);
+    selectedPlanCleanupCount.value = plan.cleanup_step_count ?? (plan.cleanup_steps?.length || 0);
+  } catch {
+    selectedPlanCleanupCount.value = null;
+  }
+}
+
+async function handleGenerateAndBind() {
+  if (!props.currentProjectId || !props.suiteId) return;
+  bindingPlan.value = true;
+  try {
+    const result = await generateAndBindSuitePreData(props.currentProjectId, props.suiteId, {
+      environmentId: formData.value.pre_data_environment ?? null,
+      useLlm: !gapAnalysis.value?.recommended_template_key,
+      enablePostCleanup: true,
+      description: gapAnalysis.value?.recommended_description,
+    });
+    const plan = result.plan;
+    formData.value.pre_data_plan = plan.id;
+    if (plan.default_environment) {
+      formData.value.pre_data_environment = plan.default_environment;
+    }
+    if (result.post_data_cleanup_enabled) {
+      formData.value.post_data_cleanup = true;
+    }
+    gapAnalysis.value = result.gap_analysis;
+    selectedPlanCleanupCount.value = plan.cleanup_step_count ?? (plan.cleanup_steps?.length || 0);
+    if (!dataPlans.value.some((item) => item.id === plan.id)) {
+      dataPlans.value.unshift({
+        id: plan.id,
+        name: plan.name,
+        cleanup_step_count: selectedPlanCleanupCount.value ?? 0,
+      });
+    }
+    Message.success(
+      result.created === false
+        ? `已更新并绑定造数计划「${plan.name}」`
+        : `已生成并绑定造数计划「${plan.name}」`,
+    );
+  } catch (error: any) {
+    const payload = error.response?.data;
+    const fieldErrors = payload?.errors;
+    let detail = '';
+    if (fieldErrors && typeof fieldErrors === 'object') {
+      detail = Object.entries(fieldErrors)
+        .map(([key, value]) => {
+          const text = Array.isArray(value) ? value.join('、') : String(value);
+          return `${key}: ${text}`;
+        })
+        .join('；');
+    }
+    Message.error(detail || payload?.message || error.message || '生成并绑定失败');
+  } finally {
+    bindingPlan.value = false;
+  }
+}
+
+async function handleAnalyzeGaps() {
+  if (!props.currentProjectId || !props.suiteId) return;
+  gapAnalyzing.value = true;
+  try {
+    gapAnalysis.value = await analyzeSuiteVariableGaps(
+      props.currentProjectId,
+      props.suiteId,
+      formData.value.pre_data_environment ?? null,
+    );
+  } catch (error: any) {
+    Message.error(error.message || '分析失败');
+  } finally {
+    gapAnalyzing.value = false;
+  }
+}
+
+async function loadDataGenerationOptions() {
+  if (!props.currentProjectId) return;
+  planLoading.value = true;
+  envLoading.value = true;
+  try {
+    const [planResp, envResp] = await Promise.all([
+      getDataGenerationPlans(props.currentProjectId, { is_active: true, page_size: 200 }),
+      getEnvironments({ project_id: props.currentProjectId }),
+    ]);
+    dataPlans.value = planResp.results.map((item) => ({
+      id: item.id,
+      name: item.name,
+      cleanup_step_count: item.cleanup_step_count,
+    }));
+    environments.value = (envResp.results || envResp.data || envResp || []).map((item: any) => ({
+      id: item.id,
+      name: item.name,
+    }));
+  } catch (error) {
+    console.error('加载造数配置选项失败:', error);
+  } finally {
+    planLoading.value = false;
+    envLoading.value = false;
+  }
+}
 
 // 加载套件详情
 const loadSuiteDetail = async () => {
@@ -335,6 +583,13 @@ const loadSuiteDetail = async () => {
       formData.value.name = suite.name;
       formData.value.description = suite.description || '';
       formData.value.max_concurrent_tasks = suite.max_concurrent_tasks || 1;
+      formData.value.pre_data_plan = suite.pre_data_plan ?? null;
+      formData.value.pre_data_environment = suite.pre_data_environment ?? null;
+      formData.value.pre_data_fail_fast = suite.pre_data_fail_fast ?? true;
+      formData.value.post_data_cleanup = suite.post_data_cleanup ?? false;
+      formData.value.pre_data_params = suite.pre_data_params || {};
+      preDataParamsJson.value = JSON.stringify(suite.pre_data_params || {}, null, 2);
+      await refreshSelectedPlanCleanupCount(suite.pre_data_plan ?? null);
 
       // 获取用例ID列表
       if (suite.testcases_detail && suite.testcases_detail.length > 0) {
@@ -354,9 +609,17 @@ const loadSuiteDetail = async () => {
 
 // 监听visible变化，初始化数据
 watch(
+  () => formData.value.pre_data_plan,
+  (planId) => {
+    refreshSelectedPlanCleanupCount(planId ?? null);
+  },
+);
+
+watch(
   () => props.visible,
   async (newVal) => {
     if (newVal) {
+      await loadDataGenerationOptions();
       if (isEditing.value && props.suiteId) {
         await loadSuiteDetail();
       } else {
@@ -408,5 +671,25 @@ watch(
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.gap-suggestions {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-text-2);
+}
+
+.gap-suggestion-item + .gap-suggestion-item {
+  margin-top: 4px;
+}
+
+.gap-testcases {
+  margin-top: 8px;
+}
+
+.gap-testcase-row {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-2);
 }
 </style>

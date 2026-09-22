@@ -176,6 +176,11 @@ export const useApiTabsStore = defineStore('apiTabs', () => {
     return tabs.value.find(t => t.interfaceId === interfaceId);
   }
 
+  function clearInterfaceTabs() {
+    tabs.value = [];
+    activeTabId.value = null;
+  }
+
   function saveToLocalStorage() {
     try {
       const data = tabs.value.map(t => ({
@@ -187,7 +192,7 @@ export const useApiTabsStore = defineStore('apiTabs', () => {
     } catch { /* ignore quota errors */ }
   }
 
-  function loadFromLocalStorage() {
+  function loadFromLocalStorage(_projectId?: number) {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return;
@@ -211,6 +216,7 @@ export const useApiTabsStore = defineStore('apiTabs', () => {
     activateTab,
     removeTab,
     removeInterfaceTabs,
+    clearInterfaceTabs,
     openOrActivateInterface,
     updateTabRequest,
     updateTabResponse,

@@ -2,7 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
 from django.db.models import Q
-from asgiref.sync import sync_to_async
+from channels.db import database_sync_to_async as sync_to_async
 
 from projects.models import Project  # 假设 Project 模型位于 'projects' 应用
 from .serializers import MCPProjectListSerializer

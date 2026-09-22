@@ -544,6 +544,8 @@ Start executing now.''',
       - Consistency with the requirement, review conclusions, and KB context.
       - Coverage of real, reasonable, executable business scenarios.
       - Steps and expected results are clear, verifiable, executable.
+      - Preconditions include real account/password/URL and required business data state.
+      - Steps are atomic for business actions; login must not be split into open URL / type user / type password / click Login.
       - No omissions, duplicates, vague wording, requirement drift, or fabricated content.
       - No overlap with existing cases.
 
@@ -579,8 +581,49 @@ Start executing now.''',
       **Credential rules**:
       - For features that require login: precondition must read "Use account XX (username/password) to log in to system (URL)".
       - For features that do not require login: precondition must read "System URL: http://xxx".
-      - The first step of `steps` must contain the full system URL.
+      - Login is setup. Do NOT split it into open URL / type username / type password / click Login.
+      - For features that require login: step 1 MUST be login, and only 1 login step.
       - NEVER use placeholders; write actual credential values.
+
+      **Precondition and step granularity (hard constraint)**:
+      Preconditions MUST be a numbered list and include at least:
+      1. Which account logs in: name / username / password, plus the full system URL
+      2. Required business data and state (e.g. a work order in "Pending" status whose current handler is the logged-in user)
+      3. Other accounts if transfer, notification, or permission comparison is involved
+
+      Do NOT write vague business steps such as "enter the page / view the button / try to access".
+      Each business step MUST be **one independently executable UI or API action** with a **checkable expected result**.
+
+      **Login step rules (MUST follow)**:
+      - For features that require login: write the account in preconditions, then write login again as step 1
+      - Login is 1 step only, e.g. "Log in with 802714/000000 at https://test.bot.by56.com/work-order/login"
+      - Forbidden: open login URL, enter username, enter password, click Login as four steps
+
+      Minimum business-step split after login (normally >= 3):
+      - Enter the specific business page (menu path)
+      - Click the specific button / open the specific dialog
+      - Fill or select a specific field (field name and value; empty must say "leave empty")
+      - Click confirm / submit
+      - Assert the message, status, or whether the record appears in a list
+
+      Forbidden examples:
+      - Splitting login into 4 steps
+      - Enter the process-task page / page loads normally
+      - View the one-click bind button / button is hidden or disabled
+
+      Required example:
+      Preconditions:
+      1. Log in with Li Liang (admin/admin123) at http://test.bot.by56.com/work-order/login
+      2. A work order in "Pending" status exists, and the current handler is the logged-in user
+      Steps:
+      1. Log in with Li Liang (admin/admin123) at http://test.bot.by56.com/work-order/login / login succeeds
+      2. Open the work-order detail page and click Transfer / the transfer dialog opens
+      3. Select a transfer target / selection succeeds
+      4. Leave Transfer Reason empty / the handover-instruction field is empty
+      5. Click Confirm Transfer / the system prompts "Please fill in: Transfer Reason" and transfer fails
+      6. Log in as the target user and open My Work Orders / the work order does not appear
+
+      During review: keep login as 1 step only; split remaining business actions if they are still compound.
 
       **Case-naming convention**:
       - Functional: `[feature]-[scenario]-happy path`

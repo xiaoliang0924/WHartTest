@@ -25,7 +25,13 @@ SUPPORTED_COMPARATORS = {
     "length_less_than",
     "length_greater_or_equals",
     "length_less_or_equals",
+    "all_match",
+    "is_not_none",
+    "exists",
+    "is",
 }
+
+UNARY_COMPARATORS = {"exists", "is_not_none"}
 
 
 def is_validator_meta_key(key: str) -> bool:
@@ -50,7 +56,11 @@ def prepare_validator_for_runtime(validator: Dict[str, Any]) -> Optional[Dict[st
     for comparator, compare_values in validator.items():
         if is_validator_meta_key(comparator):
             continue
-        if not isinstance(compare_values, list) or len(compare_values) < 2:
+        if not isinstance(compare_values, list) or len(compare_values) < 1:
+            continue
+        if comparator in UNARY_COMPARATORS and len(compare_values) == 1:
+            compare_values = compare_values + [True]
+        elif len(compare_values) < 2:
             continue
         runtime_validator[comparator] = compare_values[:3]
         return runtime_validator

@@ -1,6 +1,7 @@
 import logging
 
 from django.db import transaction, models
+from api_testcases.rate_limit import sleep_between_cases
 from django.utils import timezone
 
 from .models import (
@@ -9,6 +10,7 @@ from .models import (
     ApiTestTaskExecution,
     ApiTestTaskCaseResult,
 )
+from wharttest_django.notification_service import notify_api_task_execution
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +164,11 @@ class ApiTestTaskExecutionService:
     @staticmethod
     def execute_task(execution):
         """Execute a test task synchronously."""
-        from api_testcases.services import InterfaceCaseExecutionService, TestExecutionService
+        from api_testcases.services import (
+            InterfaceCaseExecutionService,
+            TestExecutionService,
+            suppress_testcase_notifications,
+        )
 
         execution.start()
 
@@ -170,6 +176,10 @@ class ApiTestTaskExecutionService:
         environment = None
         if execution.environment:
             try:
+                from api_environments.token_refresh import (
+                    refresh_environment_tokens_for_execution,
+                )
+
                 env = execution.environment
                 env_variables = env.get_all_variables()
                 if isinstance(env_variables, str):
@@ -188,6 +198,10 @@ class ApiTestTaskExecutionService:
                     'variables': env_variables,
                     'verify_ssl': env.verify_ssl
                 }
+                environment = refresh_environment_tokens_for_execution(
+                    environment,
+                    persist=True,
+                )
             except Exception as e:
                 logger.error(f"Error getting environment info: {str(e)}")
                 environment = None
@@ -199,7 +213,11 @@ class ApiTestTaskExecutionService:
         fail_count = 0
         error_count = 0
 
-        for case_result in case_results:
+        case_results_list = list(case_results)
+        for index, case_result in enumerate(case_results_list):
+            if index > 0:
+                sleep_between_cases()
+
             case_result.status = 'running'
             case_result.start_time = timezone.now()
             case_result.save()
@@ -212,9 +230,13 @@ class ApiTestTaskExecutionService:
                     )
                     case_result.interface_report = report
                 else:
-                    report = TestExecutionService.run_testcase(
-                        case_obj, environment, execution.executed_by
-                    )
+                    with suppress_testcase_notifications():
+                        report = TestExecutionService.run_testcase(
+                            case_obj,
+                            environment,
+                            execution.executed_by,
+                            refresh_tokens=False,
+                        )
                     case_result.report = report
 
                 case_result.end_time = timezone.now()
@@ -236,9 +258,10 @@ class ApiTestTaskExecutionService:
                         f"Task suite [{task_suite.name}] fail_fast enabled, "
                         f"case [{case_obj.name}] failed, stopping"
                     )
-                    for remaining in case_results.filter(status='pending'):
-                        remaining.status = 'skipped'
-                        remaining.save()
+                    for remaining in case_results_list[index + 1:]:
+                        if remaining.status == 'pending':
+                            remaining.status = 'skipped'
+                            remaining.save()
                     break
 
             except Exception as e:
@@ -256,12 +279,14 @@ class ApiTestTaskExecutionService:
                 error_count += 1
 
                 if task_suite.fail_fast:
-                    for remaining in case_results.filter(status='pending'):
-                        remaining.status = 'skipped'
-                        remaining.save()
+                    for remaining in case_results_list[index + 1:]:
+                        if remaining.status == 'pending':
+                            remaining.status = 'skipped'
+                            remaining.save()
                     break
 
         execution.complete(success_count, fail_count, error_count)
+        notify_api_task_execution(execution)
 
     @staticmethod
     def execute_task_async(execution_id):
@@ -275,5 +300,6 @@ class ApiTestTaskExecutionService:
             try:
                 execution = ApiTestTaskExecution.objects.get(id=execution_id)
                 execution.fail()
+                notify_api_task_execution(execution)
             except Exception:
                 pass

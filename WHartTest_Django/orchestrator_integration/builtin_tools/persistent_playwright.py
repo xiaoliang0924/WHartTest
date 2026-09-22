@@ -12,6 +12,7 @@ import json
 import os
 import queue
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -27,6 +28,40 @@ import logging
 from .output_sanitizer import strip_terminal_control_sequences
 
 logger = logging.getLogger("orchestrator_integration")
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return
+        except Exception:
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=3)
+            return
+        except Exception:
+            pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except Exception:
+            pass
+
+    try:
+        proc.kill()
+    except Exception:
+        pass
 
 
 class PlaywrightPersistentSessionError(RuntimeError):
@@ -195,6 +230,14 @@ class _PlaywrightNodeProcess:
             merged_env = os.environ.copy()
             merged_env.update(env)
 
+            popen_kwargs: dict[str, object] = {}
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = getattr(
+                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+                )
+            else:
+                popen_kwargs["start_new_session"] = True
+
             self._proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
@@ -206,6 +249,7 @@ class _PlaywrightNodeProcess:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                **popen_kwargs,
             )
 
             self._stdout_thread = threading.Thread(
@@ -392,22 +436,11 @@ class _PlaywrightNodeProcess:
             except Exception:
                 pass
 
-        try:
-            self._proc.terminate()
-        except Exception:
-            pass
-
+        _terminate_process_tree(self._proc)
         try:
             self._proc.wait(timeout=3)
         except Exception:
-            try:
-                self._proc.kill()
-            except Exception:
-                pass
-            try:
-                self._proc.wait(timeout=3)
-            except Exception:
-                pass
+            pass
 
         self._proc = None
         self._join_io_threads()
@@ -450,11 +483,22 @@ class PlaywrightSessionManager:
     全局会话管理器：
     - session_key 标识一个持久化 Node+Playwright 实例
     - 空闲超时自动清理（后台线程 + 惰性清理）
+    - max_concurrent_executions 限制同时跑 JS 的 Chromium 数量（无 GPU 小机器建议 1）
     """
 
-    def __init__(self, *, idle_timeout_seconds: int = 900, max_sessions: int = 20):
+    def __init__(
+        self,
+        *,
+        idle_timeout_seconds: int = 900,
+        max_sessions: int = 20,
+        max_concurrent_executions: int = 1,
+        exec_queue_timeout_seconds: int = 600,
+    ):
         self.idle_timeout_seconds = max(30, int(idle_timeout_seconds))
         self.max_sessions = max(1, int(max_sessions))
+        self.max_concurrent_executions = max(1, int(max_concurrent_executions))
+        self.exec_queue_timeout_seconds = max(30, int(exec_queue_timeout_seconds))
+        self._exec_semaphore = threading.Semaphore(self.max_concurrent_executions)
         self._lock = threading.RLock()
         self._entries: Dict[str, _SessionEntry] = {}
         self._cleanup_started = False
@@ -488,6 +532,11 @@ class PlaywrightSessionManager:
             to_close = victims[: max(0, len(self._entries) - self.max_sessions)]
 
         for entry in to_close:
+            logger.info(
+                "[persistent_playwright] LRU 回收会话 %s（max_sessions=%s）",
+                entry.session_key,
+                self.max_sessions,
+            )
             self.close_session(entry.session_key)
 
     def execute_run_js(
@@ -526,11 +575,57 @@ class PlaywrightSessionManager:
 
         self._prune_lru_if_needed()
 
-        entry.proc._start(env=env)
-
-        output = entry.proc.exec_run_js(
-            run_js_args=run_js_args, env=env, timeout_seconds=int(timeout_seconds)
+        acquired = self._exec_semaphore.acquire(
+            timeout=self.exec_queue_timeout_seconds
         )
+        if not acquired:
+            raise PlaywrightPersistentSessionError(
+                "Playwright 浏览器执行排队超时：当前已有 "
+                f"{self.max_concurrent_executions} 路 UI 自动化在运行。"
+                "请等待其结束或减少并行用例。"
+            )
+
+        watchdog: Optional[subprocess.Popen] = None
+        try:
+            entry.proc._start(env=env)
+
+            # Last-resort watchdog deliberately runs outside this Python
+            # process. A wedged CDP operation has survived both Node's
+            # Promise.race and Python's thread-based timer in production.
+            # The Node child is started in its own process group, so killing
+            # the group also reaps Chromium. Its stdout-reader then unblocks
+            # the pending RPC request with a process-exited error.
+            if os.name != "nt" and entry.proc._proc is not None:
+                node_pid = entry.proc._proc.pid
+                watchdog = subprocess.Popen(
+                    [
+                        "/bin/sh",
+                        "-c",
+                        (
+                            f"sleep {max(5, int(timeout_seconds)) + 2}; "
+                            # dash's kill builtin rejects "-- -<pgid>"; use
+                            # the external binary so the process-group kill
+                            # cannot silently become a no-op.
+                            f"/bin/kill -KILL -- -{node_pid} 2>/dev/null || true"
+                        ),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+
+            output = entry.proc.exec_run_js(
+                run_js_args=run_js_args,
+                env=env,
+                timeout_seconds=int(timeout_seconds),
+            )
+        finally:
+            if watchdog is not None and watchdog.poll() is None:
+                try:
+                    watchdog.terminate()
+                except Exception:
+                    pass
+            self._exec_semaphore.release()
 
         # 执行结束后再次更新时间戳
         with self._lock:
@@ -548,6 +643,11 @@ class PlaywrightSessionManager:
                 if (now - entry.last_used_monotonic) > self.idle_timeout_seconds:
                     expired.append(key)
         for key in expired:
+            logger.info(
+                "[persistent_playwright] 空闲超时回收会话 %s（idle=%ss）",
+                key,
+                self.idle_timeout_seconds,
+            )
             self.close_session(key)
 
     def close_session(self, session_key: str) -> None:

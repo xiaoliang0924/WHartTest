@@ -13,6 +13,13 @@ export interface TestSuite {
   project: number;
   testcase_count: number;
   max_concurrent_tasks: number;
+  pre_data_plan?: number | null;
+  pre_data_plan_name?: string | null;
+  pre_data_params?: Record<string, unknown>;
+  pre_data_environment?: number | null;
+  pre_data_environment_name?: string | null;
+  pre_data_fail_fast?: boolean;
+  post_data_cleanup?: boolean;
   testcases_detail?: TestCase[];
   creator: number;
   creator_detail: {
@@ -30,6 +37,11 @@ export interface CreateTestSuiteRequest {
   description?: string;
   testcase_ids?: number[];
   max_concurrent_tasks?: number;
+  pre_data_plan?: number | null;
+  pre_data_params?: Record<string, unknown>;
+  pre_data_environment?: number | null;
+  pre_data_fail_fast?: boolean;
+  post_data_cleanup?: boolean;
 }
 
 // 更新测试套件请求参数
@@ -38,6 +50,11 @@ export interface UpdateTestSuiteRequest {
   description?: string;
   testcase_ids?: number[];
   max_concurrent_tasks?: number;
+  pre_data_plan?: number | null;
+  pre_data_params?: Record<string, unknown>;
+  pre_data_environment?: number | null;
+  pre_data_fail_fast?: boolean;
+  post_data_cleanup?: boolean;
 }
 
 // 测试套件列表响应接口
@@ -74,7 +91,7 @@ export interface OperationResponse {
  */
 export const getTestSuiteList = async (
   projectId: number,
-  params?: { search?: string }
+  params?: { search?: string; page?: number; page_size?: number }
 ): Promise<TestSuiteListResponse> => {
   const authStore = useAuthStore();
   const accessToken = authStore.getAccessToken;
