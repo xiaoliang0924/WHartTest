@@ -13,6 +13,11 @@ from testcases.models import TestCase, TestCaseStep
 
 CASE_IDS = (1398, *range(1401, 1419))
 
+# Titles that still hard-code a person should describe auto-assignment instead.
+TITLE_OVERRIDES = {
+    1402: "确认领取-点击确定-状态变为处理中-处理人为自动分配处理人-正常流程",
+}
+
 AUTO_LOGIN = "使用系统根据本次造数自动匹配的处理人账号登录系统（执行时自动切换）"
 PENDING_LOOKUP = "在「我的工单」筛选区域选择「工单状态：待处理」，查询本次造数生成的工单"
 PENDING_LOOKUP_RESULT = "列表唯一定位到本次造数工单；工单状态为「待处理」，处理人为当前登录处理人"
@@ -116,12 +121,14 @@ class Command(BaseCommand):
         case_updates = step_updates = 0
         with transaction.atomic():
             for case in cases:
+                if case.id in TITLE_OVERRIDES and case.name != TITLE_OVERRIDES[case.id]:
+                    case.name = TITLE_OVERRIDES[case.id]
                 case.precondition = _precondition(case.id)
                 notes = case.notes or ""
                 marker = "【自动化执行约束】使用本次造数的隔离工单和动态处理人；不依赖固定账号、历史工单或上一次执行状态。"
                 if marker not in notes:
                     case.notes = f"{notes} {marker}".strip()
-                case.save(update_fields=["precondition", "notes", "updated_at"])
+                case.save(update_fields=["name", "precondition", "notes", "updated_at"])
                 case_updates += 1
                 if case.id in LIFECYCLE_STEPS:
                     for number, (description, expected) in LIFECYCLE_STEPS[case.id].items():
