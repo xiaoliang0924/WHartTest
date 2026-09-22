@@ -12,8 +12,8 @@ from django.test.utils import override_settings
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGenerationChunk
 
-from . import agent_loop_view
-from .agent_loop_view import (
+from .. import agent_loop_view
+from ..agent_loop_view import (
     _is_final_testcase_step_pass,
     _extract_helper_testcase_progress,
     _extract_helper_result_reason,
@@ -173,7 +173,7 @@ class FinalTestcaseStepTests(SimpleTestCase):
         self.assertEqual(events[2]["tool_name"], "execute_skill_script")
         self.assertIn("RESULT=PASS", events[2]["tool_output"])
         self.assertEqual(types[-1], "_auto_run_bundle")
-from .builtin_tools.skill_tools import (
+from ..builtin_tools.skill_tools import (
     _auto_upload_case_screenshots,
     _build_skill_artifacts_dir,
     _collect_skill_artifacts,
@@ -186,8 +186,8 @@ from .builtin_tools.skill_tools import (
     _sanitize_runtime_path_segment,
     _with_failure_reminder,
 )
-from .builtin_tools.output_sanitizer import strip_terminal_control_sequences
-from .middleware_config import (
+from ..builtin_tools.output_sanitizer import strip_terminal_control_sequences
+from ..middleware_config import (
     extract_llm_failure_message_from_text,
     get_user_friendly_llm_error,
     _model_retry_should_retry,

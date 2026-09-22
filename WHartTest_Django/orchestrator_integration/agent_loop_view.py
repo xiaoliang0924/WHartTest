@@ -1448,6 +1448,16 @@ class AgentLoopStreamAPIView(View):
         """
         thread_id = f"{request.user.id}_{project_id}_{session_id}"
         file_ids = file_ids or []
+        if test_case_id:
+            # 用例执行可能在 MCP/LLM 初始化与造数阶段阻塞较久；尽早下发 session_id，
+            # 便于前端在造数完成前打开 LangGraph 窗口查看进度。
+            yield create_flushed_sse(
+                {
+                    "type": "pre_data_start",
+                    "test_case_id": int(test_case_id),
+                    "session_id": session_id,
+                }
+            )
         try:
             attached_files = await sync_to_async(validate_file_ids)(file_ids, project, request.user)
             llm_attachment_context = await sync_to_async(build_llm_attachment_context)(attached_files)
@@ -1601,9 +1611,6 @@ class AgentLoopStreamAPIView(View):
                     "project": project,
                     "prompt": prompt_obj,
                     "title": f"新对话 - {user_message[:30]}",
-                    "resolved_module_key": "llm_chat",
-                    "resolved_source": "legacy",
-                    "resolved_runtime_mode": "auto",
                 },
             )
             if created:
@@ -1630,13 +1637,6 @@ class AgentLoopStreamAPIView(View):
             if test_case_id:
                 from data_generation.testcase_pre_data import run_testcase_pre_data_by_id
 
-                yield create_sse_data(
-                    {
-                        "type": "pre_data_start",
-                        "test_case_id": int(test_case_id),
-                        "session_id": session_id,
-                    }
-                )
                 pre_data_result = await sync_to_async(run_testcase_pre_data_by_id)(
                     int(test_case_id),
                     user_id=request.user.id,

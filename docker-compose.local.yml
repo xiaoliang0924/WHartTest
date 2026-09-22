@@ -70,6 +70,7 @@ services:
       - ./data:/app/data
       - backend-static:/app/static
       - ./WHartTest_Skills:/app/bundled_skills:ro
+      - ./data/playwright-browsers:/root/.cache/ms-playwright
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:

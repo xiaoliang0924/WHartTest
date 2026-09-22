@@ -2,6 +2,8 @@
 services:
   backend:
     image: wharttest-backend:latest
+    volumes:
+      - ./data/playwright-browsers:/root/.cache/ms-playwright
   frontend:
     image: wharttest-frontend:latest
     entrypoint: ["nginx", "-g", "daemon off;"]

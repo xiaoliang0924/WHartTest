@@ -159,7 +159,15 @@ import {
   openLangGraphChatInCurrentPage,
   openLangGraphChatInNewWindow,
 } from '@/features/langgraph/utils/openLangGraphChat';
-import { storeExecCaseSessionContext } from '@/features/langgraph/utils/execCaseSessionBridge';
+import {
+  getExecCaseSessionContext,
+  storeExecCaseSessionContext,
+} from '@/features/langgraph/utils/execCaseSessionBridge';
+import {
+  markDeferExecStreamToChat,
+  resetDeferExecStreamToChat,
+  shouldDeferExecStreamToChat,
+} from '@/features/langgraph/utils/execCaseStreamCoordinator';
 import { getUserPrompts } from '@/features/prompts/services/promptService';
 import type { ChatRequest } from '@/features/langgraph/types/chat';
 import {
@@ -452,6 +460,23 @@ const notifyExecutionOutcome = async (
 
 const EXECUTION_PENDING_NOTIFICATION_ID = 'exec-case-pending';
 const EXEC_CASE_LINK_STYLE = 'color: rgb(var(--primary-6)); cursor: pointer; font-size: 13px;';
+/** 给用户时间点击「打开对话」；在此之前不在用例管理页占用 SSE。 */
+const EXEC_STREAM_DEFER_MS = 12000;
+let pendingExecStreamTimer: ReturnType<typeof setTimeout> | null = null;
+
+const clearPendingExecStreamTimer = () => {
+  if (pendingExecStreamTimer) {
+    clearTimeout(pendingExecStreamTimer);
+    pendingExecStreamTimer = null;
+  }
+};
+
+const createExecCaseSessionId = (): string => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID().replace(/-/g, '');
+  }
+  return `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 18)}`;
+};
 
 const resolveExecCaseSessionId = (): string | null => {
   const sessionId = executionSessionId.value;
@@ -468,7 +493,15 @@ const openExecCaseChatInCurrentPage = (close?: () => void) => {
     Message.info(isEnglish.value ? 'Preparing execution, please wait...' : '正在准备前置数据，请稍候...');
     return;
   }
-  openLangGraphChatInCurrentPage(router, sessionId, currentProjectId.value);
+  const ctx = getExecCaseSessionContext(sessionId);
+  markDeferExecStreamToChat(sessionId);
+  clearPendingExecStreamTimer();
+  openLangGraphChatInCurrentPage(router, sessionId, currentProjectId.value, {
+    execAutostart: true,
+    testCaseId: ctx?.testCaseId ?? executionResultTestCase.value?.id,
+    promptId: ctx?.promptId,
+    generatePlaywrightScript: ctx?.generatePlaywrightScript,
+  });
   close?.();
 };
 
@@ -478,7 +511,15 @@ const openExecCaseChatInNewWindow = (close?: () => void) => {
     Message.info(isEnglish.value ? 'Preparing execution, please wait...' : '正在准备前置数据，请稍候...');
     return;
   }
-  openLangGraphChatInNewWindow(router, sessionId, currentProjectId.value);
+  const ctx = getExecCaseSessionContext(sessionId);
+  markDeferExecStreamToChat(sessionId);
+  clearPendingExecStreamTimer();
+  openLangGraphChatInNewWindow(router, sessionId, currentProjectId.value, {
+    execAutostart: true,
+    testCaseId: ctx?.testCaseId ?? executionResultTestCase.value?.id,
+    promptId: ctx?.promptId,
+    generatePlaywrightScript: ctx?.generatePlaywrightScript,
+  });
   close?.();
 };
 
@@ -982,11 +1023,13 @@ const handleExecuteConfirm = async (options: { generatePlaywrightScript: boolean
   // 内容，否则列表缓存中的旧前置条件会与后端最新步骤发生冲突。
   const message = `执行用例管理测试用例 ID=${testCase.id}。请使用后端注入的最新用例步骤和执行规则。`;
 
+  const sessionId = createExecCaseSessionId();
   const requestData: ChatRequest = {
     message,
     project_id: String(currentProjectId.value),
     use_knowledge_base: false,
     prompt_id: executionPromptId,
+    session_id: sessionId,
     // Playwright 脚本生成参数
     generate_playwright_script: options.generatePlaywrightScript,
     test_case_id: testCase.id,  // 始终传递，用于截图目录隔离
@@ -997,45 +1040,55 @@ const handleExecuteConfirm = async (options: { generatePlaywrightScript: boolean
     : taskText.value.executionStartedContent;
 
   executionResultTestCase.value = testCase;
-  executionSessionId.value = null;
+  executionSessionId.value = sessionId;
+  storeExecCaseSessionContext(sessionId, {
+    message,
+    displayMessage: message,
+    promptId: executionPromptId ?? null,
+    testCaseId: testCase.id,
+    projectId: currentProjectId.value,
+    generatePlaywrightScript: options.generatePlaywrightScript,
+  });
   executionPreparing.value = true;
   isExecutionResultDrawerVisible.value = true;
 
   Notification.remove(`exec-case-fail-${testCase.id}`);
   showExecCaseStartedNotification(notificationContent);
 
-  startAutomationTask(
-    requestData,
-    taskText.value.executionStarted,
-    notificationContent,
-    'exec-case',
-    taskText.value.viewExecutionProgress,
-    {
-      onStarted: (sessionId) => {
-        executionSessionId.value = sessionId;
-        storeExecCaseSessionContext(sessionId, {
-          message,
-          displayMessage: message,
-          promptId: executionPromptId ?? null,
-          testCaseId: testCase.id,
-          projectId: currentProjectId.value,
-        });
-      },
-      onComplete: async (sessionId, payload) => {
-        executionSessionId.value = sessionId;
-        await executionResultDrawerRef.value?.markCompleted();
-        executionPreparing.value = false;
-        Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
-        await notifyExecutionOutcome(testCase.id, sessionId, payload);
-      },
-      onError: (sessionId, message) => {
-        executionSessionId.value = sessionId;
-        executionPreparing.value = false;
-        Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
-        executionResultDrawerRef.value?.setStreamError(message);
-      },
+  resetDeferExecStreamToChat(sessionId);
+  clearPendingExecStreamTimer();
+  const streamHooks = {
+    onStarted: (startedSessionId: string) => {
+      executionSessionId.value = startedSessionId;
+    },
+    onComplete: async (startedSessionId: string, payload?: Record<string, unknown>) => {
+      executionSessionId.value = startedSessionId;
+      await executionResultDrawerRef.value?.markCompleted();
+      executionPreparing.value = false;
+      Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
+      await notifyExecutionOutcome(testCase.id, startedSessionId, payload);
+    },
+    onError: (startedSessionId: string, errorMessage: string) => {
+      executionSessionId.value = startedSessionId;
+      executionPreparing.value = false;
+      Notification.remove(EXECUTION_PENDING_NOTIFICATION_ID);
+      executionResultDrawerRef.value?.setStreamError(errorMessage);
+    },
+  };
+  pendingExecStreamTimer = setTimeout(() => {
+    pendingExecStreamTimer = null;
+    if (shouldDeferExecStreamToChat(sessionId)) {
+      return;
     }
-  );
+    startAutomationTask(
+      requestData,
+      taskText.value.executionStarted,
+      notificationContent,
+      'exec-case',
+      taskText.value.viewExecutionProgress,
+      streamHooks,
+    );
+  }, EXEC_STREAM_DEFER_MS);
 
   pendingExecuteTestCase.value = null;
 };

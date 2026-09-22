@@ -548,6 +548,25 @@ export async function sendChatMessageStream(
       throw new Error(await readHttpErrorMessage(response, `HTTP error! status: ${response.status}`));
     }
 
+    if (streamSessionId) {
+      if (!activeStreams.value[streamSessionId]) {
+        activeStreams.value[streamSessionId] = {
+          content: '',
+          isComplete: false,
+          messages: [],
+          contextTokenCount: 0,
+          contextLimit: 128000,
+          currentStep: 0,
+          maxSteps: 0,
+          testcaseStep: 0,
+          testcaseStartedAt: Date.now(),
+          userMessage: data.message,
+          userMessageTime: formatStreamTime(),
+        };
+      }
+      invokeOnStart(streamSessionId);
+    }
+
     const reader = response.body?.getReader();
     const decoder = new TextDecoder();
 

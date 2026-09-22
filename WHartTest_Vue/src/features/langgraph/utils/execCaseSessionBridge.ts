@@ -6,6 +6,7 @@ export interface ExecCaseSessionContext {
   promptId?: number | null;
   testCaseId?: number;
   projectId?: number;
+  generatePlaywrightScript?: boolean;
   storedAt: number;
 }
 
@@ -42,4 +43,52 @@ export function getExecCaseSessionContext(sessionId?: string | null): ExecCaseSe
 export function clearExecCaseSessionContext(sessionId?: string | null): void {
   if (!sessionId) return;
   localStorage.removeItem(`${EXEC_CASE_CONTEXT_PREFIX}${sessionId}`);
+}
+
+export function buildExecCaseAgentMessage(testCaseId: number): string {
+  return `执行用例管理测试用例 ID=${testCaseId}。请使用后端注入的最新用例步骤和执行规则。`;
+}
+
+function parseOptionalInt(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = parseInt(value, 10);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+/** 从 localStorage 或 URL 查询参数还原用例执行 autostart 上下文（新窗口/刷新兜底）。 */
+export function resolveExecCaseAutostartContext(
+  sessionId: string,
+  routeQuery: Record<string, unknown>,
+): Omit<ExecCaseSessionContext, 'storedAt'> | null {
+  const stored = getExecCaseSessionContext(sessionId);
+  if (stored?.testCaseId) {
+    return stored;
+  }
+
+  const testCaseId = parseOptionalInt(routeQuery.test_case_id);
+  if (!testCaseId) {
+    return null;
+  }
+
+  const promptId = parseOptionalInt(routeQuery.prompt_id);
+  const projectId = parseOptionalInt(routeQuery.project_id);
+  const generatePlaywrightScript = routeQuery.generate_playwright_script === '1'
+    || routeQuery.generate_playwright_script === 'true';
+
+  const message = buildExecCaseAgentMessage(testCaseId);
+  return {
+    message,
+    displayMessage: message,
+    promptId: promptId ?? null,
+    testCaseId,
+    projectId,
+    generatePlaywrightScript,
+  };
 }

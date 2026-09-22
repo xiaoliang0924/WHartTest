@@ -25,6 +25,8 @@ import type {
   UiTestCaseForm,
   UiPublicDataForm,
   UiEnvironmentConfigForm,
+  UiAuthState,
+  UiAuthStateForm,
   PaginatedResponse,
   TraceData,
 } from '../types'
@@ -219,6 +221,23 @@ export const envConfigApi = {
   delete: (id: number) => request.delete(`${BASE_URL}/env-configs/${id}/`),
 }
 
+// ==================== 环境登录态管理 ====================
+export const authStateApi = {
+  /** 该环境的登录态列表（含已停用的历史条目） */
+  list: (params?: { env_config?: number; is_active?: boolean; search?: string }) =>
+    request.get<PaginatedResponse<UiAuthState>>(`${BASE_URL}/auth-states/`, { params }),
+
+  get: (id: number) => request.get<UiAuthState>(`${BASE_URL}/auth-states/${id}/`),
+
+  create: (data: UiAuthStateForm) =>
+    request.post<UiAuthState>(`${BASE_URL}/auth-states/`, data),
+
+  update: (id: number, data: Partial<UiAuthStateForm>) =>
+    request.patch<UiAuthState>(`${BASE_URL}/auth-states/${id}/`, data),
+
+  delete: (id: number) => request.delete(`${BASE_URL}/auth-states/${id}/`),
+}
+
 // ==================== 执行器管理 ====================
 export interface ActuatorInfo {
   id: string
@@ -296,5 +315,66 @@ export const actuatorApi = {
     }),
 }
 
+// ==================== 录制器会话 ====================
+export interface RecorderSessionCreatePayload {
+  env_config_id: number
+  page_id: number
+  page_step_id: number
+  pre_page_step_id?: number
+  /** 注入已保存登录态（默认 true；false 时以无痕上下文录制登录流程） */
+  inject_login_state?: boolean
+  /** 选择绑定的登录态（录制的步骤继承该绑定；留空随环境生效登录态） */
+  auth_state_id?: number | null
+}
+
+export interface RecorderSessionInfo {
+  session_id: string
+  viewport: { width: number; height: number }
+  base_url: string
+  page_id: number
+  page_step_id: number
+  pre_executed?: number
+  pre_failed?: boolean
+}
+
+export interface RecorderFinishResult {
+  message: string
+  actions_count: number
+  elements_created: number
+  elements_updated: number
+  steps_created: number
+}
+
+export interface RecorderSaveLoginStateResult {
+  message: string
+  auth_state_id: number
+  name: string
+  env_config_id: number
+  cookies: number
+  local_storage_keys: number
+}
+
+export const recorderApi = {
+  create: (data: RecorderSessionCreatePayload) =>
+    request.post<RecorderSessionInfo>(`${BASE_URL}/recorder-sessions/`, data),
+
+  /** 登录态录制会话：无痕导航到环境登录页，仅暴露保存登录态 */
+  authCapture: (envConfigId: number) =>
+    request.post<RecorderSessionInfo>(`${BASE_URL}/recorder-sessions/auth-capture/`, {
+      env_config_id: envConfigId,
+    }),
+
+  finish: (sessionId: string) =>
+    request.post<RecorderFinishResult>(`${BASE_URL}/recorder-sessions/${sessionId}/finish/`),
+
+  saveLoginState: (sessionId: string, body?: { name?: string }) =>
+    request.post<RecorderSaveLoginStateResult>(
+      `${BASE_URL}/recorder-sessions/${sessionId}/save-login-state/`,
+      body ?? {},
+    ),
+
+  cancel: (sessionId: string) =>
+    request.post(`${BASE_URL}/recorder-sessions/${sessionId}/cancel/`),
+}
 
 export { fileService as uiFileService } from '@/features/file-management/services/fileService'

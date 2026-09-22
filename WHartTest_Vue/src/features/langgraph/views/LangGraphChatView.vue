@@ -205,6 +205,7 @@ import {
 import {
   clearExecCaseSessionContext,
   getExecCaseSessionContext,
+  resolveExecCaseAutostartContext,
 } from '@/features/langgraph/utils/execCaseSessionBridge';
 import {
   extractFirstExecutionReport,
@@ -1616,6 +1617,13 @@ const startRemoteSessionPolling = () => {
   }, 3000);
 };
 
+const shouldPreserveSessionOnHistoryFailure = (storedSessionId: string): boolean => {
+  if (route.query.exec_autostart === '1') {
+    return true;
+  }
+  return !!getExecCaseSessionContext(storedSessionId);
+};
+
 const loadChatHistory = async () => {
   const storedSessionId = getSessionIdFromStorage();
   
@@ -1642,20 +1650,25 @@ const loadChatHistory = async () => {
       startRemoteSessionPolling();
       syncRemoteGenerating();
     } else {
-      // 🔧 修复：获取历史失败时静默处理，不显示错误提示
-      // 可能是会话已被删除或过期，清除存储的会话ID即可
       console.warn('⚠️ 会话历史获取失败，可能已被删除');
-      localStorage.removeItem('langgraph_session_id');
-      sessionId.value = '';
-      stopRemoteSessionPolling();
+      if (shouldPreserveSessionOnHistoryFailure(storedSessionId)) {
+        sessionId.value = storedSessionId;
+        stopRemoteSessionPolling();
+      } else {
+        localStorage.removeItem('langgraph_session_id');
+        sessionId.value = '';
+        stopRemoteSessionPolling();
+      }
     }
   } catch (error) {
-    // 🔧 修复：网络错误等异常情况才显示错误提示
     console.error('❌ 加载聊天历史异常:', error);
-    // 只在真正的错误情况下提示用户
-    Message.error(pageText.value.historyLoadFailedNewChat);
-    localStorage.removeItem('langgraph_session_id');
-    sessionId.value = '';
+    if (shouldPreserveSessionOnHistoryFailure(storedSessionId)) {
+      sessionId.value = storedSessionId;
+    } else {
+      Message.error(pageText.value.historyLoadFailedNewChat);
+      localStorage.removeItem('langgraph_session_id');
+      sessionId.value = '';
+    }
   } finally {
     safeStopLoading();
   }
@@ -2681,6 +2694,76 @@ const handleStreamMessage = async (requestData: ChatRequest, userMessage: string
   // 使用 watch 监视 isComplete 状态
 };
 
+let execCaseAutostartAttempted = false;
+
+const resolveAutostartSessionId = (): string | null => {
+  const fromRoute = typeof route.query.session_id === 'string' ? route.query.session_id.trim() : '';
+  const sid = (sessionId.value || getSessionIdFromStorage() || fromRoute).trim();
+  return sid || null;
+};
+
+/** 用例管理「打开对话」：在本页启动 Agent Loop，避免 SSE 只挂在用例管理页签上 */
+const tryAutostartExecCaseStream = async () => {
+  if (execCaseAutostartAttempted || route.query.exec_autostart !== '1') {
+    return;
+  }
+
+  const sid = resolveAutostartSessionId();
+  if (!sid || !projectStore.currentProjectId) {
+    return;
+  }
+
+  const ctx = resolveExecCaseAutostartContext(sid, route.query as Record<string, unknown>);
+  if (!ctx?.testCaseId) {
+    console.warn('[exec-autostart] 缺少用例上下文，无法启动 Agent Loop', sid);
+    return;
+  }
+
+  const localStream = activeStreams.value[sid];
+  if (localStream && !localStream.isComplete) {
+    execCaseAutostartAttempted = true;
+    syncRemoteGenerating();
+    return;
+  }
+
+  // 其它标签页可能误留了 running 标记但未持有 SSE；对话页 autostart 时接管执行。
+  if (isSessionRunning(sid) && !localStream) {
+    clearSessionRunning(sid);
+  }
+
+  execCaseAutostartAttempted = true;
+
+  const userMessage = ctx.displayMessage || ctx.message;
+  const requestData: ChatRequest = {
+    message: ctx.message,
+    session_id: sid,
+    project_id: String(projectStore.currentProjectId),
+    use_knowledge_base: false,
+    prompt_id: ctx.promptId ?? undefined,
+    test_case_id: ctx.testCaseId,
+    generate_playwright_script: ctx.generatePlaywrightScript ?? false,
+  };
+  sessionId.value = sid;
+  saveSessionId(sid);
+  isLoading.value = true;
+
+  try {
+    await handleStreamMessage(requestData, userMessage);
+    // 流正常结束后 finalize 会 clearStreamState，不能用 activeStreams 是否存在判断失败。
+    const finished = activeStreams.value[sid];
+    if (finished?.isComplete && finished.error) {
+      execCaseAutostartAttempted = false;
+      Message.error(finished.error);
+    }
+  } catch (error) {
+    execCaseAutostartAttempted = false;
+    console.error('[exec-autostart] 启动失败:', error);
+    Message.error('执行流启动失败，请重试');
+  } finally {
+    syncRemoteGenerating();
+  }
+};
+
 // 处理非流式消息（使用统一的 Agent Loop 接口）
 const handleNormalMessage = async (requestData: ChatRequest, originalMessage: string) => {
   // 添加loading占位消息
@@ -3073,13 +3156,13 @@ watch(() => projectStore.currentProjectId, async (newProjectId, oldProjectId) =>
   console.log(`📊 项目ID变化: ${oldProjectId} -> ${newProjectId}`);
   
   if (newProjectId && newProjectId !== oldProjectId) {
-    // 项目切换或首次加载完成
+    // 首次 project 赋值由 onMounted 处理；避免与 exec_autostart 抢 loadChatHistory。
+    if (!isMountedLoadComplete) {
+      return;
+    }
     console.log('🔄 项目已切换，重新加载会话数据...');
-    
-    // 只有在onMounted完成后才通过watch加载（避免重复）
-    // 或者如果onMounted时没有项目，现在项目加载完成了，也需要加载
-    if (isMountedLoadComplete || !oldProjectId) {
-      await loadSessionsFromServer();
+    await loadSessionsFromServer();
+    if (route.query.exec_autostart !== '1') {
       await loadChatHistory();
     }
   } else if (!newProjectId && oldProjectId) {
@@ -3153,8 +3236,18 @@ onMounted(async () => {
     // 这样可以避免 loadChatHistory 中的 updateSessionInList 导致重复
     await loadSessionsFromServer();
 
-    // 尝试加载当前会话的历史记录（只加载消息，不更新会话列表）
-    await loadChatHistory();
+    const autostartFirst = route.query.exec_autostart === '1';
+    if (autostartFirst) {
+      await tryAutostartExecCaseStream();
+    }
+    const sid = resolveAutostartSessionId();
+    const streamActive = !!(sid && activeStreams.value[sid] && !activeStreams.value[sid].isComplete);
+    if (!streamActive) {
+      await loadChatHistory();
+    }
+    if (autostartFirst) {
+      await tryAutostartExecCaseStream();
+    }
   }
 
   // 加载当前LLM配置（不依赖项目）
@@ -3205,10 +3298,21 @@ onActivated(async () => {
     }
   }
 
+  if (route.query.exec_autostart === '1') {
+    await tryAutostartExecCaseStream();
+  }
+
   // 5. 页面激活后滚动到最新消息
   await nextTick();
   chatMessagesRef.value?.scrollToBottom();
 });
+
+watch(
+  () => route.query.session_id,
+  () => {
+    execCaseAutostartAttempted = false;
+  },
+);
 
 onUnmounted(() => {
   stopRemoteSessionPolling();

@@ -129,6 +129,7 @@ import {
   openLangGraphChatInCurrentPage,
   openLangGraphChatInNewWindow,
 } from '@/features/langgraph/utils/openLangGraphChat';
+import { markDeferExecStreamToChat } from '@/features/langgraph/utils/execCaseStreamCoordinator';
 
 const props = defineProps<{
   visible: boolean;
@@ -415,11 +416,27 @@ const handleClose = () => {
 };
 
 const openChatInCurrentPage = () => {
-  openLangGraphChatInCurrentPage(router, effectiveSessionId.value, props.projectId);
+  const sid = effectiveSessionId.value;
+  if (!sid) {
+    return;
+  }
+  markDeferExecStreamToChat(sid);
+  openLangGraphChatInCurrentPage(router, sid, props.projectId, {
+    execAutostart: true,
+    testCaseId: props.testCase?.id,
+  });
 };
 
 const openChatInNewWindow = () => {
-  openLangGraphChatInNewWindow(router, effectiveSessionId.value, props.projectId);
+  const sid = effectiveSessionId.value;
+  if (!sid) {
+    return;
+  }
+  markDeferExecStreamToChat(sid);
+  openLangGraphChatInNewWindow(router, sid, props.projectId, {
+    execAutostart: true,
+    testCaseId: props.testCase?.id,
+  });
 };
 
 defineExpose({

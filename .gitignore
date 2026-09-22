@@ -6,6 +6,9 @@
 *.env.*
 !*.env.example
 
+# Local diagnostics / agent scratch (do not deploy)
+.workbuddy/
+
 # IDE / Editor
 .vscode/
 .idea/

@@ -1,0 +1,5 @@
+# Local fast redeploy: overlay merged code onto official backend base (no apt/npm browser download).
+FROM ghcr.io/mgdaaslab/wharttest-backend:latest
+COPY WHartTest_Django/ /app/
+COPY WHartTest_Skills/ /app/bundled_skills/
+RUN chmod +x /app/entrypoint.sh
