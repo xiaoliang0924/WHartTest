@@ -1615,6 +1615,7 @@ class AgentLoopStreamAPIView(View):
                 project_id=int(project_id),
                 test_case_id=test_case_id,
                 chat_session_id=session_id,
+                generate_playwright_script=bool(generate_playwright_script),
             )
             tools.extend(builtin_tools)
             logger.info(f"AgentLoopStreamAPI: Added {len(builtin_tools)} builtin tools")
@@ -2802,10 +2803,60 @@ class AgentLoopStreamAPIView(View):
                     else:
                         complete_data = {"type": "complete", "total_steps": step_count}
                     if generate_playwright_script:
-                        complete_data["script_generation"] = {
-                            "enabled": True,
-                            "message": "脚本管理工具已启用",
-                        }
+                        ui_case_id = None
+                        if test_case_id:
+                            try:
+                                from testcases.models import TestCase
+
+                                bound_case = await sync_to_async(
+                                    TestCase.objects.filter(
+                                        id=int(test_case_id), project_id=int(project_id)
+                                    ).values_list("ui_test_case_id", flat=True).first
+                                )()
+                                ui_case_id = bound_case
+                            except Exception:
+                                logger.exception(
+                                    "AgentLoopStreamAPI: failed to verify generated UI case binding; testcase=%s",
+                                    test_case_id,
+                                )
+                        if ui_case_id:
+                            success_note = (
+                                f"\n\n### UI 自动化用例生成\n"
+                                f"成功：UI 自动化用例 #{ui_case_id} 已生成并绑定。"
+                            )
+                            if record and "### UI 自动化用例生成" not in (record.summary or ""):
+                                record.summary = (record.summary or "") + success_note
+                                await sync_to_async(record.save)(update_fields=["summary"])
+                                if complete_data.get("test_case_run"):
+                                    complete_data["test_case_run"]["summary"] = record.summary
+                            script_generation_result = {
+                                "enabled": True,
+                                "status": "success",
+                                "ui_test_case_id": ui_case_id,
+                                "message": f"UI 自动化用例 #{ui_case_id} 已生成并绑定。",
+                            }
+                        elif record and record.status == "pass":
+                            failure_note = (
+                                "\n\n### UI 自动化用例生成\n"
+                                "失败：功能用例已通过，但本次执行没有成功保存并绑定 UI 自动化用例。"
+                                "请查看对话中的 save_generated_ui_testcase 工具结果后重试。"
+                            )
+                            record.summary = (record.summary or "") + failure_note
+                            await sync_to_async(record.save)(update_fields=["summary"])
+                            if complete_data.get("test_case_run"):
+                                complete_data["test_case_run"]["summary"] = record.summary
+                            script_generation_result = {
+                                "enabled": True,
+                                "status": "failed",
+                                "message": "功能用例通过，但未检测到已保存并绑定的 UI 自动化用例。",
+                            }
+                        else:
+                            script_generation_result = {
+                                "enabled": True,
+                                "status": "skipped",
+                                "message": "功能用例未通过，未生成 UI 自动化用例。",
+                            }
+                        complete_data["script_generation"] = script_generation_result
                     yield create_sse_data(complete_data)
 
                 yield "data: [DONE]\n\n"

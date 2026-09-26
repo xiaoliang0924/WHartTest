@@ -14,7 +14,112 @@ from ui_automation.models import (
     UiTestCase,
 )
 from ui_automation.serializers import UiPageStepsExecuteSerializer
+from ui_automation.generated_case_service import persist_generated_ui_testcase
+from testcases.models import TestCase as FunctionalTestCase, TestCaseModule
 from file_management.models import FileAsset, FileManagementSetting, FileReference
+
+
+class GeneratedUiTestCasePersistenceTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_superuser(username='generated-case-user', password='secret')
+        self.project = Project.objects.create(name='Generated UI Project')
+        self.functional_module = TestCaseModule.objects.create(
+            project=self.project,
+            name='Functional tests',
+            creator=self.user,
+        )
+        self.testcase = FunctionalTestCase.objects.create(
+            project=self.project,
+            module=self.functional_module,
+            name='Generated workflow',
+            creator=self.user,
+            level='P1',
+        )
+        self.payload = {
+            'name': 'Observed workflow',
+            'url': 'https://example.test/login',
+            'steps': [{
+                'name': 'Login and open dashboard',
+                'description': '使用本次观察到的控件登录并进入首页',
+                'url': 'https://example.test/login',
+                'actions': [
+                    {
+                        'type': 'fill',
+                        'selector': {
+                            'name': 'Password field',
+                            'locator_type': 'label',
+                            'locator_value': '密码',
+                        },
+                        'value': 'do-not-persist-this-password',
+                    },
+                    {
+                        'type': 'click',
+                        'selector': {
+                            'name': 'Login button',
+                            'locator_type': 'role',
+                            'locator_value': 'button[name="登录"]',
+                        },
+                    },
+                    {'type': 'assert', 'mode': 'url', 'value': '/dashboard'},
+                ],
+            }],
+        }
+
+    def test_generated_case_is_saved_and_bound_with_password_redacted(self):
+        result = persist_generated_ui_testcase(
+            testcase_id=self.testcase.id,
+            project_id=self.project.id,
+            user_id=self.user.id,
+            payload=self.payload,
+        )
+
+        self.assertEqual(result['status'], 'success')
+        self.assertTrue(result['ui_test_case_id'])
+        self.testcase.refresh_from_db()
+        self.assertEqual(self.testcase.ui_test_case_id, result['ui_test_case_id'])
+        ui_case = UiTestCase.objects.get(pk=result['ui_test_case_id'])
+        self.assertEqual(ui_case.case_steps.count(), 1)
+        password_detail = UiPageStepsDetailed.objects.get(ope_key='fill')
+        self.assertEqual(password_detail.ope_value['value'], '${{password}}')
+        self.assertNotIn(
+            'do-not-persist-this-password',
+            str(list(UiPageStepsDetailed.objects.values_list('ope_value', flat=True))),
+        )
+
+    def test_invalid_payload_rolls_back_all_ui_rows(self):
+        invalid_payload = {
+            'steps': [{
+                'name': 'Invalid step',
+                'actions': [{'type': 'click', 'selector': {'locator_value': ''}}],
+            }],
+        }
+        with self.assertRaises(ValueError):
+            persist_generated_ui_testcase(
+                testcase_id=self.testcase.id,
+                project_id=self.project.id,
+                user_id=self.user.id,
+                payload=invalid_payload,
+            )
+        self.assertFalse(UiTestCase.objects.exists())
+        self.assertFalse(UiPage.objects.exists())
+        self.assertFalse(UiPageSteps.objects.exists())
+
+    def test_repeated_call_does_not_create_duplicate_ui_case(self):
+        first = persist_generated_ui_testcase(
+            testcase_id=self.testcase.id,
+            project_id=self.project.id,
+            user_id=self.user.id,
+            payload=self.payload,
+        )
+        second = persist_generated_ui_testcase(
+            testcase_id=self.testcase.id,
+            project_id=self.project.id,
+            user_id=self.user.id,
+            payload=self.payload,
+        )
+        self.assertEqual(first['ui_test_case_id'], second['ui_test_case_id'])
+        self.assertFalse(second['created'])
+        self.assertEqual(UiTestCase.objects.count(), 1)
 
 
 class UiPageStepsExecuteDataTests(TestCase):
@@ -714,4 +819,3 @@ class UiCaptchaRecognizeTests(TestCase):
             format='json'
         )
         self.assertEqual(res_ok.status_code, status.HTTP_201_CREATED)
-

@@ -1328,12 +1328,14 @@ def get_skill_tools(
     project_id: Optional[int] = None,
     test_case_id: Optional[int] = None,
     chat_session_id: Optional[str] = None,
+    generate_playwright_script: bool = False,
 ) -> list[object]:
     """获取 Skill 工具列表（Skills 全局共享，不限制项目）"""
     current_user_id = user_id
     current_project_id = project_id if project_id is not None else 0
     current_test_case_id = test_case_id
     current_chat_session_id = chat_session_id
+    current_generate_ui_case = bool(generate_playwright_script and test_case_id)
 
     @langchain_tool
     def read_skill_content(skill_name: str) -> str:
@@ -2036,4 +2038,55 @@ def get_skill_tools(
 
         return _execute_single_skill_script(skill_name, command, session_id)
 
-    return [read_skill_content, execute_skill_script]
+    tools = [read_skill_content, execute_skill_script]
+
+    if current_generate_ui_case:
+        @langchain_tool
+        def save_generated_ui_testcase(payload_json: str) -> str:
+            """保存本次浏览器执行中真实观察到的 UI 操作，并绑定到当前功能用例。
+
+            仅在功能测试的所有步骤均通过后调用一次。payload_json 必须是 JSON 对象，格式：
+            {"name":"用例名称","description":"简述","url":"观察到的页面 URL",
+             "steps":[{"name":"步骤名称","description":"步骤说明","url":"页面 URL",
+             "actions":[{"type":"click|fill|check|uncheck|press","selector":
+             {"name":"语义名称","locator_type":"role|text|label|placeholder|test_id|id|name|css|xpath",
+             "locator_value":"实际观察到的定位表达式"}},
+             {"type":"goto","url":"实际观察到的 URL"},
+             {"type":"wait","seconds":1},
+             {"type":"assert","mode":"visible|hidden|enabled|disabled|checked|text|contain_text|value|count|url|title",
+             "selector":{"name":"语义名称","locator_type":"text","locator_value":"实际定位"},"value":"期望值"}]}]}。
+
+            所有动作和定位器必须来自本次执行观察，不得编造；不要包含密码、令牌或其他秘密。
+            只有本工具明确返回“已保存并绑定”及 UI 用例 ID，才可以报告生成成功。
+            """
+            try:
+                from ui_automation.generated_case_service import persist_generated_ui_testcase
+
+                result = persist_generated_ui_testcase(
+                    testcase_id=int(current_test_case_id),
+                    project_id=int(current_project_id),
+                    user_id=int(current_user_id),
+                    payload=payload_json,
+                )
+                logger.info(
+                    "[save_generated_ui_testcase] testcase=%s ui_case=%s created=%s",
+                    current_test_case_id,
+                    result.get("ui_test_case_id"),
+                    result.get("created"),
+                )
+                return json.dumps(result, ensure_ascii=False)
+            except Exception as exc:
+                logger.error(
+                    "[save_generated_ui_testcase] failed testcase=%s error=%s",
+                    current_test_case_id,
+                    exc,
+                    exc_info=True,
+                )
+                return json.dumps(
+                    {"status": "failed", "message": str(exc)[:1000]},
+                    ensure_ascii=False,
+                )
+
+        tools.append(save_generated_ui_testcase)
+
+    return tools
