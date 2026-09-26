@@ -412,7 +412,6 @@ class FinalizeRunRecordReportTests(TestCase):
         self.assertIn("[HYBRID_SCRIPT_ATTEMPT]", finalized.execution_log)
         self.assertIn("[HYBRID_AGENT_FALLBACK]", finalized.execution_log)
         self.assertIn("UI script timed out", finalized.execution_log)
-
     def test_start_run_record_keeps_selected_mode_and_ui_case(self):
         record = start_testcase_run_record(
             testcase_id=self.testcase.id,
@@ -446,7 +445,6 @@ class FinalizeRunRecordReportTests(TestCase):
             hybrid_with_script.actual_execution_path,
             "hybrid_script_pending",
         )
-
     def test_pending_button_case_requires_actual_button_assertion(self):
         testcase = TestCaseModel.objects.create(
             project=self.project,
