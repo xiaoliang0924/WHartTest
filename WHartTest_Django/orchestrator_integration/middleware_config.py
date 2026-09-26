@@ -442,8 +442,10 @@ def extract_llm_failure_message_from_text(text: str) -> Optional[str]:
     match = _MODEL_CALL_FAILURE_RE.search(text)
     if match:
         exc_name = match.group(1)
-        synthetic = Exception(f"{exc_name}: Request timed out.")
-        synthetic.__class__.__name__ = exc_name
+        # Exception type names are immutable; construct a local synthetic type
+        # rather than mutating Exception.__name__ (which raises on Python 3.11+).
+        synthetic_type = type(exc_name, (Exception,), {})
+        synthetic = synthetic_type(f"{exc_name}: Request timed out.")
         friendly = get_user_friendly_llm_error(synthetic)
         if friendly:
             return friendly["message"]

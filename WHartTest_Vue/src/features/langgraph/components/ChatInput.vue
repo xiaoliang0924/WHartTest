@@ -218,7 +218,7 @@ interface ChatMessage {
   content: string;
   isUser: boolean;
   time: string;
-  messageType?: 'human' | 'ai' | 'tool' | 'system' | 'agent_step' | 'step_separator';
+  messageType?: 'human' | 'ai' | 'tool' | 'system' | 'agent_step' | 'step_separator' | 'execution_report';
   imageBase64?: string;
   imageDataUrl?: string;
   imageBase64List?: string[];

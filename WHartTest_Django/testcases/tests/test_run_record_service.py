@@ -78,6 +78,40 @@ class ExecutionResultReportTests(SimpleTestCase):
         self.assertEqual(usage["status"], "verified_used")
         self.assertEqual(usage["matched_identifier"]["value"], "2026091570663010")
 
+    def test_confirms_generated_ticket_from_visible_row_and_matching_ticket_url(self):
+        ticket_no = "2026091570663010"
+        data_run = SimpleNamespace(output_snapshot={"ticketNo": ticket_no})
+        usage = build_pre_data_usage(
+            data_run,
+            "ROW_VISIBLE=true\n"
+            f"RESULT=PASS: 已进入工单详情 URL=https://test.example/work-order/my-tickets/{ticket_no}\n"
+            "[CASE_SCREENSHOT] /tmp/case_1478_step3.png",
+        )
+        self.assertEqual(usage["status"], "verified_used")
+        self.assertIn("ROW_VISIBLE=true", usage["evidence"])
+
+    def test_does_not_accept_unrelated_row_action_as_generated_data_evidence(self):
+        ticket_no = "2026091570663010"
+        data_run = SimpleNamespace(output_snapshot={"ticketNo": ticket_no})
+        usage = build_pre_data_usage(
+            data_run,
+            "clickRowAction(page, 'OTHER-TICKET', '处理')\n"
+            + ("无关日志。" * 100)
+            + f"\n日志引用工单号 {ticket_no}，但无本条工单查询或定位证据。",
+        )
+        self.assertEqual(usage["status"], "referenced")
+
+    def test_does_not_accept_visible_row_for_a_different_ticket(self):
+        ticket_no = "2026091570663010"
+        data_run = SimpleNamespace(output_snapshot={"ticketNo": ticket_no})
+        usage = build_pre_data_usage(
+            data_run,
+            "ROW_VISIBLE=true\n"
+            "RESULT=PASS: 页面显示了其他工单 URL=https://test.example/work-order/my-tickets/OTHER-1\n"
+            f"执行摘要引用本次造数标识 {ticket_no}。",
+        )
+        self.assertEqual(usage["status"], "referenced")
+
     def test_does_not_treat_prompt_injection_as_usage_without_agent_evidence(self):
         data_run = SimpleNamespace(output_snapshot={"ticketNo": "2026091570663010"})
         usage = build_pre_data_usage(data_run, "已进入工单列表，开始按状态筛选。")
@@ -351,6 +385,67 @@ class FinalizeRunRecordReportTests(TestCase):
         self.assertEqual(len(record.step_results), 2)
         self.assertEqual(record.step_results[0]["status"], "fail")
         self.assertEqual(record.step_results[1]["status"], "skip")
+
+    def test_finalize_keeps_hybrid_script_attempt_in_final_audit_log(self):
+        record = start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-hybrid-fallback-finalize",
+            execution_mode="hybrid",
+            ui_test_case_id=654,
+        )
+        record.actual_execution_path = "agent_fallback"
+        record.execution_log = (
+            "[HYBRID_SCRIPT_ATTEMPT]\nUI script timed out while locating button"
+        )
+        record.save(update_fields=["actual_execution_path", "execution_log"])
+        finalized = finalize_testcase_run_record(
+            session_id="sess-hybrid-fallback-finalize",
+            final_content="## 测试执行结果: 通过\n全部步骤已完成。",
+            transcript=(
+                "RESULT=PASS: 已通过 Agent 接管并完成测试用例全部步骤。\n"
+                "已进入工单详情 URL=https://test.example/work-order/my-tickets/2026"
+            ),
+        )
+        finalized.refresh_from_db()
+        self.assertEqual(finalized.actual_execution_path, "agent_fallback")
+        self.assertIn("[HYBRID_SCRIPT_ATTEMPT]", finalized.execution_log)
+        self.assertIn("[HYBRID_AGENT_FALLBACK]", finalized.execution_log)
+        self.assertIn("UI script timed out", finalized.execution_log)
+
+    def test_start_run_record_keeps_selected_mode_and_ui_case(self):
+        record = start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-mode-audit",
+            execution_mode="script_only",
+            ui_test_case_id=321,
+        )
+        self.assertEqual(record.execution_mode, "script_only")
+        self.assertEqual(record.actual_execution_path, "bound_ui_script")
+        self.assertEqual(record.ui_test_case_id_snapshot, 321)
+
+        hybrid_without_script = start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-mode-hybrid-no-script",
+            execution_mode="hybrid",
+        )
+        self.assertEqual(
+            hybrid_without_script.actual_execution_path,
+            "agent_no_bound_script",
+        )
+        hybrid_with_script = start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-mode-hybrid-script",
+            execution_mode="hybrid",
+            ui_test_case_id=654,
+        )
+        self.assertEqual(
+            hybrid_with_script.actual_execution_path,
+            "hybrid_script_pending",
+        )
 
     def test_pending_button_case_requires_actual_button_assertion(self):
         testcase = TestCaseModel.objects.create(

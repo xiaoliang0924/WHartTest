@@ -763,6 +763,9 @@ class TestCaseRunRecordSerializer(serializers.ModelSerializer):
             "data_generation_run",
             "data_usage",
             "generate_playwright_script",
+            "execution_mode",
+            "actual_execution_path",
+            "ui_test_case_id_snapshot",
             "started_at",
             "completed_at",
         ]

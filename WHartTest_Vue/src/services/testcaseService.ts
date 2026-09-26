@@ -65,6 +65,16 @@ export interface TestCase {
   screenshot?: string; // 兼容旧的单个截图字段
   screenshots?: TestCaseScreenshot[]; // 新的多截图字段
   review_status?: ReviewStatus; // 审核状态
+  ui_test_case?: number | null;
+  ui_test_case_detail?: {
+    id: number;
+    name: string;
+    module_name?: string;
+    level?: string;
+    status?: number;
+    step_count?: number;
+  } | null;
+  execution_mode?: 'hybrid' | 'script_only' | 'ai_only';
   creator: number;
   sort_order?: number;
   creator_detail: {
@@ -110,8 +120,54 @@ export interface TestCaseRunRecord {
     evidence?: string;
   };
   generate_playwright_script?: boolean;
+  execution_mode?: 'hybrid' | 'script_only' | 'ai_only';
+  actual_execution_path?: 'hybrid_script_pending' | 'agent_browser' | 'bound_ui_script' | 'agent_fallback' | 'agent_no_bound_script' | '';
+  ui_test_case_id_snapshot?: number | null;
   started_at: string;
   completed_at?: string | null;
+}
+
+export interface AiDiagnosisResult {
+  root_cause_type: string;
+  root_cause_label?: string;
+  confidence?: number;
+  summary: string;
+  detailed_analysis?: string;
+  diagnosed_at?: string;
+  diagnosed_by?: string;
+  model_name?: string;
+  failure_step_info?: {
+    step_sort?: number;
+    page_name?: string;
+    element_name?: string;
+    operation_type?: string;
+    error_message?: string;
+  };
+  healing_suggestion?: {
+    can_self_heal: boolean;
+    element_id?: number | null;
+    element_name?: string;
+    current_locator_type?: string;
+    current_locator_value?: string;
+    suggested_locator_type: string;
+    suggested_locator_value: string;
+    explanation?: string;
+  };
+  defect_report?: {
+    is_real_bug: boolean;
+    title?: string;
+    severity?: string;
+    reproduction_summary?: string;
+    expected_vs_actual?: string;
+  };
+  [key: string]: unknown;
+}
+
+export interface ApplyHealingSuggestionRequest {
+  element_id?: number | null;
+  element_name?: string;
+  suggested_locator_type?: string;
+  suggested_locator_value: string;
 }
 
 // 创建测试用例请求参数
@@ -123,6 +179,8 @@ export interface CreateTestCaseRequest {
   module_id?: number | null; // 所属模块ID
   steps: Omit<TestCaseStep, 'id'>[];
   notes?: string; // 新增备注字段
+  ui_test_case?: number | null;
+  execution_mode?: 'hybrid' | 'script_only' | 'ai_only';
 }
 
 // 更新测试用例请求参数
@@ -135,6 +193,8 @@ export interface UpdateTestCaseRequest {
   steps?: TestCaseStep[];
   notes?: string; // 新增备注字段
   review_status?: ReviewStatus; // 审核状态
+  ui_test_case?: number | null;
+  execution_mode?: 'hybrid' | 'script_only' | 'ai_only';
 }
 
 // 分页参数接口
@@ -1485,6 +1545,29 @@ export const getTestCaseRunRecords = async (
     return {
       success: false,
       error: error.response?.data?.detail || error.message || '获取执行历史失败',
+    };
+  }
+};
+
+export const applyHealingSuggestion = async (
+  projectId: number,
+  testCaseId: number,
+  suggestion: ApplyHealingSuggestionRequest,
+): Promise<OperationResponse> => {
+  const accessToken = useAuthStore().getAccessToken;
+  if (!accessToken) return { success: false, error: '未登录或会话已过期' };
+  try {
+    const response = await axios.post(
+      `${API_BASE_URL}/projects/${projectId}/testcases/${testCaseId}/apply-healing/`,
+      suggestion,
+      { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } },
+    );
+    return { success: true, message: response.data?.message || '自愈建议已应用', statusCode: response.status };
+  } catch (error: any) {
+    return {
+      success: false,
+      error: error.response?.data?.detail || error.response?.data?.error || error.message || '应用自愈建议失败',
+      statusCode: error.response?.status,
     };
   }
 };

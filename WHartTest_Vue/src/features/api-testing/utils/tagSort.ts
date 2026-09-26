@@ -6,9 +6,9 @@ const parentTagRank = new Map<string, number>(
   PARENT_TAG_ORDER.map((name, index) => [name, index]),
 )
 
-export const sortApiTestCaseTags = <T extends Pick<ApiTestCaseTag, 'name'>>(
-  tags: T[] | undefined | null,
-): T[] => {
+export const sortApiTestCaseTags = (
+  tags: ApiTestCaseTag[] | undefined | null,
+): ApiTestCaseTag[] => {
   if (!tags?.length) {
     return []
   }

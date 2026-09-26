@@ -1588,7 +1588,7 @@ onMounted(async () => {
 
 // 保存页签到本地存储
 watch(() => tabsStore.tabs, () => {
-  tabsStore.saveToLocalStorage(projectStore.currentProjectId)
+  tabsStore.saveToLocalStorage()
 }, { deep: true })
 </script>
 

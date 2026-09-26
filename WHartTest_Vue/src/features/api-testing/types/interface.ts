@@ -2,11 +2,18 @@ import type { UserBrief } from './common';
 
 export type InterfaceType = 'http' | 'sql';
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
-export type InterfaceStatus = 'draft' | 'testing' | 'released' | 'deprecated' | 'disabled' | string;
+export type InterfaceStatus =
+  | 'self_testing'
+  | 'integrating'
+  | 'completed'
+  | 'deprecated'
+  // Keep values used by older imported interface records typed during migration.
+  | 'draft'
+  | 'testing'
+  | 'released'
+  | 'disabled';
 export type SqlMethod = 'fetchone' | 'fetchmany' | 'fetchall' | 'insert' | 'update' | 'delete';
 export type ApiBodyType = 'none' | 'form-data' | 'x-www-form-urlencoded' | 'raw' | 'binary';
-export type InterfaceStatus = 'self_testing' | 'integrating' | 'completed' | 'deprecated';
-
 export const DEFAULT_INTERFACE_STATUS: InterfaceStatus = 'self_testing';
 
 /** Single source of truth for interface lifecycle status (value/label/color). */

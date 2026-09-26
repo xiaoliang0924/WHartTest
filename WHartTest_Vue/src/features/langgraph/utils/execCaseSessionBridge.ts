@@ -7,6 +7,8 @@ export interface ExecCaseSessionContext {
   testCaseId?: number;
   projectId?: number;
   generatePlaywrightScript?: boolean;
+  executionMode?: 'hybrid' | 'script_only' | 'ai_only';
+  uiTestCaseId?: number | null;
   storedAt: number;
 }
 

@@ -47,6 +47,8 @@ from .permissions import (
 from .filters import TestCaseFilter, TestCaseSearchFilter  # 导入自定义过滤器
 from wharttest_django.pagination import StandardPagination
 from projects.models import ProjectMember
+from ui_automation.models import UiElement, UiTestCase
+from .ai_diagnosis_service import diagnose_execution_failure, apply_healing_to_element
 
 # 确保导入项目自定义的权限类
 from wharttest_django.permissions import HasModelPermission, permission_required
@@ -152,6 +154,63 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         project = get_object_or_404(Project, pk=project_pk)
         # 权限类 IsProjectMemberForTestCase 已经确保用户是项目成员
         serializer.save(creator=self.request.user, project=project)
+
+    @action(detail=True, methods=["post"], url_path="bind-ui-testcase")
+    def bind_ui_testcase(self, request, project_pk=None, pk=None):
+        """绑定或解绑当前项目中的 UI 自动化用例。"""
+        testcase = self.get_object()
+        ui_test_case_id = request.data.get("ui_test_case_id")
+        if ui_test_case_id in (None, ""):
+            testcase.ui_test_case = None
+        else:
+            try:
+                ui_test_case = UiTestCase.objects.get(
+                    pk=int(ui_test_case_id), project_id=testcase.project_id
+                )
+            except (TypeError, ValueError, UiTestCase.DoesNotExist):
+                return Response(
+                    {"ui_test_case_id": "UI 自动化用例不存在或不属于当前项目"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            testcase.ui_test_case = ui_test_case
+
+        execution_mode = request.data.get("execution_mode")
+        if execution_mode is not None:
+            allowed_modes = {value for value, _ in TestCase._meta.get_field("execution_mode").choices}
+            if execution_mode not in allowed_modes:
+                return Response(
+                    {"execution_mode": "不支持的执行模式"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            testcase.execution_mode = execution_mode
+        testcase.save(update_fields=["ui_test_case", "execution_mode", "updated_at"])
+        return Response(self.get_serializer(testcase).data)
+
+    @action(detail=True, methods=["post"], url_path="diagnose-failure")
+    def diagnose_failure(self, request, project_pk=None, pk=None):
+        """诊断绑定 UI 用例最近一次失败，或指定执行记录。"""
+        testcase = self.get_object()
+        try:
+            result = diagnose_execution_failure(
+                testcase,
+                ui_record_id=request.data.get("ui_execution_record_id"),
+                user=request.user,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result)
+
+    @action(detail=True, methods=["post"], url_path="apply-healing")
+    def apply_healing(self, request, project_pk=None, pk=None):
+        """将诊断建议应用到当前项目的 UI 元素定位。"""
+        testcase = self.get_object()
+        try:
+            result = apply_healing_to_element(testcase, request.data, user=request.user)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except UiElement.DoesNotExist:
+            return Response({"detail": "未找到待修复的 UI 元素"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(result)
 
     # create 和 update 方法将使用序列化器中定义的嵌套写入逻辑。
     # DRF 的 ModelViewSet 会自动调用 serializer.save()，

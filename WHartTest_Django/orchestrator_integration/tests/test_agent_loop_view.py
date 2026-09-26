@@ -1,7 +1,8 @@
 import os
 import tempfile
 import time
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
@@ -14,6 +15,7 @@ from langchain_core.outputs import ChatGenerationChunk
 
 from .. import agent_loop_view
 from ..agent_loop_view import (
+    _decode_sse_payload,
     _is_final_testcase_step_pass,
     _extract_helper_testcase_progress,
     _extract_helper_result_reason,
@@ -29,7 +31,17 @@ from ..agent_loop_view import (
     _force_save_generated_ui_case,
     _run_and_stream_remaining_helper_steps,
     _extract_testcase_step_from_tool_call,
+    _map_ui_script_results_to_testcase_steps,
 )
+
+
+class SsePayloadDecodeTests(SimpleTestCase):
+    def test_decodes_json_sse_payload(self):
+        payload = _decode_sse_payload('data: {"type":"complete","status":"pass"}\n\n')
+        self.assertEqual(payload, {"type": "complete", "status": "pass"})
+
+    def test_ignores_non_json_terminal_event(self):
+        self.assertIsNone(_decode_sse_payload("data: [DONE]\n\n"))
 
 
 class GeneratedUiCaseFollowupTests(SimpleTestCase):
@@ -43,7 +55,7 @@ class GeneratedUiCaseFollowupTests(SimpleTestCase):
         class BoundModel:
             async def ainvoke(self, messages):
                 self.messages = messages
-                return AIMessage(tool_calls=[{
+                return AIMessage(content="", tool_calls=[{
                     "name": "save_generated_ui_testcase",
                     "args": {"payload_json": '{"steps":[]}'},
                     "id": "save-ui-1",
@@ -60,9 +72,10 @@ class GeneratedUiCaseFollowupTests(SimpleTestCase):
         tool = SaveTool()
         messages = [
             HumanMessage(content="执行用例 1464"),
-            AIMessage(tool_calls=[{
+            AIMessage(content="", tool_calls=[{
                 "name": "execute_skill_script",
                 "args": {"command": "await page.getByRole('button', {name: '返回'}).click();"},
+                "id": "browser-call-1",
             }]),
             ToolMessage(
                 content="RESULT=PASS: 页面返回成功",
@@ -84,6 +97,60 @@ class GeneratedUiCaseFollowupTests(SimpleTestCase):
         self.assertIn("getByRole", prompt_text)
         self.assertIn("RESULT=PASS", prompt_text)
 
+
+    def test_successful_fast_finish_generates_and_persists_ui_binding(self):
+        class QuerySet:
+            def __init__(self):
+                self.values = iter([None, 321])
+
+            def values_list(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                return next(self.values)
+
+        class Record:
+            status = "pass"
+            summary = "测试执行结果：通过"
+
+            def save(self, update_fields=None):
+                self.saved_fields = update_fields
+
+        record = Record()
+        query_set = QuerySet()
+        messages = [
+            AIMessage(content="", tool_calls=[{
+                "name": "execute_skill_script",
+                "args": {"command": "await page.getByRole('button').click();"},
+                "id": "browser-call-1",
+            }]),
+            ToolMessage(
+                content="RESULT=PASS: 最后一步完成",
+                tool_call_id="browser-call-1",
+                name="execute_skill_script",
+            ),
+        ]
+
+        with patch("testcases.models.TestCase.objects.filter", return_value=query_set), patch(
+            "orchestrator_integration.agent_loop_view._force_save_generated_ui_case",
+            new_callable=AsyncMock,
+            return_value={"status": "success", "ui_test_case_id": 321},
+        ) as save_generated:
+            result = async_to_sync(agent_loop_view._finalize_generated_ui_case)(
+                llm=object(),
+                tools=[],
+                messages=messages,
+                test_case_id=1478,
+                project_id=1,
+                record=record,
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["ui_test_case_id"], 321)
+        self.assertEqual(record.saved_fields, ["summary"])
+        self.assertIn("UI 自动化用例 #321 已生成并绑定", record.summary)
+        save_generated.assert_awaited_once()
+
     def test_followup_reports_missing_browser_evidence_without_calling_llm(self):
         class SaveTool:
             name = "save_generated_ui_testcase"
@@ -100,6 +167,53 @@ class GeneratedUiCaseFollowupTests(SimpleTestCase):
 
         self.assertEqual(result["status"], "failed")
         self.assertIn("浏览器操作证据", result["message"])
+
+
+class ScriptOnlyResultMappingTests(SimpleTestCase):
+    def setUp(self):
+        self.steps = [
+            SimpleNamespace(step_number=1, description="登录", expected_result="进入首页"),
+            SimpleNamespace(step_number=2, description="打开工单", expected_result="进入详情"),
+        ]
+
+    def test_maps_successful_recorder_groups_to_functional_steps(self):
+        results, status, _reason = _map_ui_script_results_to_testcase_steps(
+            self.steps,
+            [
+                {"group": 1, "status": "success", "description": "输入账号"},
+                {"group": 2, "status": "success", "description": "点击工单"},
+            ],
+            ui_status=2,
+        )
+
+        self.assertEqual(status, "pass")
+        self.assertEqual([item["status"] for item in results], ["pass", "pass"])
+
+    def test_failed_recorder_action_fails_its_functional_step(self):
+        results, status, reason = _map_ui_script_results_to_testcase_steps(
+            self.steps,
+            [
+                {"group": 1, "status": "success"},
+                {"group": 2, "status": "failed", "message": "元素未找到"},
+            ],
+            ui_status=3,
+            ui_error="元素未找到",
+        )
+
+        self.assertEqual(status, "fail")
+        self.assertEqual(reason, "元素未找到")
+        self.assertEqual([item["status"] for item in results], ["pass", "fail"])
+
+    def test_group_count_mismatch_fails_closed(self):
+        results, status, reason = _map_ui_script_results_to_testcase_steps(
+            self.steps,
+            [{"group": 1, "status": "success"}],
+            ui_status=2,
+        )
+
+        self.assertEqual(status, "fail")
+        self.assertIn("无法逐步对应", reason)
+        self.assertEqual([item["status"] for item in results], ["fail", "skip"])
 
 
 class CompletionHelperProgressTests(SimpleTestCase):
@@ -557,8 +671,8 @@ class LLMFriendlyErrorTests(SimpleTestCase):
         self.assertEqual(result["message"], "当前模型服务请求过于频繁，请稍后重试。")
 
     def test_api_timeout_returns_friendly_payload(self):
-        exc = Exception("Request timed out.")
-        exc.__class__.__name__ = "APITimeoutError"
+        api_timeout_error = type("APITimeoutError", (Exception,), {})
+        exc = api_timeout_error("Request timed out.")
 
         result = get_user_friendly_llm_error(exc)
 

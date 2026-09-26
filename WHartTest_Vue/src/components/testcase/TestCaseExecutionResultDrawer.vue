@@ -26,6 +26,8 @@
           <a-tag :color="statusColor">{{ statusLabel }}</a-tag>
           <span v-if="record?.started_at" class="meta">{{ text.startedAt }}：{{ formatTime(record.started_at) }}</span>
           <span v-if="record?.completed_at" class="meta">{{ text.completedAt }}：{{ formatTime(record.completed_at) }}</span>
+          <span v-if="record?.execution_mode" class="meta">{{ text.selectedMode }}：{{ executionModeLabel(record.execution_mode) }}</span>
+          <span v-if="record" class="meta">{{ text.actualPath }}：{{ actualPathLabel(record.actual_execution_path) }}</span>
           <a-spin v-if="isRunning" size="small" />
         </div>
         <a-space class="top-actions" :size="8">
@@ -165,6 +167,10 @@ const text = computed(() => (
         noCase: 'No test case selected',
         startedAt: 'Started',
         completedAt: 'Completed',
+        selectedMode: 'Selected mode',
+        actualPath: 'Actual path',
+        executionModes: { hybrid: 'Smart dual-mode', script_only: 'UI script only', ai_only: 'AI exploration only' },
+        executionPaths: { hybrid_script_pending: 'Hybrid: trying bound UI script', agent_browser: 'AI Agent browser execution', bound_ui_script: 'Bound UI script execution', agent_fallback: 'UI script failed; AI Agent took over', agent_no_bound_script: 'No bound script; AI Agent execution', unknown: 'Not recorded' },
         runningHint: 'Execution in progress. Results will refresh automatically.',
         failedHint: 'Execution failed',
         summary: 'Summary',
@@ -200,6 +206,10 @@ const text = computed(() => (
         noCase: '未选择测试用例',
         startedAt: '开始时间',
         completedAt: '完成时间',
+        selectedMode: '选择模式',
+        actualPath: '实际执行路径',
+        executionModes: { hybrid: '智能双模', script_only: '仅 UI 自动化脚本', ai_only: '纯 AI 探索' },
+        executionPaths: { hybrid_script_pending: '智能双模：优先尝试绑定 UI 脚本', agent_browser: 'AI Agent 浏览器执行', bound_ui_script: '绑定的 UI 脚本执行', agent_fallback: 'UI 脚本失败，已由 AI Agent 接管', agent_no_bound_script: '未绑定 UI 脚本，由 AI Agent 执行', unknown: '历史记录未记录' },
         runningHint: '用例正在执行中，结果将自动刷新。',
         failedHint: '用例执行失败',
         summary: '结果摘要',
@@ -242,6 +252,16 @@ const dataUsageAlertType = computed(() => {
   if (status === 'referenced') return 'warning';
   return 'info';
 });
+
+const executionModeLabel = (mode?: string) => {
+  const labels = text.value.executionModes as Record<string, string>;
+  return labels[mode || ''] || mode || text.value.executionPaths.unknown;
+};
+
+const actualPathLabel = (path?: string) => {
+  const labels = text.value.executionPaths as Record<string, string>;
+  return labels[path || ''] || labels.unknown;
+};
 
 const resolveSessionId = (): string | null => {
   if (props.preparing) return props.sessionId?.trim() || null;

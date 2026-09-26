@@ -85,6 +85,8 @@ export const elementApi = {
     request.patch<UiElement>(`${BASE_URL}/elements/${id}/`, data),
 
   delete: (id: number) => request.delete(`${BASE_URL}/elements/${id}/`),
+
+  batchDelete: (ids: number[]) => request.post(`${BASE_URL}/elements/batch-delete/`, { ids }),
 }
 
 // ==================== 页面步骤管理 ====================

@@ -123,6 +123,21 @@ def create_flushed_sse(data_dict: Dict[str, Any]) -> str:
     return create_sse_data(data_dict) + (":" + (" " * 4096) + "\n\n")
 
 
+def _decode_sse_payload(event: str) -> Optional[Dict[str, Any]]:
+    """Decode one JSON data event produced by ``create_sse_data``."""
+    if not isinstance(event, str):
+        return None
+    for line in event.splitlines():
+        if not line.startswith("data:"):
+            continue
+        try:
+            payload = json.loads(line[5:].strip())
+        except (TypeError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
 async def _persist_helper_step_to_checkpoint(
     *,
     agent,
@@ -217,6 +232,257 @@ async def _complete_testcase_run_with_report(
     return record, injected
 
 
+def _map_ui_script_results_to_testcase_steps(
+    case_steps, raw_results, *, ui_status: int, ui_error: str = ""
+):
+    """Map recorder page-step groups to functional steps; fail closed on mismatch."""
+    groups: dict[int, list[dict]] = {}
+    for index, item in enumerate(raw_results or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        try:
+            group_no = int(item.get("group") or index)
+        except (TypeError, ValueError):
+            group_no = index
+        groups.setdefault(group_no, []).append(item)
+
+    expected_count = len(case_steps)
+    actual_count = len(groups)
+    alignment_error = ""
+    if expected_count != actual_count:
+        alignment_error = (
+            f"绑定 UI 用例包含 {actual_count} 组页面步骤，功能用例有 {expected_count} 步，"
+            "无法逐步对应；为避免误报通过，本次按未对齐处理。"
+        )
+
+    step_results = []
+    for index, step in enumerate(case_steps, start=1):
+        group_items = groups.get(index, [])
+        group_failed = any(
+            str(item.get("status") or "").lower() not in {"success", "pass", "passed"}
+            for item in group_items
+        )
+        if (
+            ui_status != 2
+            and index == actual_count
+            and group_items
+            and not group_failed
+        ):
+            group_failed = True
+        if alignment_error:
+            if index <= actual_count:
+                status, actual = "fail", alignment_error
+            else:
+                status, actual = "skip", "无对应的 UI 自动化步骤"
+        elif group_failed or not group_items:
+            status, actual = "fail", ui_error or alignment_error or "对应 UI 自动化步骤未全部通过"
+        else:
+            status, actual = "pass", "绑定 UI 自动化脚本步骤通过"
+        step_results.append({
+            "step_number": step.step_number,
+            "description": step.description or "",
+            "expected_result": step.expected_result or "",
+            "actual_result": actual,
+            "status": status,
+        })
+
+    passed = (
+        ui_status == 2
+        and not alignment_error
+        and bool(case_steps)
+        and len(step_results) == expected_count
+        and all(item["status"] == "pass" for item in step_results)
+    )
+    failure_reason = alignment_error or ui_error or "UI 自动化脚本存在失败或未执行步骤"
+    return step_results, ("pass" if passed else "fail"), ("" if passed else failure_reason)
+
+
+async def _run_testcase_with_bound_ui_script(
+    *, request, project, session_id: str, thread_id: str, chat_session,
+    testcase_id: int, ui_test_case_id: int, display_message: str,
+    data_generation_run=None,
+    execution_mode: str = "script_only",
+    actual_execution_path: str = "bound_ui_script",
+    stream_mode: str = "ui_script_only",
+    suppress_failure_report: bool = False,
+    emit_start: bool = True,
+):
+    """Run the bound UI case directly through the recorder, without invoking an LLM."""
+    from django.utils import timezone
+    from langgraph_integration.models import ChatMessage
+    from testcases.models import TestCase
+    from testcases.run_record_service import build_execution_result_report, build_pre_data_usage
+    from testcases.models import TestCaseRunRecord
+    from ui_automation.consumers import SocketUserManager
+    from ui_automation.models import UiExecutionRecord, UiTestCase
+
+    user = request.user
+    ui_case = await sync_to_async(
+        lambda: UiTestCase.objects.filter(id=ui_test_case_id, project=project).first()
+    )()
+    if ui_case is None:
+        raise ValueError("绑定的 UI 自动化用例不存在或不属于当前项目")
+
+    consumer = SocketUserManager.get_web_user(user.username)
+    if consumer is None:
+        raise RuntimeError("当前用户的 UI 自动化连接不可用，请刷新页面后重试")
+    active_task = getattr(consumer, "_recorder_exec_task", None)
+    if active_task is not None and not active_task.done():
+        raise RuntimeError("当前用户已有 UI 自动化任务正在执行，请稍后重试")
+
+    started_at = timezone.now()
+    current_task = asyncio.current_task()
+    consumer._recorder_exec_task = current_task
+    if emit_start:
+        yield create_sse_data({
+            "type": "start",
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "project_id": str(project.id),
+            "display_message": display_message,
+            "mode": stream_mode,
+            "created_at": chat_session.created_at.isoformat() if chat_session and chat_session.created_at else None,
+        })
+    yield create_sse_data({"type": "message", "data": f"前置数据已准备，开始执行绑定的 UI 自动化用例：{ui_case.name}"})
+
+    try:
+        await consumer._execute_via_recorder(
+            "case",
+            {
+                "case_id": int(ui_test_case_id),
+                "execution_request_id": session_id,
+                "actuator_id": "recorder-browser",
+                "executor_id": int(user.id),
+                "executor_name": user.username,
+            },
+            user.username,
+        )
+
+        def load_result():
+            return (
+                UiExecutionRecord.objects.filter(
+                    test_case_id=ui_test_case_id,
+                    executor_id=user.id,
+                    created_at__gte=started_at,
+                ).order_by("-created_at").first()
+            )
+
+        ui_record = await sync_to_async(load_result)()
+        if ui_record is None:
+            raise RuntimeError("UI 脚本执行结束，但未生成 UI 执行记录")
+
+        def build_case_report():
+            case = TestCase.objects.prefetch_related("steps").get(id=testcase_id)
+            case_steps = list(case.steps.all().order_by("step_number"))
+            raw_results = ui_record.step_results if isinstance(ui_record.step_results, list) else []
+            step_results, final_status, failure_reason = _map_ui_script_results_to_testcase_steps(
+                case_steps,
+                raw_results,
+                ui_status=ui_record.status,
+                ui_error=ui_record.error_message or "",
+            )
+            summary = build_execution_result_report(
+                case,
+                status=final_status,
+                step_results=step_results,
+                fail_reason=failure_reason,
+                extra_note=(
+                    "结果由绑定的 UI 自动化脚本逐组执行产生。"
+                    if final_status == "pass"
+                    else "请检查 UI 脚本步骤与功能用例步骤是否对应，并查看 UI 执行记录。"
+                ),
+            )
+            return case, step_results, summary, final_status, failure_reason
+
+        case, step_results, summary, final_status, failure_reason = await sync_to_async(build_case_report)()
+
+        def persist_result():
+            run_record = TestCaseRunRecord.objects.filter(session_id=session_id).first()
+            if run_record is None:
+                from testcases.run_record_service import start_testcase_run_record
+                run_record = start_testcase_run_record(
+                    testcase_id=testcase_id,
+                    user_id=user.id,
+                    session_id=session_id,
+                    execution_mode=execution_mode,
+                    actual_execution_path=actual_execution_path,
+                    ui_test_case_id=ui_test_case_id,
+                    data_generation_run_id=getattr(data_generation_run, "id", None),
+                )
+            if run_record is None:
+                return None
+            run_record.status = final_status
+            run_record.summary = summary[:8000]
+            run_record.step_results = step_results
+            run_record.actual_execution_path = actual_execution_path
+            run_record.execution_log = (
+                f"执行策略：{execution_mode}\n"
+                f"实际执行路径：{actual_execution_path}\n"
+                f"UI 用例 ID：{ui_test_case_id}\n"
+                f"UI 执行记录 ID：{ui_record.id}\n"
+                f"{ui_record.log or ''}\n"
+                f"失败原因：{failure_reason if final_status != 'pass' else '无'}"
+            )[:8000]
+            run_record.data_usage = build_pre_data_usage(
+                run_record.data_generation_run,
+                "",
+                execution_transcript=run_record.execution_log,
+            )
+            run_record.completed_at = timezone.now()
+            run_record.save(update_fields=[
+                "status", "summary", "step_results", "execution_log", "data_usage",
+                "actual_execution_path", "completed_at",
+            ])
+            return run_record
+
+        run_record = await sync_to_async(persist_result)()
+        report_message_id = f"ui-script-result-{session_id}"
+
+        def persist_chat_messages():
+            ChatMessage.objects.get_or_create(
+                session=chat_session,
+                user=user,
+                message_id=f"ui-script-human-{session_id}",
+                defaults={
+                    "role": "human",
+                    "content": display_message,
+                    "metadata": {"source": "testcase_ui_script"},
+                },
+            )
+            ChatMessage.objects.update_or_create(
+                session=chat_session,
+                user=user,
+                message_id=report_message_id,
+                defaults={
+                    "role": "ai",
+                    "content": summary,
+                    "metadata": {
+                        "source": "testcase_ui_script",
+                        "run_record_id": getattr(run_record, "id", None),
+                        "ui_execution_record_id": ui_record.id,
+                    },
+                },
+            )
+
+        if not (suppress_failure_report and final_status != "pass"):
+            await sync_to_async(persist_chat_messages)()
+        yield create_sse_data({"type": "stream", "data": summary})
+        yield create_sse_data({
+            "type": "complete",
+            "total_steps": len(step_results),
+            "test_case_run": {
+                "status": final_status,
+                "summary": summary,
+                "run_record_id": getattr(run_record, "id", None),
+                "ui_execution_record_id": ui_record.id,
+            },
+        })
+        yield "data: [DONE]\n\n"
+    finally:
+        if getattr(consumer, "_recorder_exec_task", None) is current_task:
+            consumer._recorder_exec_task = None
+
+
 def _build_ui_generation_observations(messages, *, max_chars: int = 80_000) -> str:
     """Keep only this run's browser execution evidence for the UI-case save pass."""
     chunks = []
@@ -309,6 +575,119 @@ async def _force_save_generated_ui_case(*, llm, tools, messages) -> Dict[str, An
     except Exception as exc:
         logger.exception("UI testcase generation follow-up save failed")
         return {"status": "failed", "message": f"UI 用例保存失败：{str(exc)[:500]}"}
+
+
+async def _finalize_generated_ui_case(
+    *, llm, tools, messages, test_case_id, project_id, record
+) -> Dict[str, Any]:
+    """Generate, bind, and report a UI case after any successful testcase finish path."""
+    if not test_case_id:
+        return {
+            "enabled": True,
+            "status": "failed",
+            "message": "缺少测试用例 ID，无法绑定 UI 自动化用例。",
+        }
+    from testcases.models import TestCase
+
+    ui_case_id = None
+    generation_error = ""
+    try:
+        ui_case_id = await sync_to_async(
+            TestCase.objects.filter(
+                id=int(test_case_id), project_id=int(project_id)
+            ).values_list("ui_test_case_id", flat=True).first
+        )()
+    except Exception:
+        logger.exception(
+            "AgentLoopStreamAPI: failed to verify generated UI case binding; testcase=%s",
+            test_case_id,
+        )
+
+    if not ui_case_id and record and record.status == "pass":
+        generated = await _force_save_generated_ui_case(
+            llm=llm, tools=tools, messages=messages
+        )
+        reported_ui_case_id = None
+        if generated.get("status") == "success":
+            reported_ui_case_id = generated.get("ui_test_case_id")
+            if not reported_ui_case_id:
+                generation_error = "保存工具标记成功，但没有返回 UI 用例 ID。"
+            logger.info(
+                "AgentLoopStreamAPI: post-run UI case save completed; testcase=%s ui_case=%s",
+                test_case_id,
+                reported_ui_case_id,
+            )
+        else:
+            generation_error = str(
+                generated.get("message") or "保存工具未返回成功结果。"
+            )[:700]
+            logger.warning(
+                "AgentLoopStreamAPI: post-run UI case generation failed; testcase=%s reason=%s",
+                test_case_id,
+                generation_error,
+            )
+        try:
+            ui_case_id = await sync_to_async(
+                TestCase.objects.filter(
+                    id=int(test_case_id), project_id=int(project_id)
+                ).values_list("ui_test_case_id", flat=True).first
+            )()
+        except Exception:
+            logger.exception(
+                "AgentLoopStreamAPI: failed to verify post-run UI binding; testcase=%s",
+                test_case_id,
+            )
+        if reported_ui_case_id and not ui_case_id and not generation_error:
+            generation_error = "保存工具报告成功，但数据库中未查到绑定记录。"
+
+    if ui_case_id:
+        note = (
+            "\n\n### UI 自动化用例生成\n"
+            f"成功：UI 自动化用例 #{ui_case_id} 已生成并绑定。"
+        )
+        if record and "### UI 自动化用例生成" not in (record.summary or ""):
+            record.summary = (record.summary or "") + note
+            await sync_to_async(record.save)(update_fields=["summary"])
+        return {
+            "enabled": True,
+            "status": "success",
+            "ui_test_case_id": ui_case_id,
+            "message": f"UI 自动化用例 #{ui_case_id} 已生成并绑定。",
+        }
+
+    if record and record.status == "pass":
+        note = (
+            "\n\n### UI 自动化用例生成\n"
+            "失败：功能用例已通过，但本次执行没有成功保存并绑定 UI 自动化用例。"
+            + (f"原因：{generation_error}。" if generation_error else "")
+        )
+        if "### UI 自动化用例生成" not in (record.summary or ""):
+            record.summary = (record.summary or "") + note
+            await sync_to_async(record.save)(update_fields=["summary"])
+        return {
+            "enabled": True,
+            "status": "failed",
+            "message": "功能用例通过，但未检测到已保存并绑定的 UI 自动化用例。",
+            "reason": generation_error or None,
+        }
+
+    return {
+        "enabled": True,
+        "status": "skipped",
+        "message": "功能用例未通过，未生成 UI 自动化用例。",
+    }
+
+
+async def _get_agent_state_messages(agent, invoke_config):
+    """Read the final browser tool evidence for fast-finish branches."""
+    if agent is None or invoke_config is None:
+        return []
+    try:
+        state = await agent.aget_state(invoke_config)
+        return state.values.get("messages", []) if state.values else []
+    except Exception:
+        logger.exception("AgentLoopStreamAPI: failed to read messages for UI case generation")
+        return []
 
 
 # ============== 统一响应辅助函数 ==============
@@ -1572,6 +1951,8 @@ class AgentLoopStreamAPIView(View):
         test_case_id: Optional[int] = None,
         use_pytest: bool = True,
         file_ids: Optional[List[int]] = None,
+        execution_mode: str = "ai_only",
+        ui_test_case_id: Optional[int] = None,
     ):
         """
         创建 SSE 流式生成器（LangChain v1 重构版）
@@ -1591,14 +1972,298 @@ class AgentLoopStreamAPIView(View):
                     "session_id": session_id,
                 }
             )
-        try:
-            attached_files = await sync_to_async(validate_file_ids)(file_ids, project, request.user)
-            llm_attachment_context = await sync_to_async(build_llm_attachment_context)(attached_files)
-            if file_ids:
-                await sync_to_async(sync_file_references)(file_ids, project, FileReference.REF_LLM_CHAT, session_id, request.user)
-        except Exception as exc:
-            yield create_sse_data({"type": "error", "message": f"附件校验失败: {exc}"})
-            return
+        llm_attachment_context = ""
+        if not (test_case_id and execution_mode == "script_only"):
+            try:
+                attached_files = await sync_to_async(validate_file_ids)(file_ids, project, request.user)
+                llm_attachment_context = await sync_to_async(build_llm_attachment_context)(attached_files)
+                if file_ids:
+                    await sync_to_async(sync_file_references)(file_ids, project, FileReference.REF_LLM_CHAT, session_id, request.user)
+            except Exception as exc:
+                yield create_sse_data({"type": "error", "message": f"附件校验失败: {exc}"})
+                return
+
+        # Script-only is a distinct execution route: prepare data first, then
+        # invoke the bound recorder case. It deliberately returns before LLM,
+        # MCP, knowledge-tool, and Agent initialization.
+        if test_case_id and (
+            execution_mode == "script_only"
+            or (execution_mode == "hybrid" and ui_test_case_id)
+        ):
+            if execution_mode == "script_only" and not ui_test_case_id:
+                yield create_sse_data({
+                    "type": "error",
+                    "message": "仅执行 UI 自动化脚本需要先绑定 UI 自动化用例",
+                })
+                return
+
+            prompt_obj = None
+            from langgraph_integration.models import ChatMessage
+
+            if prompt_id:
+                try:
+                    prompt_obj = await sync_to_async(UserPrompt.objects.get)(
+                        id=prompt_id, user=request.user, is_active=True
+                    )
+                except UserPrompt.DoesNotExist:
+                    pass
+            chat_session, _ = await sync_to_async(ChatSession.objects.get_or_create)(
+                session_id=session_id,
+                defaults={
+                    "user": request.user,
+                    "project": project,
+                    "prompt": prompt_obj,
+                    "title": f"新对话 - {user_message[:30]}",
+                },
+            )
+            from data_generation.testcase_pre_data import run_testcase_pre_data_by_id
+            from testcases.run_record_service import (
+                block_testcase_run_record,
+                start_testcase_run_record,
+            )
+
+            try:
+                pre_data_result = await sync_to_async(run_testcase_pre_data_by_id)(
+                    int(test_case_id), user_id=request.user.id
+                )
+            except Exception as exc:
+                logger.exception(
+                    "AgentLoopStreamAPI: script-only pre-data failed, case=%s",
+                    test_case_id,
+                )
+                yield create_sse_data({"type": "error", "message": f"前置数据准备异常：{exc}"})
+                return
+
+            if pre_data_result.blocked:
+                display_message = await sync_to_async(
+                    _build_testcase_execution_display_message
+                )(int(test_case_id))
+                await sync_to_async(start_testcase_run_record)(
+                    testcase_id=int(test_case_id),
+                    user_id=request.user.id,
+                    session_id=session_id,
+                    generate_playwright_script=bool(generate_playwright_script),
+                    execution_mode=execution_mode,
+                    ui_test_case_id=ui_test_case_id,
+                )
+                record = await sync_to_async(block_testcase_run_record)(
+                    session_id=session_id, reason=pre_data_result.block_message
+                )
+                terminal_message = (
+                    "测试数据准备失败，已中止执行。\n\n"
+                    f"{pre_data_result.block_message}"
+                )
+
+                def persist_blocked_messages():
+                    ChatMessage.objects.get_or_create(
+                        session=chat_session,
+                        user=request.user,
+                        message_id=f"predata-fail-human-{session_id}",
+                        defaults={
+                            "role": "human",
+                            "content": display_message or user_message,
+                            "metadata": {"source": "pre_data_blocked"},
+                        },
+                    )
+                    ChatMessage.objects.update_or_create(
+                        session=chat_session,
+                        user=request.user,
+                        message_id=f"predata-fail-ai-{session_id}",
+                        defaults={
+                            "role": "ai",
+                            "content": terminal_message,
+                            "metadata": {
+                                "source": "pre_data_blocked",
+                                "run_record_id": getattr(record, "id", None),
+                                "uuid": str(uuid.uuid4()),
+                            },
+                        },
+                    )
+
+                await sync_to_async(persist_blocked_messages)()
+                yield create_sse_data({
+                    "type": "start", "session_id": session_id,
+                    "thread_id": session_id, "project_id": project_id,
+                    "display_message": display_message,
+                    "mode": "ui_script_only" if execution_mode == "script_only" else "agent_loop",
+                    "created_at": chat_session.created_at.isoformat() if chat_session.created_at else None,
+                })
+                yield create_sse_data({"type": "stream", "data": terminal_message, "pre_data_status": "failed"})
+                yield create_sse_data({
+                    "type": "complete", "total_steps": 0,
+                    "pre_data_status": "failed",
+                    "test_case_run": {
+                        "status": record.status if record else "error",
+                        "summary": record.summary if record else terminal_message,
+                    },
+                })
+                yield "data: [DONE]\n\n"
+                return
+
+            pre_data_run = pre_data_result.run
+            if pre_data_run is not None:
+                plan_name = await sync_to_async(
+                    lambda: pre_data_run.plan.name if pre_data_run.plan_id else ""
+                )()
+                yield create_sse_data({
+                    "type": "pre_data_complete",
+                    "status": pre_data_run.status,
+                    "plan_name": plan_name,
+                    "source": pre_data_result.resolution.source,
+                })
+
+            display_message = await sync_to_async(
+                _build_testcase_execution_display_message
+            )(int(test_case_id), pre_data_run)
+            await sync_to_async(start_testcase_run_record)(
+                testcase_id=int(test_case_id),
+                user_id=request.user.id,
+                session_id=session_id,
+                generate_playwright_script=bool(generate_playwright_script),
+                execution_mode=execution_mode,
+                ui_test_case_id=ui_test_case_id,
+                data_generation_run_id=getattr(pre_data_run, "id", None),
+            )
+            if execution_mode == "hybrid":
+                attempt_events = []
+                terminal_events = []
+                attempt_error = ""
+                try:
+                    async for event in _run_testcase_with_bound_ui_script(
+                        request=request,
+                        project=project,
+                        session_id=session_id,
+                        thread_id=thread_id,
+                        chat_session=chat_session,
+                        testcase_id=int(test_case_id),
+                        ui_test_case_id=int(ui_test_case_id),
+                        display_message=display_message or user_message,
+                        data_generation_run=pre_data_run,
+                        execution_mode="hybrid",
+                        actual_execution_path="bound_ui_script",
+                        stream_mode="agent_loop",
+                        suppress_failure_report=True,
+                        emit_start=True,
+                    ):
+                        payload = _decode_sse_payload(event)
+                        if payload and payload.get("type") in {"stream", "complete"}:
+                            terminal_events.append(event)
+                        elif isinstance(event, str) and event.strip() == "data: [DONE]":
+                            terminal_events.append(event)
+                        else:
+                            yield event
+                except Exception as exc:
+                    attempt_error = str(exc)[:1000]
+                    logger.warning(
+                        "AgentLoopStreamAPI: hybrid UI script failed; handing off to Agent, case=%s: %s",
+                        test_case_id,
+                        attempt_error,
+                        exc_info=True,
+                    )
+
+                attempt_status = None
+                attempt_summary = ""
+                for event in terminal_events:
+                    payload = _decode_sse_payload(event)
+                    if payload and payload.get("type") == "complete":
+                        run_result = payload.get("test_case_run") or {}
+                        attempt_status = run_result.get("status")
+                        attempt_summary = str(run_result.get("summary") or "")
+                if attempt_status == "pass":
+                    for event in terminal_events:
+                        yield event
+                    return
+
+                from testcases.models import TestCaseRunRecord
+
+                def prepare_agent_fallback():
+                    record = TestCaseRunRecord.objects.get(session_id=session_id)
+                    script_log = record.execution_log or attempt_summary or attempt_error
+                    record.status = "running"
+                    record.summary = ""
+                    record.step_results = []
+                    record.completed_at = None
+                    record.injected_report = False
+                    record.actual_execution_path = "agent_fallback"
+                    record.execution_log = (
+                        "[HYBRID_SCRIPT_ATTEMPT]\n" + str(script_log)
+                    )[:8000]
+                    record.data_usage = {}
+                    record.save(update_fields=[
+                        "status", "summary", "step_results", "completed_at",
+                        "injected_report", "actual_execution_path", "execution_log",
+                        "data_usage",
+                    ])
+                    return record.execution_log
+
+                fallback_trace = await sync_to_async(prepare_agent_fallback)()
+                failure_detail = attempt_error or attempt_summary or "绑定 UI 脚本未通过或未返回完成结果。"
+                yield create_sse_data({
+                    "type": "message",
+                    "data": "绑定 UI 脚本未通过，智能双模正在切换 AI Agent 接管。\n"
+                    + failure_detail[:1600],
+                })
+                hybrid_fallback_context = (
+                    "\n\n## 智能双模脚本优先阶段结果\n"
+                    "绑定的 UI 自动化脚本已执行但未通过；不要将脚本尝试视为功能用例通过。"
+                    "现在请由 AI Agent 继续完成原功能用例全部步骤。前置造数已经完成，"
+                    "必须复用本次生成的数据，不得再次执行造数。\n"
+                    f"脚本失败摘要：{failure_detail[:1600]}\n"
+                    f"脚本审计日志：{fallback_trace[-4000:]}"
+                )
+
+                async def finalize_hybrid_fallback_error(reason: str):
+                    from testcases.run_record_service import finalize_testcase_run_record
+
+                    return await sync_to_async(finalize_testcase_run_record)(
+                        session_id=session_id,
+                        error_message=f"AI Agent 接管失败：{reason}",
+                    )
+
+                hybrid_start_emitted = True
+                pre_data_complete_emitted = pre_data_run is not None
+            else:
+                hybrid_fallback_context = ""
+                pre_data_complete_emitted = pre_data_run is not None
+
+            try:
+                if execution_mode == "script_only":
+                    async for event in _run_testcase_with_bound_ui_script(
+                        request=request,
+                        project=project,
+                        session_id=session_id,
+                        thread_id=thread_id,
+                        chat_session=chat_session,
+                        testcase_id=int(test_case_id),
+                        ui_test_case_id=int(ui_test_case_id),
+                        display_message=display_message or user_message,
+                        data_generation_run=pre_data_run,
+                    ):
+                        yield event
+            except Exception as exc:
+                logger.exception(
+                    "AgentLoopStreamAPI: script-only UI execution failed, case=%s ui_case=%s",
+                    test_case_id, ui_test_case_id,
+                )
+                from testcases.run_record_service import finalize_testcase_run_record
+
+                record = await sync_to_async(finalize_testcase_run_record)(
+                    session_id=session_id,
+                    error_message=f"UI 自动化脚本执行失败：{exc}",
+                )
+                summary = record.summary if record else f"UI 自动化脚本执行失败：{exc}"
+                yield create_sse_data({"type": "stream", "data": summary})
+                yield create_sse_data({
+                    "type": "complete", "total_steps": len(record.step_results or []) if record else 0,
+                    "test_case_run": {
+                        "status": record.status if record else "error",
+                        "summary": summary,
+                        "run_record_id": getattr(record, "id", None),
+                    },
+                })
+                yield "data: [DONE]\n\n"
+            if execution_mode == "script_only":
+                return
 
         # 1. 获取 LLM 配置
         try:
@@ -1607,6 +2272,8 @@ class AgentLoopStreamAPIView(View):
             context_limit = active_config.context_limit or 128000
             model_name = active_config.name or "gpt-4o"
         except LLMConfig.DoesNotExist:
+            if locals().get("hybrid_fallback_context"):
+                await finalize_hybrid_fallback_error("没有可用的 LLM 配置")
             yield create_sse_data(
                 {"type": "error", "message": "No active LLM configuration found"}
             )
@@ -1614,6 +2281,10 @@ class AgentLoopStreamAPIView(View):
 
         # 2. 验证多模态支持
         if uploaded_images_base64 and not active_config.supports_vision:
+            if locals().get("hybrid_fallback_context"):
+                await finalize_hybrid_fallback_error(
+                    f"模型 {active_config.name} 不支持图片输入"
+                )
             yield create_sse_data(
                 {
                     "type": "error",
@@ -1756,6 +2427,8 @@ class AgentLoopStreamAPIView(View):
             effective_prompt, prompt_source = await get_effective_system_prompt_async(
                 request.user, prompt_id, project
             )
+            if locals().get("hybrid_fallback_context"):
+                effective_prompt = (effective_prompt or "") + hybrid_fallback_context
 
             # 8.1 如果需要生成脚本，追加脚本生成指令
             if generate_playwright_script:
@@ -1765,16 +2438,18 @@ class AgentLoopStreamAPIView(View):
                 logger.info(f"AgentLoopStreamAPI: 已追加脚本生成指令")
 
             # 8.15 用例管理单条执行：自动造数准备前置数据
-            pre_data_run_id = None
-            pre_data_run = None
+            pre_data_result = locals().get("pre_data_result")
+            pre_data_run = getattr(pre_data_result, "run", None)
+            pre_data_run_id = getattr(pre_data_run, "id", None)
             effective_user_message = user_message
             if test_case_id:
-                from data_generation.testcase_pre_data import run_testcase_pre_data_by_id
+                if pre_data_result is None:
+                    from data_generation.testcase_pre_data import run_testcase_pre_data_by_id
 
-                pre_data_result = await sync_to_async(run_testcase_pre_data_by_id)(
-                    int(test_case_id),
-                    user_id=request.user.id,
-                )
+                    pre_data_result = await sync_to_async(run_testcase_pre_data_by_id)(
+                        int(test_case_id),
+                        user_id=request.user.id,
+                    )
                 if pre_data_result.blocked:
                     # 数据准备可能在常规 start 事件之前中止。先发出标准 start，
                     # 让前端建立流状态并显示随后返回的失败原因，避免只留下用户消息。
@@ -1798,6 +2473,8 @@ class AgentLoopStreamAPIView(View):
                         user_id=request.user.id,
                         session_id=session_id,
                         generate_playwright_script=bool(generate_playwright_script),
+                        execution_mode=execution_mode,
+                        ui_test_case_id=ui_test_case_id,
                         data_generation_run_id=None,
                     )
                     record = await sync_to_async(block_testcase_run_record)(
@@ -1884,14 +2561,16 @@ class AgentLoopStreamAPIView(View):
                     pre_data_plan_name = await sync_to_async(
                         lambda: pre_data_run.plan.name if pre_data_run.plan_id else ""
                     )()
-                    yield create_sse_data(
-                        {
-                            "type": "pre_data_complete",
-                            "status": pre_data_result.run.status,
-                            "plan_name": pre_data_plan_name,
-                            "source": pre_data_result.resolution.source,
-                        }
-                    )
+                    if not locals().get("pre_data_complete_emitted", False):
+                        yield create_sse_data(
+                            {
+                                "type": "pre_data_complete",
+                                "status": pre_data_result.run.status,
+                                "plan_name": pre_data_plan_name,
+                                "source": pre_data_result.resolution.source,
+                            }
+                        )
+                        pre_data_complete_emitted = True
 
                 # 单条用例执行只接受数据库中的最新用例详情。前端消息可能来自
                 # 列表缓存，若再次携带前置条件或步骤会与最新记录冲突。
@@ -2004,6 +2683,8 @@ class AgentLoopStreamAPIView(View):
                     user_id=request.user.id,
                     session_id=session_id,
                     generate_playwright_script=bool(generate_playwright_script),
+                    execution_mode=execution_mode,
+                    ui_test_case_id=ui_test_case_id,
                     data_generation_run_id=pre_data_run_id,
                 )
 
@@ -2035,19 +2716,20 @@ class AgentLoopStreamAPIView(View):
             tool_names = [t.name for t in tools] if tools else None
 
             # 11. 发送开始信号
-            yield create_sse_data(
-                {
-                    "type": "start",
-                    "session_id": session_id,
-                    "thread_id": thread_id,
-                    "project_id": project_id,
-                    "display_message": display_user_message,
-                    "mode": "agent_loop",
-                    "created_at": chat_session.created_at.isoformat()
-                    if chat_session and chat_session.created_at
-                    else None,
-                }
-            )
+            if not locals().get("hybrid_start_emitted", False):
+                yield create_sse_data(
+                    {
+                        "type": "start",
+                        "session_id": session_id,
+                        "thread_id": thread_id,
+                        "project_id": project_id,
+                        "display_message": display_user_message,
+                        "mode": "agent_loop",
+                        "created_at": chat_session.created_at.isoformat()
+                        if chat_session and chat_session.created_at
+                        else None,
+                    }
+                )
 
             # 12. 创建 Agent（LangChain v1 统一路径）
             async with get_async_checkpointer() as checkpointer:
@@ -2417,6 +3099,9 @@ class AgentLoopStreamAPIView(View):
                                                     # The helper has already proved every required
                                                     # step. Do not wait for a further LLM turn just
                                                     # to produce a summary, as that turn can stall.
+                                                    generation_messages = await _get_agent_state_messages(
+                                                        agent, invoke_config
+                                                    )
                                                     record, injected_report = await _complete_testcase_run_with_report(
                                                         session_id=session_id,
                                                         final_content=str(content),
@@ -2428,16 +3113,41 @@ class AgentLoopStreamAPIView(View):
                                                         yield create_sse_data(
                                                             {"type": "stream", "data": "\n\n" + injected_report}
                                                         )
-                                                    yield create_sse_data(
-                                                        {
-                                                            "type": "complete",
-                                                            "total_steps": step_count,
-                                                            "test_case_run": {
-                                                                "status": record.status if record else "pass",
-                                                                "summary": record.summary if record else "",
-                                                            },
-                                                        }
-                                                    )
+                                                    script_generation_result = None
+                                                    if generate_playwright_script:
+                                                        if record and record.status == "pass":
+                                                            yield create_sse_data(
+                                                                {
+                                                                    "type": "testcase_progress",
+                                                                    "session_id": session_id,
+                                                                    "test_case_id": int(test_case_id),
+                                                                    "state": "generating_ui_case",
+                                                                    "message": "功能用例已通过，正在补充生成并绑定 UI 自动化用例",
+                                                                }
+                                                            )
+                                                        script_generation_result = await _finalize_generated_ui_case(
+                                                            llm=llm,
+                                                            tools=tools,
+                                                            messages=generation_messages,
+                                                            test_case_id=test_case_id,
+                                                            project_id=project_id,
+                                                            record=record,
+                                                        )
+                                                    complete_event = {
+                                                        "type": "complete",
+                                                        "total_steps": step_count,
+                                                        "test_case_run": {
+                                                            "status": record.status
+                                                            if record
+                                                            else "pass",
+                                                            "summary": record.summary
+                                                            if record
+                                                            else "",
+                                                        },
+                                                    }
+                                                    if script_generation_result is not None:
+                                                        complete_event["script_generation"] = script_generation_result
+                                                    yield create_sse_data(complete_event)
                                                     return
                                                 if (
                                                     test_case_id
@@ -2536,20 +3246,44 @@ class AgentLoopStreamAPIView(View):
                                                                 "data": "\n\n" + injected_report,
                                                             }
                                                         )
-                                                    yield create_sse_data(
-                                                        {
-                                                            "type": "complete",
-                                                            "total_steps": step_count,
-                                                            "test_case_run": {
-                                                                "status": record.status
-                                                                if record
-                                                                else "pass",
-                                                                "summary": record.summary
-                                                                if record
-                                                                else "",
-                                                            },
-                                                        }
-                                                    )
+                                                    script_generation_result = None
+                                                    if generate_playwright_script:
+                                                        if record and record.status == "pass":
+                                                            yield create_sse_data(
+                                                                {
+                                                                    "type": "testcase_progress",
+                                                                    "session_id": session_id,
+                                                                    "test_case_id": int(test_case_id),
+                                                                    "state": "generating_ui_case",
+                                                                    "message": "功能用例已通过，正在补充生成并绑定 UI 自动化用例",
+                                                                }
+                                                            )
+                                                        generation_messages = await _get_agent_state_messages(
+                                                            agent, invoke_config
+                                                        )
+                                                        script_generation_result = await _finalize_generated_ui_case(
+                                                            llm=llm,
+                                                            tools=tools,
+                                                            messages=generation_messages,
+                                                            test_case_id=test_case_id,
+                                                            project_id=project_id,
+                                                            record=record,
+                                                        )
+                                                    complete_event = {
+                                                        "type": "complete",
+                                                        "total_steps": step_count,
+                                                        "test_case_run": {
+                                                            "status": record.status
+                                                            if record
+                                                            else "pass",
+                                                            "summary": record.summary
+                                                            if record
+                                                            else "",
+                                                        },
+                                                    }
+                                                    if script_generation_result is not None:
+                                                        complete_event["script_generation"] = script_generation_result
+                                                    yield create_sse_data(complete_event)
                                                     return
                                         # 步骤完成
                                         if step_count > 0:
@@ -2897,109 +3631,26 @@ class AgentLoopStreamAPIView(View):
                     else:
                         complete_data = {"type": "complete", "total_steps": step_count}
                     if generate_playwright_script:
-                        ui_case_id = None
-                        generation_error = ""
-                        if test_case_id:
-                            try:
-                                from testcases.models import TestCase
-
-                                bound_case = await sync_to_async(
-                                    TestCase.objects.filter(
-                                        id=int(test_case_id), project_id=int(project_id)
-                                    ).values_list("ui_test_case_id", flat=True).first
-                                )()
-                                ui_case_id = bound_case
-                            except Exception:
-                                logger.exception(
-                                    "AgentLoopStreamAPI: failed to verify generated UI case binding; testcase=%s",
-                                    test_case_id,
-                                )
-                        if not ui_case_id and record and record.status == "pass":
+                        if record and record.status == "pass":
                             yield create_sse_data(
                                 {
                                     "type": "testcase_progress",
                                     "session_id": session_id,
-                                    "test_case_id": int(test_case_id),
+                                    "test_case_id": int(test_case_id) if test_case_id else None,
                                     "state": "generating_ui_case",
                                     "message": "功能用例已通过，正在补充生成并绑定 UI 自动化用例",
                                 }
                             )
-                            generated = await _force_save_generated_ui_case(
-                                llm=llm,
-                                tools=tools,
-                                messages=all_messages if "all_messages" in locals() else [],
-                            )
-                            reported_ui_case_id = None
-                            if generated.get("status") == "success":
-                                reported_ui_case_id = generated.get("ui_test_case_id")
-                                if not reported_ui_case_id:
-                                    generation_error = "保存工具标记成功，但没有返回 UI 用例 ID。"
-                                logger.info(
-                                    "AgentLoopStreamAPI: post-run UI case save completed; testcase=%s ui_case=%s",
-                                    test_case_id,
-                                    reported_ui_case_id,
-                                )
-                            else:
-                                generation_error = str(
-                                    generated.get("message") or "保存工具未返回成功结果。"
-                                )[:700]
-                                logger.warning(
-                                    "AgentLoopStreamAPI: post-run UI case generation failed; testcase=%s reason=%s",
-                                    test_case_id,
-                                    generation_error,
-                                )
-                            # Confirm the database binding, rather than trusting only the model/tool response.
-                            if test_case_id:
-                                try:
-                                    ui_case_id = await sync_to_async(
-                                        TestCase.objects.filter(
-                                            id=int(test_case_id), project_id=int(project_id)
-                                        ).values_list("ui_test_case_id", flat=True).first
-                                    )()
-                                except Exception:
-                                    logger.exception(
-                                        "AgentLoopStreamAPI: failed to verify post-run UI binding; testcase=%s",
-                                        test_case_id,
-                                    )
-                            if reported_ui_case_id and not ui_case_id and not generation_error:
-                                generation_error = "保存工具报告成功，但数据库中未查到绑定记录。"
-                        if ui_case_id:
-                            success_note = (
-                                f"\n\n### UI 自动化用例生成\n"
-                                f"成功：UI 自动化用例 #{ui_case_id} 已生成并绑定。"
-                            )
-                            if record and "### UI 自动化用例生成" not in (record.summary or ""):
-                                record.summary = (record.summary or "") + success_note
-                                await sync_to_async(record.save)(update_fields=["summary"])
-                                if complete_data.get("test_case_run"):
-                                    complete_data["test_case_run"]["summary"] = record.summary
-                            script_generation_result = {
-                                "enabled": True,
-                                "status": "success",
-                                "ui_test_case_id": ui_case_id,
-                                "message": f"UI 自动化用例 #{ui_case_id} 已生成并绑定。",
-                            }
-                        elif record and record.status == "pass":
-                            failure_note = (
-                                "\n\n### UI 自动化用例生成\n"
-                                "失败：功能用例已通过，但本次执行没有成功保存并绑定 UI 自动化用例。"
-                                + (f"原因：{generation_error}。" if generation_error else "")
-                            )
-                            record.summary = (record.summary or "") + failure_note
-                            await sync_to_async(record.save)(update_fields=["summary"])
-                            if complete_data.get("test_case_run"):
-                                complete_data["test_case_run"]["summary"] = record.summary
-                            script_generation_result = {
-                                "enabled": True,
-                                "status": "failed",
-                                "message": "功能用例通过，但未检测到已保存并绑定的 UI 自动化用例。",
-                            }
-                        else:
-                            script_generation_result = {
-                                "enabled": True,
-                                "status": "skipped",
-                                "message": "功能用例未通过，未生成 UI 自动化用例。",
-                            }
+                        script_generation_result = await _finalize_generated_ui_case(
+                            llm=llm,
+                            tools=tools,
+                            messages=all_messages if "all_messages" in locals() else [],
+                            test_case_id=test_case_id,
+                            project_id=project_id,
+                            record=record,
+                        )
+                        if complete_data.get("test_case_run") and record:
+                            complete_data["test_case_run"]["summary"] = record.summary
                         complete_data["script_generation"] = script_generation_result
                     yield create_sse_data(complete_data)
 
@@ -3036,6 +3687,14 @@ class AgentLoopStreamAPIView(View):
             )
             raise
         except Exception as e:
+            if locals().get("hybrid_fallback_context"):
+                try:
+                    await finalize_hybrid_fallback_error(str(e))
+                except Exception:
+                    logger.exception(
+                        "AgentLoopStreamAPI: Failed to finalize hybrid fallback error. session_id=%s",
+                        session_id,
+                    )
             friendly_error = get_user_friendly_llm_error(e)
             if friendly_error:
                 logger.warning(
@@ -3106,6 +3765,8 @@ class AgentLoopStreamAPIView(View):
         # Playwright 脚本生成参数
         generate_playwright_script = body_data.get("generate_playwright_script", False)
         test_case_id = body_data.get("test_case_id")  # 用于关联生成的脚本
+        execution_mode = body_data.get("execution_mode")
+        ui_test_case_id = body_data.get("ui_test_case_id")
         use_pytest = body_data.get("use_pytest", True)  # 生成 pytest 格式还是简单格式
 
         # 兜底：如果前端没传 test_case_id，尝试从消息中解析
@@ -3138,6 +3799,40 @@ class AgentLoopStreamAPIView(View):
         if not project:
             return api_error_response("Project access denied", 403)
 
+        # 旧调用方未传执行模式时沿用用例默认值；新执行弹窗会显式传入本次选择。
+        allowed_execution_modes = {"hybrid", "script_only", "ai_only"}
+        if test_case_id:
+            from testcases.models import TestCase
+
+            testcase_runtime = await sync_to_async(
+                lambda: TestCase.objects.filter(id=test_case_id, project=project)
+                .values("execution_mode", "ui_test_case_id")
+                .first()
+            )()
+            if testcase_runtime is None:
+                return api_error_response("test_case_id is invalid for this project", 400)
+            if execution_mode is None:
+                execution_mode = testcase_runtime.get("execution_mode") or "hybrid"
+            if ui_test_case_id is None:
+                ui_test_case_id = testcase_runtime.get("ui_test_case_id")
+            if ui_test_case_id is not None:
+                from ui_automation.models import UiTestCase
+
+                valid_ui_case = await sync_to_async(
+                    UiTestCase.objects.filter(
+                        id=ui_test_case_id, project=project
+                    ).exists
+                )()
+                if not valid_ui_case:
+                    return api_error_response("ui_test_case_id is invalid for this project", 400)
+        execution_mode = execution_mode or "ai_only"
+        if execution_mode not in allowed_execution_modes:
+            return api_error_response("execution_mode is invalid", 400)
+        if test_case_id and execution_mode == "script_only" and not ui_test_case_id:
+            return api_error_response(
+                "script_only requires a bound ui_test_case_id", 400
+            )
+
         # 5. 生成 session_id
         if not session_id:
             session_id = uuid.uuid4().hex
@@ -3168,6 +3863,8 @@ class AgentLoopStreamAPIView(View):
                     test_case_id,
                     use_pytest,
                     file_ids,
+                    execution_mode,
+                    ui_test_case_id,
                 ):
                     yield chunk
 
@@ -3210,6 +3907,8 @@ class AgentLoopStreamAPIView(View):
         test_case_id: Optional[int] = None,
         use_pytest: bool = True,
         file_ids: Optional[List[int]] = None,
+        execution_mode: str = "ai_only",
+        ui_test_case_id: Optional[int] = None,
     ) -> JsonResponse:
         """
         处理非流式请求，收集所有流式事件后返回统一 JSON 响应
@@ -3241,6 +3940,8 @@ class AgentLoopStreamAPIView(View):
                 test_case_id,
                 use_pytest,
                 file_ids,
+                execution_mode,
+                ui_test_case_id,
             ):
                 # 解析 SSE 数据
                 if isinstance(chunk, str) and chunk.startswith("data: "):

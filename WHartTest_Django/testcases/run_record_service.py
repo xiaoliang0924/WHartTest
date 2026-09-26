@@ -92,7 +92,9 @@ _DATA_USE_ACTION_RE = re.compile(
     r"fillFilterField|clickRowAction|queryTicketInList|runTicketDetailCaseStep|"
     r"runClaimableTicketCaseStep|WHARTTEST_TICKET_NO|\[PRE_DATA\]\s*ticketNo=|"
     r"enterClaimableTicketDetailFromList|ticketId\s*直达|已通过 ticketId 进入工单详情|"
-    r"工单号.*(?:查询|筛选)|(?:查询|筛选).*工单号|定位.*工单",
+    r"工单号.*(?:查询|筛选)|(?:查询|筛选).*工单号|定位.*工单|"
+    r"已进入.{0,20}(?:工单)?详情|"
+    r"(?:工单|ticket).{0,12}(?:详情页|detail page)",
     re.IGNORECASE,
 )
 # 报告正文之后模型额外贴出的内容（通常是「测试用例执行」提示词要求的 JSON 结果块）
@@ -151,13 +153,35 @@ def build_pre_data_usage(
 
     key, value = matched[0]
     position = text.find(value)
-    evidence = text[max(0, position - 220): position + len(value) + 320].strip()
-    action_nearby = _DATA_USE_ACTION_RE.search(evidence)
-    if not action_nearby:
-        # A tool call and the identifier can be separated by formatting, but a
-        # transcript that only mentions the identifier remains an unverified reference.
-        action_nearby = _DATA_USE_ACTION_RE.search(text)
-    if action_nearby:
+    evidence = text[max(0, position - 500): position + len(value) + 700].strip()
+    # Do not let an unrelated action elsewhere in a long run transcript confirm
+    # this identifier. Tool/action evidence must be close to the exact ID.
+    identifier_context = text[
+        max(0, position - 180): position + len(value) + 180
+    ]
+    action_nearby = _DATA_USE_ACTION_RE.search(identifier_context)
+    action_negated = bool(
+        re.search(
+            r"(?:但|并|且)?\s*(?:无|未|没有|缺少|不含|不具备).{0,40}"
+            r"(?:查询|筛选|定位|行操作|点击|进入)",
+            identifier_context,
+            re.IGNORECASE,
+        )
+    )
+    # ROW_VISIBLE is only auditable when the same evidence window ties it to
+    # the generated identifier in a ticket-detail/list URL. A generic visible
+    # row elsewhere in the run must not confirm this generated record.
+    escaped_identifier = re.escape(value)
+    matching_ticket_url = re.search(
+        rf"/(?:my-tickets|tickets)/{escaped_identifier}(?=[/?#\s]|$)",
+        evidence,
+        re.IGNORECASE,
+    )
+    visible_matching_row = bool(
+        matching_ticket_url
+        and re.search(r"ROW_VISIBLE\s*=\s*true", evidence, re.IGNORECASE)
+    )
+    if (action_nearby and not action_negated) or visible_matching_row:
         return {
             "status": "verified_used",
             "message": "已在执行脚本或工具日志中确认使用本次造数数据",
@@ -445,10 +469,16 @@ def build_step_results_from_execution_evidence(
             case_id,
         )
         matches = []
-    progress_markers = list(re.finditer(r"正在执行步骤\s*(\d+)", text))
+    progress_markers = list(
+        re.finditer(
+            r"正在执行步骤\s*(\d+)|\[AUTO_RESUME\]\s*强制执行步骤\s*(\d+)\s*/\d+",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
     progress_blocks: dict[int, str] = {}
     for idx, match in enumerate(progress_markers):
-        step_no = int(match.group(1))
+        step_no = int(match.group(1) or match.group(2))
         block_start = match.start()
         block_end = (
             progress_markers[idx + 1].start()
@@ -1034,8 +1064,21 @@ def start_testcase_run_record(
     user_id: int,
     session_id: str,
     generate_playwright_script: bool = False,
+    execution_mode: str = "hybrid",
+    actual_execution_path: Optional[str] = None,
+    ui_test_case_id: Optional[int] = None,
     data_generation_run_id: Optional[int] = None,
 ) -> Optional[TestCaseRunRecord]:
+    # Keep the selected strategy separate from the route that actually ran.
+    if not actual_execution_path:
+        if execution_mode == "script_only":
+            actual_execution_path = "bound_ui_script"
+        elif execution_mode == "hybrid":
+            actual_execution_path = (
+                "hybrid_script_pending" if ui_test_case_id else "agent_no_bound_script"
+            )
+        else:
+            actual_execution_path = "agent_browser"
     try:
         testcase = TestCase.objects.get(id=testcase_id)
     except TestCase.DoesNotExist:
@@ -1060,6 +1103,9 @@ def start_testcase_run_record(
             "executor_id": user_id,
             "status": "running",
             "generate_playwright_script": generate_playwright_script,
+            "execution_mode": execution_mode,
+            "actual_execution_path": actual_execution_path,
+            "ui_test_case_id_snapshot": ui_test_case_id,
             "data_generation_run_id": data_generation_run_id,
         },
     )
@@ -1075,6 +1121,9 @@ def start_testcase_run_record(
             execution_log="",
             completed_at=None,
             generate_playwright_script=generate_playwright_script,
+            execution_mode=execution_mode,
+            actual_execution_path=actual_execution_path,
+            ui_test_case_id_snapshot=ui_test_case_id,
             data_generation_run_id=data_generation_run_id,
             started_at=timezone.now(),
         )
@@ -1283,15 +1332,25 @@ def finalize_testcase_run_record(
     except Exception as exc:
         logger.debug("message send content check skipped: %s", exc)
 
+    prior_execution_log = str(record.execution_log or "")
+    hybrid_script_trace = (
+        prior_execution_log
+        if record.actual_execution_path == "agent_fallback"
+        and prior_execution_log.startswith("[HYBRID_SCRIPT_ATTEMPT]")
+        else ""
+    )
     record.status = outcome["status"]
     record.summary = extract_first_execution_report(outcome["summary"])[:8000]
     record.step_results = outcome["step_results"]
-    record.execution_log = (combined or error_message or "")[:8000]
+    final_execution_log = "\n\n[HYBRID_AGENT_FALLBACK]\n".join(
+        part for part in (hybrid_script_trace, combined or error_message or "") if part
+    )
+    record.execution_log = final_execution_log[:8000]
     record.injected_report = outcome["injected"]
     record.data_usage = build_pre_data_usage(
         record.data_generation_run,
         assistant_text,
-        execution_transcript=combined,
+        execution_transcript=final_execution_log,
     )
 
     record.completed_at = timezone.now()
