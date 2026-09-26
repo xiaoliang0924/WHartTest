@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 from django.contrib.auth import get_user_model
 from projects.models import ProjectCredential
 
-from testcases.models import TestCase, TestCaseModule
+from testcases.models import TestCase, TestCaseModule, TestCaseStep
 
 from .exceptions import DataGenerationError
 from .intent_router import (
@@ -1202,21 +1202,46 @@ def resolve_pre_data_for_testcase(testcase: TestCase) -> PreDataResolution:
     )
 
 
+_MESSAGE_SEND_NEGATION_RE = re.compile(
+    r'(?:不展示|不显示|未显示|没有|无|隐藏|不可见|不可用|禁用|禁止|不允许|不能|无法)'
+    r'.{0,12}(?:发送|消息|按钮|入口|功能)|'
+    r'(?:发送|消息|按钮|入口|功能).{0,12}'
+    r'(?:不展示|不显示|未显示|不可见|不可用|禁用|禁止|不允许|不能|无法)',
+    re.IGNORECASE,
+)
+_MESSAGE_SEND_ACTION_RE = re.compile(
+    r'(?:点击|单击)\s*[「『“【"]?发送|'
+    r'按\s*[「『“【"]?Enter.{0,12}发送|'
+    r'输入.{0,80}(?:点击|单击|按\s*[「『“【"]?Enter).{0,12}发送|'
+    r'(?:发送|输入并发送)(?:一条|文本|图片|文件|消息|内容)|'
+    r'发送后.{0,24}(?:沟通|消息|记录|出现|显示|确认|验证)|'
+    r'沟通记录.{0,24}(?:出现|显示).{0,24}(?:发送|消息)',
+    re.IGNORECASE,
+)
+
+
+def ticket_message_send_steps(testcase: TestCase) -> list[TestCaseStep]:
+    """Return only steps that positively instruct sending a message.
+
+    Case titles and arbitrary mentions of message controls are not enough:
+    negative visibility/read-only checks must not be routed through the send
+    workflow or its post-execution content validator.
+    """
+    matched = []
+    for step in testcase.steps.order_by('step_number'):
+        description = (getattr(step, 'description', '') or '').strip()
+        expected = (getattr(step, 'expected_result', '') or '').strip()
+        text = f'{description}\n{expected}'
+        if _MESSAGE_SEND_NEGATION_RE.search(text):
+            continue
+        if _MESSAGE_SEND_ACTION_RE.search(text):
+            matched.append(step)
+    return matched
+
+
 def is_ticket_message_send_case(testcase: TestCase) -> bool:
-    """Cases that must type and send a message, then assert it in 沟通记录."""
-    blob = collect_testcase_text(testcase)
-    return any(
-        keyword in blob
-        for keyword in (
-            '发送消息',
-            '点击发送',
-            '按Enter',
-            '按 Enter',
-            '沟通记录出现',
-            '输入文本点击发送',
-            '输入文本按Enter',
-        )
-    )
+    """Whether any testcase step explicitly requires a positive message send."""
+    return bool(ticket_message_send_steps(testcase))
 
 
 def is_ticket_detail_boundary_case(testcase: TestCase) -> bool:
@@ -1764,12 +1789,14 @@ def build_testcase_step_script_hints(testcase: TestCase) -> str:
     return '\n'.join(lines)
 
 
-def extract_expected_send_message_texts(testcase: TestCase) -> list[str]:
-    """Quoted message texts that send-message steps must assert on page."""
-    found: list[str] = []
-    for step in testcase.steps.order_by('step_number'):
+def extract_expected_send_message_texts_by_step(testcase: TestCase) -> dict[int, list[str]]:
+    """Quoted payloads to assert, grouped by the step that sends them."""
+    found: dict[int, list[str]] = {}
+    for step in ticket_message_send_steps(testcase):
         blob = f"{getattr(step, 'description', '') or ''}\n{getattr(step, 'expected_result', '') or ''}"
-        if not any(k in blob for k in ('发送', '沟通记录', 'Enter')):
+        try:
+            step_number = int(step.step_number)
+        except (AttributeError, TypeError, ValueError):
             continue
         for match in re.findall(r'[「『“\"]([^」』”\"]+)[」』”\"]', blob):
             text = (match or '').strip()
@@ -1777,6 +1804,17 @@ def extract_expected_send_message_texts(testcase: TestCase) -> list[str]:
                 continue
             if text in ('发送', '查询', '处理', '待处理', '未分配', '领取工单'):
                 continue
+            texts = found.setdefault(step_number, [])
+            if text not in texts:
+                texts.append(text)
+    return found
+
+
+def extract_expected_send_message_texts(testcase: TestCase) -> list[str]:
+    """Quoted message texts that send-message steps must assert on page."""
+    found = []
+    for texts in extract_expected_send_message_texts_by_step(testcase).values():
+        for text in texts:
             if text not in found:
                 found.append(text)
     return found

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import os
 import tempfile
@@ -412,6 +413,108 @@ class FinalizeRunRecordReportTests(TestCase):
         path = os.path.join(directory, f"case_{self.testcase.id}_step{step_number}.png")
         Image.new("RGB", (16, 16), color=(20, 80, 20)).save(path, format="PNG")
         return path
+
+    def _create_message_case(self, name, steps):
+        testcase = TestCaseModel.objects.create(
+            project=self.project,
+            module=self.module,
+            name=name,
+            level="P1",
+            creator=self.user,
+        )
+        for number, (description, expected) in enumerate(steps, 1):
+            TestCaseStep.objects.create(
+                test_case=testcase,
+                step_number=number,
+                description=description,
+                expected_result=expected,
+                creator=self.user,
+            )
+        return testcase
+
+    def _finalize_message_case(self, testcase, session_id, results):
+        start_testcase_run_record(
+            testcase_id=testcase.id,
+            user_id=self.user.id,
+            session_id=session_id,
+        )
+        evidence = [
+            f"[执行进度] 正在执行步骤 {number}/{len(results)}\nRESULT=PASS: {result}"
+            for number, result in enumerate(results, 1)
+        ]
+        # These tests target result reconciliation, not screenshot storage.
+        with patch("testcases.run_record_service.backfill_missing_step_screenshots", return_value=[]):
+            return finalize_testcase_run_record(
+                session_id=session_id,
+                transcript="\n".join(evidence),
+            )
+
+    def test_no_send_visibility_case_skips_message_content_validation(self):
+        from data_generation.testcase_pre_data import (
+            extract_expected_send_message_texts,
+            is_ticket_detail_boundary_case,
+            is_ticket_message_send_case,
+        )
+
+        testcase = self._create_message_case(
+            "工单完成成功-底部沟通区不展示发送功能-功能拦截验证",
+            [
+                ("使用李亮账号登录系统", "登录成功"),
+                ("进入【我的工单】处理详情页", "成功进入工单详情并展示沟通记录"),
+                (
+                    "查看页面底部沟通区",
+                    "沟通记录为只读，不展示「发送消息」入口；「图片/文件/价格表」不可发送",
+                ),
+            ],
+        )
+        self.assertFalse(is_ticket_message_send_case(testcase))
+        self.assertTrue(is_ticket_detail_boundary_case(testcase))
+        self.assertEqual(extract_expected_send_message_texts(testcase), [])
+
+        record = self._finalize_message_case(
+            testcase,
+            "message-hidden-control-case",
+            [
+                "步骤1登录成功",
+                "步骤2已进入工单详情并展示沟通记录",
+                "步骤3已确认沟通区只读且未展示发送入口",
+            ],
+        )
+        self.assertEqual(record.status, "pass")
+        self.assertTrue(all(step["status"] == "pass" for step in record.step_results))
+        self.assertNotIn("消息内容校验", record.summary)
+        self.assertIn("测试执行全部 3 个步骤均通过，测试通过", record.summary)
+
+    def test_real_message_send_validation_failure_marks_step_and_report(self):
+        from data_generation.testcase_pre_data import (
+            extract_expected_send_message_texts,
+            is_ticket_message_send_case,
+        )
+
+        testcase = self._create_message_case(
+            "工单沟通区发送消息-正常流程",
+            [
+                ("使用李亮账号登录系统", "登录成功"),
+                ("进入【我的工单】处理详情页", "成功进入工单详情"),
+                (
+                    "在沟通区输入「自动化校验消息」并点击「发送」按钮",
+                    "沟通记录出现「自动化校验消息」",
+                ),
+            ],
+        )
+        self.assertTrue(is_ticket_message_send_case(testcase))
+        self.assertEqual(extract_expected_send_message_texts(testcase), ["自动化校验消息"])
+
+        record = self._finalize_message_case(
+            testcase,
+            "message-send-missing-assertion",
+            ["步骤1登录成功", "步骤2已进入工单详情", "步骤3已点击发送按钮"],
+        )
+        self.assertEqual(record.status, "fail")
+        self.assertEqual(record.step_results[2]["status"], "fail")
+        self.assertIn("失败：真正的消息发送步骤缺少沟通记录内容断言", record.summary)
+        self.assertIn("测试执行在步骤 3 失败", record.summary)
+        self.assertNotIn("测试执行全部 3 个步骤均通过，测试通过", record.summary)
 
     def test_finalize_backfills_runtime_screenshot_and_passes(self):
         start_testcase_run_record(

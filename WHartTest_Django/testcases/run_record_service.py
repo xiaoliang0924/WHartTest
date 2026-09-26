@@ -809,13 +809,6 @@ def _append_missing_message_note(summary: str, missing_texts: list[str]) -> str:
         f"通常表示未真正发送消息，或误用了沟通区只读 helper；"
         f"对话中的「通过」不可信。\n"
     )
-    if "测试执行结果: 通过" in summary or "测试执行结果：通过" in summary:
-        summary = re.sub(
-            r"测试执行结果[:：]\s*通过",
-            "测试执行结果: 不通过",
-            summary,
-            count=1,
-        )
     return (summary + note).strip()
 
 
@@ -1186,31 +1179,37 @@ def finalize_testcase_run_record(
     try:
         from data_generation.testcase_pre_data import (
             extract_expected_send_message_texts,
+            extract_expected_send_message_texts_by_step,
             is_ticket_message_send_case,
+            ticket_message_send_steps,
         )
 
         if is_ticket_message_send_case(record.testcase) and outcome.get("status") == "pass":
             expected_msgs = extract_expected_send_message_texts(record.testcase)
+            expected_msgs_by_step = extract_expected_send_message_texts_by_step(record.testcase)
             missing_msgs: list[str] = []
+            missing_by_step: dict[int, list[str]] = {}
             used_wrong_helper = bool(
                 re.search(r"runTicketDetailCaseStep\s*\(", combined, flags=re.IGNORECASE)
             )
-            for text in expected_msgs:
-                asserted = bool(
-                    re.search(
-                        rf"assertPageShows\s*\([^)]*{re.escape(text)}",
-                        combined,
-                        flags=re.IGNORECASE,
+            for step_number, texts in expected_msgs_by_step.items():
+                for text in texts:
+                    asserted = bool(
+                        re.search(
+                            rf"assertPageShows\s*\([^)]*{re.escape(text)}",
+                            combined,
+                            flags=re.IGNORECASE,
+                        )
+                    ) or bool(
+                        re.search(
+                            rf"RESULT=PASS:[^\n]*{re.escape(text)}",
+                            combined,
+                            flags=re.IGNORECASE,
+                        )
                     )
-                ) or bool(
-                    re.search(
-                        rf"RESULT=PASS:[^\n]*{re.escape(text)}",
-                        combined,
-                        flags=re.IGNORECASE,
-                    )
-                )
-                if not asserted:
-                    missing_msgs.append(text)
+                    if not asserted:
+                        missing_msgs.append(text)
+                        missing_by_step.setdefault(step_number, []).append(text)
             # 步骤结果写成「进详情」而未写出发送内容，也视为虚报通过。
             for item in outcome.get("step_results") or []:
                 if not isinstance(item, dict):
@@ -1228,6 +1227,55 @@ def finalize_testcase_run_record(
                 note_msgs = missing_msgs or expected_msgs[:1] or ["步骤要求的发送文本"]
                 if used_wrong_helper:
                     note_msgs = list(note_msgs) + ["(误用 runTicketDetailCaseStep)"]
+                message_fail_reason = (
+                    "真正的消息发送步骤缺少沟通记录内容断言："
+                    + "、".join(note_msgs)
+                )
+                send_step_numbers = {
+                    int(step.step_number)
+                    for step in ticket_message_send_steps(record.testcase)
+                    if getattr(step, "step_number", None) is not None
+                }
+                failed_step_numbers = (
+                    send_step_numbers
+                    if used_wrong_helper
+                    else set(missing_by_step) or send_step_numbers
+                )
+                step_results = [dict(item) for item in outcome.get("step_results") or []]
+                marked_failed = False
+                for item in step_results:
+                    try:
+                        step_number = int(item.get("step_number"))
+                    except (TypeError, ValueError):
+                        continue
+                    if step_number in failed_step_numbers and item.get("status") == "pass":
+                        item["status"] = "fail"
+                        item["actual_result"] = message_fail_reason
+                        marked_failed = True
+                if not marked_failed:
+                    for item in step_results:
+                        if item.get("status") == "pass" and "发送" in str(item.get("description") or ""):
+                            item["status"] = "fail"
+                            item["actual_result"] = message_fail_reason
+                            marked_failed = True
+                            break
+                if not marked_failed:
+                    for item in reversed(step_results):
+                        if item.get("status") == "pass":
+                            item["status"] = "fail"
+                            item["actual_result"] = message_fail_reason
+                            marked_failed = True
+                            break
+                if marked_failed:
+                    outcome["step_results"] = step_results
+                    outcome["summary"] = build_execution_result_report(
+                        record.testcase,
+                        status="fail",
+                        step_results=step_results,
+                        fail_reason=message_fail_reason,
+                        extra_note="请确认消息确实发送，并在沟通记录中断言发送内容。",
+                    )
+                    outcome["injected"] = True
                 outcome["summary"] = _append_missing_message_note(
                     outcome.get("summary") or "",
                     note_msgs,

@@ -5451,7 +5451,7 @@ async function runProcessingHandoverCaseStep(page, stepNumber, caseId) {
   }
 
   if (['selection_required', 'cancel', 'submit_reason_boundary'].includes(flow) && step >= 3) {
-    const dialog = page.locator('.el-dialog:visible, [role="dialog"]:visible')
+    const dialog = page.locator('.el-dialog, [role="dialog"]')
       .filter({ hasText: '选择审批人' }).last();
     const fail = async (reason) => {
       console.log(`RESULT=FAIL: 步骤${step}${reason}`);
@@ -5504,7 +5504,7 @@ async function runProcessingHandoverCaseStep(page, stepNumber, caseId) {
   }
 
   if (submissionFlow && step >= 3 && step <= 7) {
-    const dialog = page.locator('.el-dialog:visible, [role="dialog"]:visible')
+    const dialog = page.locator('.el-dialog, [role="dialog"]')
       .filter({ hasText: '选择审批人' }).last();
     const fail = async (reason) => {
       console.log(`RESULT=FAIL: 步骤${step}${reason}`);
