@@ -1,6 +1,8 @@
 from django.contrib.auth.models import User
 from django.core.files.base import ContentFile
+from django.db import connection
 from django.test import TestCase
+from django.test import skipUnlessDBFeature
 from rest_framework.test import APIClient
 from rest_framework import status
 from projects.models import Project, ProjectMember
@@ -120,6 +122,14 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
         self.assertEqual(first['ui_test_case_id'], second['ui_test_case_id'])
         self.assertFalse(second['created'])
         self.assertEqual(UiTestCase.objects.count(), 1)
+
+    @skipUnlessDBFeature('has_select_for_update_of')
+    def test_postgres_lock_scope_excludes_nullable_ui_case_join(self):
+        query = FunctionalTestCase.objects.select_for_update(of=('self',)).select_related('ui_test_case')
+        sql = str(query.query)
+
+        self.assertIn('LEFT OUTER JOIN', sql)
+        self.assertIn('FOR UPDATE OF', sql)
 
 
 class UiPageStepsExecuteDataTests(TestCase):

@@ -352,6 +352,17 @@ class FinalizeRunRecordReportTests(TestCase):
         self.assertEqual(record.step_results[0]["status"], "fail")
         self.assertEqual(record.step_results[1]["status"], "skip")
 
+    def test_start_run_record_keeps_selected_mode_and_ui_case(self):
+        record = start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-mode-audit",
+            execution_mode="script_only",
+            ui_test_case_id=321,
+        )
+        self.assertEqual(record.execution_mode, "script_only")
+        self.assertEqual(record.ui_test_case_id_snapshot, 321)
+
     def test_pending_button_case_requires_actual_button_assertion(self):
         testcase = TestCaseModel.objects.create(
             project=self.project,

@@ -65,6 +65,16 @@ export interface TestCase {
   screenshot?: string; // 兼容旧的单个截图字段
   screenshots?: TestCaseScreenshot[]; // 新的多截图字段
   review_status?: ReviewStatus; // 审核状态
+  ui_test_case?: number | null;
+  ui_test_case_detail?: {
+    id: number;
+    name: string;
+    module_name?: string;
+    level?: string;
+    status?: number;
+    step_count?: number;
+  } | null;
+  execution_mode?: 'hybrid' | 'script_only' | 'ai_only';
   creator: number;
   sort_order?: number;
   creator_detail: {
@@ -110,6 +120,8 @@ export interface TestCaseRunRecord {
     evidence?: string;
   };
   generate_playwright_script?: boolean;
+  execution_mode?: 'hybrid' | 'script_only' | 'ai_only';
+  ui_test_case_id_snapshot?: number | null;
   started_at: string;
   completed_at?: string | null;
 }
@@ -123,6 +135,8 @@ export interface CreateTestCaseRequest {
   module_id?: number | null; // 所属模块ID
   steps: Omit<TestCaseStep, 'id'>[];
   notes?: string; // 新增备注字段
+  ui_test_case?: number | null;
+  execution_mode?: 'hybrid' | 'script_only' | 'ai_only';
 }
 
 // 更新测试用例请求参数
@@ -135,6 +149,8 @@ export interface UpdateTestCaseRequest {
   steps?: TestCaseStep[];
   notes?: string; // 新增备注字段
   review_status?: ReviewStatus; // 审核状态
+  ui_test_case?: number | null;
+  execution_mode?: 'hybrid' | 'script_only' | 'ai_only';
 }
 
 // 分页参数接口

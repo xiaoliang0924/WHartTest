@@ -23,6 +23,8 @@ export interface ChatRequest {
   // Playwright 脚本生成参数
   generate_playwright_script?: boolean; // 是否在任务完成后自动生成 Playwright 脚本
   test_case_id?: number; // 关联的测试用例ID，生成脚本时必需
+  execution_mode?: 'hybrid' | 'script_only' | 'ai_only'; // 单条测试用例执行模式
+  ui_test_case_id?: number | null; // 本次执行选用的 UI 自动化用例
 
   // 兼容旧版 LLMConfig 与智能执行调用方的可选运行时字段
   module_key?: string;

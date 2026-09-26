@@ -1011,7 +1011,11 @@ const resolveTestCaseExecutionPromptId = async (): Promise<number | undefined> =
   return cachedExecutionPromptId ?? undefined;
 };
 
-const handleExecuteConfirm = async (options: { generatePlaywrightScript: boolean }) => {
+const handleExecuteConfirm = async (options: {
+  executionMode: 'hybrid' | 'script_only' | 'ai_only';
+  generatePlaywrightScript: boolean;
+  uiTestCaseId?: number | null;
+}) => {
   const testCase = pendingExecuteTestCase.value;
   if (!testCase || !currentProjectId.value) {
     return;
@@ -1033,6 +1037,8 @@ const handleExecuteConfirm = async (options: { generatePlaywrightScript: boolean
     // Playwright 脚本生成参数
     generate_playwright_script: options.generatePlaywrightScript,
     test_case_id: testCase.id,  // 始终传递，用于截图目录隔离
+    execution_mode: options.executionMode,
+    ui_test_case_id: options.uiTestCaseId ?? testCase.ui_test_case ?? null,
   };
 
   const notificationContent = options.generatePlaywrightScript
@@ -1048,6 +1054,8 @@ const handleExecuteConfirm = async (options: { generatePlaywrightScript: boolean
     testCaseId: testCase.id,
     projectId: currentProjectId.value,
     generatePlaywrightScript: options.generatePlaywrightScript,
+    executionMode: options.executionMode,
+    uiTestCaseId: options.uiTestCaseId ?? testCase.ui_test_case ?? null,
   });
   executionPreparing.value = true;
   isExecutionResultDrawerVisible.value = true;

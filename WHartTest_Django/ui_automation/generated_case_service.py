@@ -116,7 +116,9 @@ def persist_generated_ui_testcase(
     from .models import UiCaseStepsDetailed
 
     data = _parse_payload(payload)
-    testcase = TestCase.objects.select_for_update().select_related("ui_test_case").get(
+    # Lock only the functional testcase row. ``ui_test_case`` is nullable, so
+    # PostgreSQL rejects a plain FOR UPDATE over its LEFT OUTER JOIN.
+    testcase = TestCase.objects.select_for_update(of=("self",)).select_related("ui_test_case").get(
         pk=testcase_id, project_id=project_id
     )
     if testcase.ui_test_case_id:
