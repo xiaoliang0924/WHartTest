@@ -217,6 +217,82 @@ async def _complete_testcase_run_with_report(
     return record, injected
 
 
+def _build_ui_generation_observations(messages, *, max_chars: int = 80_000) -> str:
+    """Keep only this run's browser execution evidence for the UI-case save pass."""
+    chunks = []
+    for message in messages or []:
+        message_type = type(message).__name__
+        if message_type == "HumanMessage":
+            content = getattr(message, "content", "")
+            if isinstance(content, str) and content.strip():
+                chunks.append(f"[测试用例与执行要求]\n{content}")
+        elif message_type == "AIMessage":
+            for call in getattr(message, "tool_calls", []) or []:
+                if call.get("name") != "execute_skill_script":
+                    continue
+                args = call.get("args") or {}
+                command = args.get("command") or args.get("script") or ""
+                if command:
+                    chunks.append(f"[实际执行的浏览器操作脚本]\n{command}")
+        elif message_type == "ToolMessage" and getattr(message, "name", "") == "execute_skill_script":
+            content = getattr(message, "content", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, ensure_ascii=False, default=str)
+            if content.strip():
+                chunks.append(f"[浏览器操作结果与页面观察]\n{content[-12_000:]}")
+    transcript = "\n\n".join(chunks)
+    return transcript[-max_chars:]
+
+
+async def _force_save_generated_ui_case(*, llm, tools, messages) -> Dict[str, Any]:
+    """Run a constrained second pass so generation is not left to the test agent's discretion."""
+    save_tool = next(
+        (tool for tool in (tools or []) if getattr(tool, "name", "") == "save_generated_ui_testcase"),
+        None,
+    )
+    if save_tool is None:
+        return {"status": "failed", "message": "UI 用例保存工具未注册。"}
+
+    observations = _build_ui_generation_observations(messages)
+    if not observations:
+        return {"status": "failed", "message": "本次执行没有可用的浏览器操作记录，无法安全生成 UI 用例。"}
+
+    system = SystemMessage(content=(
+        "你负责把已成功的浏览器测试执行记录转成可复用 UI 自动化用例。"
+        "只能根据提供的实际浏览器脚本和工具输出构造步骤，不得猜测定位器、页面或动作；"
+        "忽略登录密码、令牌等秘密，不要复述秘密。"
+        "现在必须调用唯一可用工具 save_generated_ui_testcase 一次，"
+        "传入 payload_json JSON 字符串，包含 name、description、url、steps。"
+        "每个功能测试步骤对应一个 UI step，动作按实际观察顺序记录；"
+        "没有足够证据的步骤不要编造，工具若因步骤不完整拒绝保存，应如实报告。"
+        "禁止再次操作浏览器或调用其他工具。"
+    ))
+    human = HumanMessage(content="以下是本次已通过执行的原始证据，请据此保存 UI 自动化用例：\n\n" + observations)
+    try:
+        bound_model = llm.bind_tools([save_tool], tool_choice="required")
+        response = await bound_model.ainvoke([system, human])
+    except Exception as exc:
+        logger.exception("UI testcase generation follow-up model call failed")
+        return {"status": "failed", "message": f"生成模型调用失败：{str(exc)[:500]}"}
+
+    calls = getattr(response, "tool_calls", []) or []
+    call = next((item for item in calls if item.get("name") == "save_generated_ui_testcase"), None)
+    if call is None:
+        return {"status": "failed", "message": "生成模型未调用 UI 用例保存工具。"}
+    args = call.get("args") or {}
+    if not isinstance(args, dict) or not args.get("payload_json"):
+        return {"status": "failed", "message": "生成模型未提供有效的 UI 用例内容。"}
+    try:
+        raw_result = await save_tool.ainvoke(args)
+        result = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+        if not isinstance(result, dict):
+            return {"status": "failed", "message": "UI 用例保存工具返回格式无效。"}
+        return result
+    except Exception as exc:
+        logger.exception("UI testcase generation follow-up save failed")
+        return {"status": "failed", "message": f"UI 用例保存失败：{str(exc)[:500]}"}
+
+
 # ============== 统一响应辅助函数 ==============
 
 
@@ -2804,6 +2880,7 @@ class AgentLoopStreamAPIView(View):
                         complete_data = {"type": "complete", "total_steps": step_count}
                     if generate_playwright_script:
                         ui_case_id = None
+                        generation_error = ""
                         if test_case_id:
                             try:
                                 from testcases.models import TestCase
@@ -2819,6 +2896,55 @@ class AgentLoopStreamAPIView(View):
                                     "AgentLoopStreamAPI: failed to verify generated UI case binding; testcase=%s",
                                     test_case_id,
                                 )
+                        if not ui_case_id and record and record.status == "pass":
+                            yield create_sse_data(
+                                {
+                                    "type": "testcase_progress",
+                                    "session_id": session_id,
+                                    "test_case_id": int(test_case_id),
+                                    "state": "generating_ui_case",
+                                    "message": "功能用例已通过，正在补充生成并绑定 UI 自动化用例",
+                                }
+                            )
+                            generated = await _force_save_generated_ui_case(
+                                llm=llm,
+                                tools=tools,
+                                messages=all_messages if "all_messages" in locals() else [],
+                            )
+                            reported_ui_case_id = None
+                            if generated.get("status") == "success":
+                                reported_ui_case_id = generated.get("ui_test_case_id")
+                                if not reported_ui_case_id:
+                                    generation_error = "保存工具标记成功，但没有返回 UI 用例 ID。"
+                                logger.info(
+                                    "AgentLoopStreamAPI: post-run UI case save completed; testcase=%s ui_case=%s",
+                                    test_case_id,
+                                    reported_ui_case_id,
+                                )
+                            else:
+                                generation_error = str(
+                                    generated.get("message") or "保存工具未返回成功结果。"
+                                )[:700]
+                                logger.warning(
+                                    "AgentLoopStreamAPI: post-run UI case generation failed; testcase=%s reason=%s",
+                                    test_case_id,
+                                    generation_error,
+                                )
+                            # Confirm the database binding, rather than trusting only the model/tool response.
+                            if test_case_id:
+                                try:
+                                    ui_case_id = await sync_to_async(
+                                        TestCase.objects.filter(
+                                            id=int(test_case_id), project_id=int(project_id)
+                                        ).values_list("ui_test_case_id", flat=True).first
+                                    )()
+                                except Exception:
+                                    logger.exception(
+                                        "AgentLoopStreamAPI: failed to verify post-run UI binding; testcase=%s",
+                                        test_case_id,
+                                    )
+                            if reported_ui_case_id and not ui_case_id and not generation_error:
+                                generation_error = "保存工具报告成功，但数据库中未查到绑定记录。"
                         if ui_case_id:
                             success_note = (
                                 f"\n\n### UI 自动化用例生成\n"
@@ -2839,7 +2965,7 @@ class AgentLoopStreamAPIView(View):
                             failure_note = (
                                 "\n\n### UI 自动化用例生成\n"
                                 "失败：功能用例已通过，但本次执行没有成功保存并绑定 UI 自动化用例。"
-                                "请查看对话中的 save_generated_ui_testcase 工具结果后重试。"
+                                + (f"原因：{generation_error}。" if generation_error else "")
                             )
                             record.summary = (record.summary or "") + failure_note
                             await sync_to_async(record.save)(update_fields=["summary"])
