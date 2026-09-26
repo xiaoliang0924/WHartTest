@@ -64,6 +64,8 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
 1. **逐步执行**：按步骤编号一步一脚本、一步一截图；禁止跳步、合并或省略。
 2. **筛选单独成步**：步骤含筛选/查询时，只做选条件 + 查询 + 验收 + 截图，不要同一步点进详情。
    - 普通下拉：`selectFormDropdownOption(page, 字段标签, 选项)`。选完必须看筛选框里的值，禁止用列表单元格里的同名状态代替。
+   - **按工单状态找行**（如「找到处理中工单」）：必须操作页面真实的「工单状态」下拉（`selectFormDropdownOption(page, '工单状态', '处理中')` 或 `filterWorkOrdersByStatus(page, '处理中')`），不能把状态填进「工单号/工单编号」文本搜索框。
+   - **字段名必须来自当前页面**：若用例字段名与页面占位文字不同，先 `describePageForAI(page)` 并基于实际可见控件调用 helper；例如「工单编号」可对应页面的「搜索工单号…」。禁止猜不存在的 placeholder。拿不到控件时，报告实际可见字段与定位错误，不得改写成「缺失业务」。
    - 弹窗多选：`selectDialogMultiSelect(page, 字段标签, 选项名)`
    - 禁止用 `getByText('某状态').click()` 点表格里的状态文字。
    - 禁止 `getByPlaceholder('请选择工单状态')`：Element Plus 下拉通常没有这个 placeholder。
@@ -74,6 +76,7 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
    「xx标签」以页面徽章文案为准（如高/中/低），不要只搜字段名本身。
 4. **截图**：每步 `screenshotCaseStep(page, N)`，系统自动上传。禁止 `upload_screenshot`。第 N 步图必须是完成第 N 步后的页面。
 5. **结束必须输出完整报告**。脚本 SyntaxError 先改当前步再重试。
+6. **保留原始失败原因**：Playwright 的 `locator` / `fill` / `click` 超时、未找到控件等错误，报告必须指出原始控件和失败步骤；不得归因为“缺失业务”或未执行过的后续步骤。
 
 """ + EXECUTION_RESULT_REPORT_FORMAT + """
 
@@ -123,13 +126,39 @@ PROCESSING_HANDOVER_EXECUTION_HINT = """
 
 ## 【处理中工单→移交审批 — 强制专用 helper】
 
-当用例名称/步骤含「处理中 + 移交审批」时：
+当用例属于移交审批流程（含提交前、提交后及拦截校验）时：
 
 1. **每一步只允许一行脚本**：`await helpers.runProcessingHandoverCaseStep(page, <步骤号>);`
 2. **禁止**改用 `runClaimableTicketCaseStep`（会按「待处理」筛选，找不到已是「处理中」的造数工单）。
-3. **禁止**手写筛选/点处理；helper 会注入造数工单号并按「处理中」筛选。
-4. 步骤4 校验「移交审批」可见且无「审批详情」。
+3. **禁止**手写筛选/点处理；helper 会按造数工单号及用例需要的审批状态定位。
+4. 造数与执行会按步骤识别提交前/提交后、审批详情、审批人列表及原因边界等流程；必须使用本次造数工单。
 5. `RESULT=FAIL` 必须停止，禁止改报通过。
+
+"""
+
+PENDING_NO_HANDOVER_EXECUTION_HINT = """
+
+## 【待处理详情页不展示移交审批按钮 — 强制专用 helper】
+
+本用例只有 3 步：登录、进入本次造数的待处理工单详情、检查右上角按钮区域。
+每一步只调用 `await helpers.runProcessingHandoverCaseStep(page, <步骤号>);`。
+步骤 2 必须进入本次工单详情；步骤 3 必须在详情页确认「移交审批」按钮不可见。
+禁止调用 `runClaimableTicketCaseStep`；它的步骤 3 只会筛选列表，不能验证本用例。
+只有步骤 3 输出 `RESULT=PASS: 步骤3已确认待处理工单详情未显示移交审批按钮`
+且有步骤 3 截图时，才可报告通过。
+
+"""
+
+COMPLETE_TICKET_UI_EXECUTION_HINT = """
+
+## 【处理中工单→工单完成 — 按步骤语义执行的专用 helper】
+
+当用例名称/步骤含「点击工单完成 / 确认弹窗 / 确认完成」时：
+
+1. **每一步只允许一行脚本**：`await helpers.runCompleteTicketCaseStep(page, <步骤号>);`
+2. **禁止**改用 `runClaimableTicketCaseStep`（会按「待处理」筛选，截图停在列表页，与步骤文案不符）。
+3. helper 按当前用例每步描述执行：进详情、检查按钮、打开确认弹窗、确定或取消，并验证对应状态/沟通区；不要把不同用例都当作三步流程。
+4. `RESULT=FAIL` 必须停止，禁止改报通过。
 
 """
 

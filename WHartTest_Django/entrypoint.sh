@@ -66,7 +66,13 @@ ensure_playwright_skill_browsers() {
 # 持久化覆盖：init_skills 会用镜像内 bundled 覆盖 media，热修 helpers 放此路径即可在每次启动后生效
 PLAYWRIGHT_HELPERS_OVERRIDE="/app/data/media/skill_runtime_overrides/playwright-skill/lib/helpers.js"
 PLAYWRIGHT_HELPERS_TARGET="/app/data/media/skills/1/20/lib/helpers.js"
+PLAYWRIGHT_HELPERS_BUNDLED="/app/bundled_skills/playwright-skill/lib/helpers.js"
 if [ -f "$PLAYWRIGHT_HELPERS_OVERRIDE" ] && [ -f "$PLAYWRIGHT_HELPERS_TARGET" ]; then
+  # 运行时覆盖文件可能保留其他热修，但不能再把旧版工单完成流程盖回去。
+  # 每次启动只从 bundled 合并这一段公共分发逻辑，其余覆盖内容保持原样。
+  if [ -f "$PLAYWRIGHT_HELPERS_BUNDLED" ] && grep -q 'function completeTicketActionForStep(' "$PLAYWRIGHT_HELPERS_BUNDLED"; then
+    python /app/scripts/merge_complete_runtime_helper.py "$PLAYWRIGHT_HELPERS_BUNDLED" "$PLAYWRIGHT_HELPERS_OVERRIDE"
+  fi
   echo "Applying playwright helpers.js runtime override..."
   cp -a "$PLAYWRIGHT_HELPERS_OVERRIDE" "$PLAYWRIGHT_HELPERS_TARGET"
 fi

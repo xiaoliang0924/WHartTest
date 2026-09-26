@@ -1259,7 +1259,10 @@ const hasExecutionReportMessage = () => (
 );
 
 const appendExecutionReportMessage = (summary: string, status: 'pass' | 'fail') => {
-  if (!summary || hasExecutionReportMessage()) return;
+  if (!summary) return;
+  // 模型可能在后续工具调用之前先写报告；最终记录到达时以服务端报告覆盖，
+  // 并将卡片移动到所有步骤输出之后。
+  messages.value = messages.value.filter((m) => m.messageType !== 'execution_report');
   messages.value.push({
     content: summary,
     isUser: false,
@@ -1288,8 +1291,23 @@ const ensureStreamUserMessageSolidified = (stream?: (typeof activeStreams.value)
 
 /** 将历史 AI 消息中的报告 markdown 提升为 execution_report 卡片 */
 const promoteExecutionReportInMessages = (msgs: ChatMessage[]): ChatMessage[] => {
-  if (msgs.some((m) => m.messageType === 'execution_report')) {
-    return msgs;
+  const existingReport = [...msgs].reverse().find((m) => m.messageType === 'execution_report');
+  if (existingReport) {
+    const finalSummary = extractFirstExecutionReport(existingReport.content);
+    const finalCaseId = finalSummary.match(/测试用例\s*ID\s*[:：]\s*(\d+)/)?.[1];
+    const withoutDuplicate = msgs.flatMap((msg) => {
+      if (msg === existingReport) return [];
+      if (msg.isUser || msg.messageType === 'tool'
+          || !isExecutionReportContent(msg.content)) return [msg];
+      const reportText = extractFirstExecutionReport(msg.content);
+      const reportCaseId = reportText.match(/测试用例\s*ID\s*[:：]\s*(\d+)/)?.[1];
+      if (reportText !== finalSummary && (!finalCaseId || reportCaseId !== finalCaseId)) {
+        return [msg];
+      }
+      const prefix = stripExecutionReportFromText(msg.content).trim();
+      return prefix ? [{ ...msg, content: prefix, messageType: 'ai' as const }] : [];
+    });
+    return [...withoutDuplicate, existingReport];
   }
 
   for (let i = msgs.length - 1; i >= 0; i -= 1) {
@@ -1312,14 +1330,15 @@ const promoteExecutionReportInMessages = (msgs: ChatMessage[]): ChatMessage[] =>
         executionStatus: status,
       });
     } else {
-      next[i] = {
+      next.splice(i, 1);
+      next.push({
         ...msg,
         content: summary,
         messageType: 'execution_report',
         executionStatus: status,
-      };
+      });
     }
-    return next;
+    return promoteExecutionReportInMessages(next);
   }
 
   return msgs;
@@ -1383,6 +1402,88 @@ const attachExecutionReportIfMissing = async (chatSessionId: string) => {
   }
 
   return false;
+};
+
+// SSE 连接可能在最后一条工具输出后不再发送 complete。用执行记录的终态
+// 校准当前用例会话，避免后端已有结果而聊天页一直停在步骤截图。
+let testcaseResultPollTimer: ReturnType<typeof setInterval> | null = null;
+let testcaseResultPollInFlight = false;
+let testcaseResultPollSessionId: string | null = null;
+let testcaseResultPollCompletedAt: number | null = null;
+
+const TESTCASE_RESULT_RECONCILE_GRACE_MS = 3 * 60 * 1000;
+
+const stopTestcaseResultPolling = () => {
+  if (testcaseResultPollTimer) {
+    clearInterval(testcaseResultPollTimer);
+    testcaseResultPollTimer = null;
+  }
+  testcaseResultPollSessionId = null;
+  testcaseResultPollCompletedAt = null;
+};
+
+const startTestcaseResultPolling = (chatSessionId: string, caseId: number) => {
+  stopTestcaseResultPolling();
+  testcaseResultPollSessionId = chatSessionId;
+  testcaseResultPollCompletedAt = null;
+
+  const checkResult = async () => {
+    if (testcaseResultPollInFlight || testcaseResultPollSessionId !== chatSessionId) return;
+    if (sessionId.value !== chatSessionId || !projectStore.currentProjectId) {
+      stopTestcaseResultPolling();
+      return;
+    }
+    const stream = activeStreams.value[chatSessionId];
+    if (stream?.executionReport?.content) {
+      appendExecutionReportMessage(
+        stream.executionReport.content,
+        stream.executionReport.status
+      );
+      stopTestcaseResultPolling();
+      await nextTick();
+      chatMessagesRef.value?.scrollToBottom();
+      return;
+    }
+    if (stream?.isComplete) {
+      testcaseResultPollCompletedAt ??= Date.now();
+      if (Date.now() - testcaseResultPollCompletedAt >= TESTCASE_RESULT_RECONCILE_GRACE_MS) {
+        // Give the durable run record time to reach a terminal state. If it did
+        // not, do one final bounded reconciliation before releasing the poller.
+        await attachExecutionReportIfMissing(chatSessionId);
+        stopTestcaseResultPolling();
+        return;
+      }
+    }
+
+    testcaseResultPollInFlight = true;
+    try {
+      const response = await getLatestTestCaseRunRecord(
+        projectStore.currentProjectId, caseId, chatSessionId
+      );
+      if (testcaseResultPollSessionId !== chatSessionId) return;
+      const record = response.success ? response.data : undefined;
+      if (!record || record.status === 'running' || !record.summary) return;
+
+      const summary = extractFirstExecutionReport(record.summary);
+      if (!isExecutionReportContent(summary)) return;
+      if (stream) {
+        applyTestCaseRunReportToStream(stream, record);
+        stream.isComplete = true;
+      }
+      appendExecutionReportMessage(summary, record.status === 'pass' ? 'pass' : 'fail');
+      clearSessionRunning(chatSessionId);
+      stopTestcaseResultPolling();
+      await nextTick();
+      chatMessagesRef.value?.scrollToBottom();
+    } finally {
+      testcaseResultPollInFlight = false;
+    }
+  };
+
+  testcaseResultPollTimer = setInterval(() => {
+    void checkResult().catch((error) => console.warn('核对用例最终结果失败:', error));
+  }, 2000);
+  void checkResult().catch((error) => console.warn('核对用例最终结果失败:', error));
 };
 
 /** 执行结束后刷新历史并补全报告卡片（本页/跨标签页均适用） */
@@ -2719,9 +2820,34 @@ const tryAutostartExecCaseStream = async () => {
     return;
   }
 
+  // 页面重载后，如果这次会话已经结束，不要再次启动同一用例。
+  const existingResult = await getLatestTestCaseRunRecord(
+    projectStore.currentProjectId, ctx.testCaseId, sid
+  );
+  if (existingResult.success && existingResult.data
+      && existingResult.data.status !== 'running') {
+    execCaseAutostartAttempted = true;
+    sessionId.value = sid;
+    saveSessionId(sid);
+    clearSessionRunning(sid);
+    const summary = extractFirstExecutionReport(existingResult.data.summary || '');
+    if (isExecutionReportContent(summary)) {
+      const stream = activeStreams.value[sid];
+      if (stream) {
+        applyTestCaseRunReportToStream(stream, existingResult.data);
+        stream.isComplete = true;
+      }
+      appendExecutionReportMessage(
+        summary, existingResult.data.status === 'pass' ? 'pass' : 'fail'
+      );
+    }
+    return;
+  }
+
   const localStream = activeStreams.value[sid];
   if (localStream && !localStream.isComplete) {
     execCaseAutostartAttempted = true;
+    startTestcaseResultPolling(sid, ctx.testCaseId);
     syncRemoteGenerating();
     return;
   }
@@ -2746,6 +2872,7 @@ const tryAutostartExecCaseStream = async () => {
   sessionId.value = sid;
   saveSessionId(sid);
   isLoading.value = true;
+  startTestcaseResultPolling(sid, ctx.testCaseId);
 
   try {
     await handleStreamMessage(requestData, userMessage);
@@ -3316,6 +3443,7 @@ watch(
 
 onUnmounted(() => {
   stopRemoteSessionPolling();
+  stopTestcaseResultPolling();
   window.removeEventListener('storage', handleRunningSessionStorage);
   window.removeEventListener(RUNNING_SESSION_EVENT, applyRunningSessionChange);
   window.removeEventListener(STREAM_COMPLETE_EVENT, handleStreamCompleteEvent as EventListener);

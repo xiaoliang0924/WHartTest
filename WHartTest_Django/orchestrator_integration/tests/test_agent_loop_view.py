@@ -26,10 +26,35 @@ from ..agent_loop_view import (
     _normalize_uploaded_image_base64_list,
     _prepare_agent_loop_human_message,
     _run_and_stream_remaining_helper_steps,
+    _extract_testcase_step_from_tool_call,
 )
 
 
+class CompletionHelperProgressTests(SimpleTestCase):
+    def test_complete_ticket_helper_step_is_reported(self):
+        self.assertEqual(
+            _extract_testcase_step_from_tool_call({
+                'name': 'execute_skill_script',
+                'args': {'command': 'await helpers.runCompleteTicketCaseStep(page, 4);'},
+            }),
+            4,
+        )
+
+
 class FinalTestcaseStepTests(SimpleTestCase):
+    def test_helper_template_is_not_guessed_for_ai_only_case(self):
+        self.assertEqual(infer_fixed_helper_call_template([]), "")
+        self.assertEqual(
+            infer_fixed_helper_call_template([AIMessage(content="查看工单列表当前状态列")]),
+            "",
+        )
+        self.assertEqual(
+            infer_fixed_helper_call_template([
+                AIMessage(content="await helpers.runCompleteTicketCaseStep(page, 1);")
+            ]),
+            "await helpers.runCompleteTicketCaseStep(page, {step});",
+        )
+
     def test_final_fixed_helper_pass_is_terminal(self):
         self.assertTrue(
             _is_final_testcase_step_pass(
@@ -84,7 +109,8 @@ class FinalTestcaseStepTests(SimpleTestCase):
         prompt = _build_incomplete_testcase_resume_prompt(done_step=6, total_steps=7)
         self.assertIn("步骤 7", prompt)
         self.assertIn("禁止输出测试报告", prompt)
-        self.assertIn("runClaimableTicketCaseStep(page, 7)", prompt)
+        self.assertIn("无法确认脚本类型时停止并报告", prompt)
+        self.assertNotIn("runClaimableTicketCaseStep", prompt)
 
     def test_helper_result_reason_ignores_skill_doc_samples(self):
         status, reason = _extract_helper_result_reason(
@@ -148,7 +174,13 @@ class FinalTestcaseStepTests(SimpleTestCase):
             ), patch(
                 "orchestrator_integration.builtin_tools.skill_tools.infer_fixed_helper_call_template",
                 return_value="await helpers.runClaimableTicketCaseStep(page, {step});",
+            ), patch(
+                "testcases.models.TestCase.objects.filter",
+            ) as case_filter, patch(
+                "data_generation.testcase_pre_data.is_claimable_ticket_detail_case",
+                return_value=True,
             ):
+                case_filter.return_value.first.return_value = object()
                 async for event in _run_and_stream_remaining_helper_steps(
                     test_case_id=1402,
                     user_id=1,
@@ -173,6 +205,34 @@ class FinalTestcaseStepTests(SimpleTestCase):
         self.assertEqual(events[2]["tool_name"], "execute_skill_script")
         self.assertIn("RESULT=PASS", events[2]["tool_output"])
         self.assertEqual(types[-1], "_auto_run_bundle")
+
+    def test_auto_resume_without_fixed_helper_defers_to_ai(self):
+        async def collect():
+            with patch(
+                "orchestrator_integration.builtin_tools.skill_tools.infer_fixed_helper_call_template",
+                return_value="",
+            ), patch(
+                "orchestrator_integration.agent_loop_view._get_testcase_step_names",
+                side_effect=AssertionError("No script should run"),
+            ):
+                return [
+                    event async for event in _run_and_stream_remaining_helper_steps(
+                        test_case_id=1142,
+                        user_id=1,
+                        project_id=1,
+                        session_id="sess",
+                        from_step=2,
+                        to_step=4,
+                        messages=[],
+                    )
+                ]
+
+        events = async_to_sync(collect)()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "_auto_run_bundle")
+        self.assertTrue(events[0]["no_template"])
+        self.assertEqual(events[0]["output"], "")
+        self.assertEqual(events[0]["last_step"], 1)
 from ..builtin_tools.skill_tools import (
     _auto_upload_case_screenshots,
     _build_skill_artifacts_dir,
@@ -185,6 +245,7 @@ from ..builtin_tools.skill_tools import (
     _SKILL_DIR_STALE_SECONDS,
     _sanitize_runtime_path_segment,
     _with_failure_reminder,
+    infer_fixed_helper_call_template,
 )
 from ..builtin_tools.output_sanitizer import strip_terminal_control_sequences
 from ..middleware_config import (

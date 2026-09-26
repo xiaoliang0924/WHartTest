@@ -30,6 +30,19 @@ logger = logging.getLogger("orchestrator_integration")
 
 _playwright_session_manager: Optional[PlaywrightSessionManager] = None
 _playwright_session_manager_lock = threading.Lock()
+
+
+def _set_complete_ticket_step_metadata(env: dict, testcase) -> None:
+    """Pass only step semantics to the completion helper; never pass login steps."""
+    steps = {
+        str(step.step_number): {
+            "description": step.description or "",
+            "expected": step.expected_result or "",
+        }
+        for step in testcase.steps.order_by("step_number")
+        if step.step_number > 1
+    }
+    env["WHARTTEST_COMPLETE_STEPS_JSON"] = json.dumps(steps, ensure_ascii=False)
 _ARTIFACT_EXTENSIONS = {
     ".drawio",
     ".png",
@@ -883,7 +896,7 @@ def _auto_upload_case_screenshots(
 
 
 _HELPER_STEP_CALL_RE = re.compile(
-    r"helpers\.(run(?:ClaimableTicket|TransferTicket|ProcessingHandover|TicketDetail|Overview|Notification)CaseStep|"
+    r"helpers\.(run(?:ClaimableTicket|TransferTicket|ProcessingHandover|CompleteTicket|TicketDetail|Overview|Notification)CaseStep|"
     r"screenshotCaseStep)\s*\(\s*page\s*,\s*(\d+)",
     re.IGNORECASE,
 )
@@ -911,7 +924,8 @@ def infer_fixed_helper_call_template(messages) -> str:
         match = _HELPER_STEP_CALL_RE.search(text)
         if match:
             return f"await helpers.{match.group(1)}(page, {{step}});"
-    return "await helpers.runClaimableTicketCaseStep(page, {step});"
+    # Never guess a claimable-ticket helper for an unrelated AI-only case.
+    return ""
 
 
 def _playwright_exec_timeout_for_helper_code(helper_code: str) -> tuple[int, int]:
@@ -929,7 +943,7 @@ def _playwright_exec_timeout_for_helper_code(helper_code: str) -> tuple[int, int
     ):
         return 120000, 150
     if re.search(
-        r"run(?:TransferTicket|ProcessingHandover)CaseStep\s*\(\s*page\s*,\s*[3-9]\s*\)",
+        r"run(?:TransferTicket|ProcessingHandover|CompleteTicket)CaseStep\s*\(\s*page\s*,\s*[2-9]\s*\)",
         text,
         flags=re.IGNORECASE,
     ):
@@ -977,7 +991,7 @@ def auto_run_missing_testcase_helper_steps(
     browser_session_id: str,
     from_step: int,
     to_step: int,
-    helper_call_template: str = "await helpers.runClaimableTicketCaseStep(page, {step});",
+    helper_call_template: Optional[str] = None,
     total_steps: Optional[int] = None,
 ) -> Union[Dict[str, str], str]:
     """Directly run remaining fixed helper steps on the live Playwright session.
@@ -1026,9 +1040,12 @@ def auto_run_missing_testcase_helper_steps(
             get_latest_pre_data_ticket_id,
             get_latest_pre_data_ticket_no,
             is_claimable_ticket_detail_case,
+            is_complete_ticket_ui_case,
             is_transfer_ready_ticket_case,
             is_transfer_ui_helper_case,
             is_processing_handover_case,
+            is_processing_handover_submission_case,
+            processing_handover_flow_kind,
             transfer_ui_helper_flow,
             get_pre_data_snapshot_for_execution,
             resolve_claim_login_credentials,
@@ -1058,12 +1075,30 @@ def auto_run_missing_testcase_helper_steps(
                 env.setdefault("WHARTTEST_TRANSFER_REASON", "自动化测试转派")
             if is_processing_handover_case(tc):
                 env["WHARTTEST_PROCESSING_HANDOVER_CASE"] = "1"
+                handover_flow = processing_handover_flow_kind(tc)
+                if handover_flow:
+                    env["WHARTTEST_HANDOVER_FLOW"] = handover_flow
+                if is_processing_handover_submission_case(tc):
+                    env["WHARTTEST_PROCESSING_HANDOVER_SUBMISSION"] = "1"
+                    for case_step in tc.steps.order_by("step_number"):
+                        match = re.search(
+                            r"(?:选择审批人(?!弹窗)|选中(?:审批人)?)\s*([\u4e00-\u9fff]{2,4})",
+                            f"{case_step.description or ''} {case_step.expected_result or ''}",
+                        )
+                        if match:
+                            env["WHARTTEST_HANDOVER_APPROVER_NAME"] = match.group(1)
+                            break
+            if is_complete_ticket_ui_case(tc):
+                env["WHARTTEST_COMPLETE_TICKET_CASE"] = "1"
+                _set_complete_ticket_step_metadata(env, tc)
             if (
                 is_claimable_ticket_detail_case(tc)
                 or is_transfer_ready_ticket_case(tc)
                 or is_processing_handover_case(tc)
+                or is_complete_ticket_ui_case(tc)
             ):
-                env["WHARTTEST_CLAIMABLE_PENDING"] = "1"
+                if is_claimable_ticket_detail_case(tc) or is_transfer_ready_ticket_case(tc):
+                    env["WHARTTEST_CLAIMABLE_PENDING"] = "1"
                 ticket_no = get_latest_pre_data_ticket_no(
                     tc, chat_session_id=chat_session_id
                 )
@@ -1077,6 +1112,8 @@ def auto_run_missing_testcase_helper_steps(
                 snapshot = get_pre_data_snapshot_for_execution(
                     tc, chat_session_id=chat_session_id
                 )
+                if snapshot.get("approverName"):
+                    env["WHARTTEST_HANDOVER_APPROVER_NAME"] = str(snapshot["approverName"])
                 claim_credentials, _err = resolve_claim_login_credentials(tc, snapshot)
                 if claim_credentials:
                     env["WHARTTEST_USERNAME"] = claim_credentials["username"]
@@ -1086,8 +1123,10 @@ def auto_run_missing_testcase_helper_steps(
                     env["WHARTTEST_CLAIM_ASSIGNEE_NAME"] = claim_credentials[
                         "assignee_name"
                     ]
-                # 移交审批用例步骤里写的是 UI SSO 账号（如 802714），优先保留用例原文登录信息。
-                if is_processing_handover_case(tc) and creds.get("username"):
+                # 移交审批 / 工单完成用例步骤里写的是 UI SSO 账号，优先保留用例原文登录信息。
+                if (
+                    is_processing_handover_case(tc) or is_complete_ticket_ui_case(tc)
+                ) and creds.get("username"):
                     env["WHARTTEST_USERNAME"] = creds["username"]
                     if creds.get("password"):
                         env["WHARTTEST_PASSWORD"] = creds["password"]
@@ -1106,9 +1145,9 @@ def auto_run_missing_testcase_helper_steps(
     )
     manager = _get_playwright_session_manager()
     notes: list[str] = []
-    template = helper_call_template or (
-        "await helpers.runClaimableTicketCaseStep(page, {step});"
-    )
+    template = helper_call_template
+    if not template:
+        return "RESULT=FAIL: 本用例没有匹配的自动补跑脚本"
     artifacts_before = _snapshot_artifact_files(screenshots_dir)
 
     for step in range(int(from_step), int(to_step) + 1):
@@ -1427,9 +1466,12 @@ def get_skill_tools(
                             get_latest_pre_data_ticket_id,
                             get_latest_pre_data_ticket_no,
                             is_claimable_ticket_detail_case,
+                            is_complete_ticket_ui_case,
                             is_overview_dashboard_case,
                             is_overview_sla_detail_case,
                             is_processing_handover_case,
+                            is_processing_handover_submission_case,
+                            processing_handover_flow_kind,
                             is_ticket_detail_boundary_case,
                             is_transfer_ready_ticket_case,
                             is_transfer_ui_helper_case,
@@ -1469,13 +1511,30 @@ def get_skill_tools(
                             )
                         if is_processing_handover_case(tc):
                             env["WHARTTEST_PROCESSING_HANDOVER_CASE"] = "1"
-                        # 详情类 / 领取类 / 转派按钮准备类 / 移交审批都必须绑定本次造数工单；
+                            handover_flow = processing_handover_flow_kind(tc)
+                            if handover_flow:
+                                env["WHARTTEST_HANDOVER_FLOW"] = handover_flow
+                            if is_processing_handover_submission_case(tc):
+                                env["WHARTTEST_PROCESSING_HANDOVER_SUBMISSION"] = "1"
+                                for case_step in tc.steps.order_by("step_number"):
+                                    match = re.search(
+                                        r"(?:选择审批人(?!弹窗)|选中(?:审批人)?)\s*([\u4e00-\u9fff]{2,4})",
+                                        f"{case_step.description or ''} {case_step.expected_result or ''}",
+                                    )
+                                    if match:
+                                        env["WHARTTEST_HANDOVER_APPROVER_NAME"] = match.group(1)
+                                        break
+                        if is_complete_ticket_ui_case(tc):
+                            env["WHARTTEST_COMPLETE_TICKET_CASE"] = "1"
+                            _set_complete_ticket_step_metadata(env, tc)
+                        # 详情类 / 领取类 / 转派按钮准备类 / 移交审批 / 工单完成都必须绑定本次造数工单；
                         # 领取与转派准备还要按自动分配结果切换浏览器登录人。
                         if (
                             is_ticket_detail_boundary_case(tc)
                             or is_claimable_ticket_detail_case(tc)
                             or is_transfer_ready_ticket_case(tc)
                             or is_processing_handover_case(tc)
+                            or is_complete_ticket_ui_case(tc)
                         ):
                             if is_ticket_detail_boundary_case(tc):
                                 env["WHARTTEST_TICKET_DETAIL_CASE"] = "1"
@@ -1497,17 +1556,24 @@ def get_skill_tools(
                                 is_claimable_ticket_detail_case(tc)
                                 or is_transfer_ready_ticket_case(tc)
                                 or is_processing_handover_case(tc)
+                                or is_complete_ticket_ui_case(tc)
                             ):
                                 snapshot = get_pre_data_snapshot_for_execution(
                                     tc,
                                     chat_session_id=current_chat_session_id,
                                 )
+                                if snapshot.get("approverName"):
+                                    env["WHARTTEST_HANDOVER_APPROVER_NAME"] = str(snapshot["approverName"])
                                 claim_credentials, claim_credential_error = (
                                     resolve_claim_login_credentials(tc, snapshot)
                                 )
-                                if claim_credential_error and not is_processing_handover_case(tc):
+                                keep_case_login = (
+                                    is_processing_handover_case(tc)
+                                    or is_complete_ticket_ui_case(tc)
+                                )
+                                if claim_credential_error and not keep_case_login:
                                     return f"错误: 领取工单前置账号不可用：{claim_credential_error}"
-                                if claim_credentials and not is_processing_handover_case(tc):
+                                if claim_credentials and not keep_case_login:
                                     env["WHARTTEST_USERNAME"] = claim_credentials["username"]
                                     env["WHARTTEST_PASSWORD"] = claim_credentials["password"]
                                     if claim_credentials.get("login_url"):
@@ -1515,7 +1581,7 @@ def get_skill_tools(
                                     env["WHARTTEST_CLAIM_ASSIGNEE_NAME"] = claim_credentials[
                                         "assignee_name"
                                     ]
-                                if is_processing_handover_case(tc):
+                                if keep_case_login:
                                     if snapshot.get("assigneeName"):
                                         env["WHARTTEST_CLAIM_ASSIGNEE_NAME"] = str(
                                             snapshot.get("assigneeName")
@@ -1601,7 +1667,9 @@ def get_skill_tools(
                                 from data_generation.testcase_pre_data import (
                                     build_testcase_navigation_hint_by_id,
                                     is_claimable_ticket_detail_case,
+                                    is_complete_ticket_ui_case,
                                     is_processing_handover_case,
+                                    is_processing_handover_helper_case,
                                     is_ticket_message_send_case,
                                     is_transfer_ui_helper_case,
                                 )
@@ -1634,7 +1702,7 @@ def get_skill_tools(
                                         "`await helpers.runTransferTicketCaseStep(page, <步骤号>);`。"
                                         f"{nav}"
                                     )
-                                if is_processing_handover_case(_tc) and not re.search(
+                                if is_processing_handover_helper_case(_tc) and not re.search(
                                     r"runProcessingHandoverCaseStep\s*\(\s*page\s*,\s*\d+\s*\)",
                                     helper_code,
                                     flags=re.IGNORECASE,
@@ -1646,6 +1714,20 @@ def get_skill_tools(
                                         "错误: 本用例为「处理中→移交审批」专用流程，禁止改用领取 helper（会按待处理筛选）。"
                                         "每一步必须且只能调用 "
                                         "`await helpers.runProcessingHandoverCaseStep(page, <步骤号>);`。"
+                                        f"{nav}"
+                                    )
+                                if is_complete_ticket_ui_case(_tc) and not re.search(
+                                    r"runCompleteTicketCaseStep\s*\(\s*page\s*,\s*\d+\s*\)",
+                                    helper_code,
+                                    flags=re.IGNORECASE,
+                                ):
+                                    nav = build_testcase_navigation_hint_by_id(
+                                        int(current_test_case_id)
+                                    )
+                                    return (
+                                        "错误: 本用例为「工单完成确认弹窗」专用流程，禁止改用领取 helper（截图会停在列表页）。"
+                                        "每一步必须且只能调用 "
+                                        "`await helpers.runCompleteTicketCaseStep(page, <步骤号>);`。"
                                         f"{nav}"
                                     )
                                 if is_ticket_message_send_case(_tc) and re.search(
@@ -1691,7 +1773,7 @@ def get_skill_tools(
                         # runClaimableTicketCaseStep(page, N)。在此统一写入进度，
                         # 让页面无需依赖 helper 内部 console 或额外 SSE 事件也能显示。
                         progress_match = re.search(
-                            r"run(?:ClaimableTicket|TransferTicket)CaseStep\s*\(\s*page\s*,\s*(\d+)",
+                            r"run(?:ClaimableTicket|TransferTicket|ProcessingHandover|CompleteTicket)CaseStep\s*\(\s*page\s*,\s*(\d+)",
                             helper_code,
                             flags=re.IGNORECASE,
                         )

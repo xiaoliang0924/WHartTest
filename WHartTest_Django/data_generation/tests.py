@@ -60,6 +60,184 @@ class PlanExecutorValidationTests(DjangoTestCase):
         self.assertEqual(run.status, DataGenerationRun.STATUS_FAILED)
         self.assertIn('没有配置步骤', run.error_message)
 
+    def test_claim_fixture_rejects_replacing_new_ticket_with_historical_ticket(self):
+        plan = DataGenerationPlan.objects.create(
+            project=self.project,
+            name='claim-new-ticket-only',
+            template_key='biz_create_and_claim',
+            steps=[{'type': 'delay', 'name': '占位', 'seconds': 0}],
+            created_by=self.user,
+        )
+        executor = PlanExecutor(plan, triggered_by=self.user)
+        executor._claim_created_ticket_id = 5067
+        executor._claim_created_ticket_no = '2026092356245017'
+        executor.context.update(ticketId=5067, ticketNo='2026092356245017')
+        executor._ensure_claim_created_ticket()
+
+        executor.context.update(ticketId=5060, ticketNo='2026092339344010')
+        with self.assertRaisesMessage(DataGenerationError, '禁止复用历史工单'):
+            executor._ensure_claim_created_ticket()
+
+    def test_reassign_fallback_does_not_adopt_historical_ticket_when_run_ticket_exists(self):
+        plan = DataGenerationPlan.objects.create(
+            project=self.project,
+            name='assign-current-ticket-only',
+            template_key='biz_create_and_assign',
+            default_environment=self.environment,
+            steps=[],
+            created_by=self.user,
+        )
+        executor = PlanExecutor(plan, triggered_by=self.user)
+        executor.context.update(ticketId=5091, ticketNo='2026092459709012')
+
+        with patch('data_generation.services._query_ticket_rows_for_plan') as lookup:
+            result = executor._adopt_existing_ticket_for_desired_assignee({
+                'assigneeUserId': 46,
+                'assigneeName': '李亮',
+            })
+
+        self.assertIsNone(result)
+        lookup.assert_not_called()
+        self.assertEqual(executor.context['ticketId'], 5091)
+        self.assertEqual(executor.context['ticketNo'], '2026092459709012')
+
+    def test_create_and_assign_reassigns_the_new_ticket_with_admin_transfer(self):
+        plan = DataGenerationPlan.objects.create(
+            project=self.project,
+            name='assign-created-ticket-only',
+            template_key='biz_create_and_assign',
+            default_environment=self.environment,
+            steps=[],
+            created_by=self.user,
+        )
+        executor = PlanExecutor(
+            plan,
+            triggered_by=self.user,
+            input_params={'assigneeUserId': 46, 'assigneeName': '李亮'},
+        )
+        executor.context.update(ticketId=5091, ticketNo='2026092459709012')
+        step = {
+            'type': 'api_call',
+            'name': '分配工单',
+            'variables': {
+                'assigneeUserId': '{{assigneeUserId}}',
+                'assigneeName': '{{assigneeName}}',
+            },
+        }
+        original_row = {
+            'id': 5091,
+            'ticketNo': '2026092459709012',
+            'status': 'pending_process',
+            'assigneeUserId': 31,
+            'assigneeName': '林业丰',
+        }
+        transferred_row = {
+            **original_row,
+            'assigneeUserId': 46,
+            'assigneeName': '李亮',
+        }
+        transfer_interface = MagicMock()
+
+        with patch.object(
+                executor,
+                '_find_ticket_row_for_context',
+                side_effect=[original_row, transferred_row],
+        ) as find_ticket, patch(
+            'data_generation.services.ApiInterface.objects.filter'
+        ) as filter_interfaces:
+            with patch(
+                'api_environments.token_refresh.refresh_environment_tokens',
+                return_value={'adminToken': 'admin-token'},
+            ) as refresh_tokens, patch.object(
+                executor, '_run_named_ticket_mutation'
+            ) as transfer:
+                filter_interfaces.return_value.first.return_value = transfer_interface
+                result = executor._reassign_if_wrong_assignee(step)
+
+        self.assertEqual(result['reason'], 'created_ticket_transferred_to_assignee')
+        self.assertEqual(result['ticketNo'], '2026092459709012')
+        transfer.assert_called_once()
+        self.assertEqual(transfer.call_args.kwargs['ticket_id'], 5091)
+        self.assertEqual(
+            transfer.call_args.kwargs['extra_variables']['targetUserId'],
+            46,
+        )
+
+    def test_resolve_plan_reassigns_new_ticket_without_holder_login(self):
+        plan = DataGenerationPlan.objects.create(
+            project=self.project,
+            name='resolve-current-ticket',
+            template_key='biz_create_assign_resolve',
+            default_environment=self.environment,
+            steps=[],
+            created_by=self.user,
+        )
+        with patch('data_generation.services.get_template_by_key', return_value=None):
+            executor = PlanExecutor(
+                plan,
+                triggered_by=self.user,
+                input_params={'assigneeUserId': 46, 'assigneeName': '李亮'},
+            )
+        executor.context.update(ticketId=5091, ticketNo='2026092459709012')
+        row = {
+            'id': 5091, 'ticketNo': '2026092459709012',
+            'status': 'pending_process', 'assigneeUserId': 31,
+        }
+        transferred = {**row, 'assigneeUserId': 46}
+        with patch.object(executor, '_find_ticket_row_for_context', side_effect=[row, transferred]), \
+                patch('data_generation.services.ApiInterface.objects.filter') as interfaces, \
+                patch('api_environments.token_refresh.refresh_environment_tokens', return_value={'adminToken': 'token'}), \
+                patch.object(executor, '_run_named_ticket_mutation') as transfer, \
+                patch.object(executor, '_login_any_username') as login:
+            interfaces.return_value.first.return_value = MagicMock()
+            result = executor._reassign_if_wrong_assignee({
+                'type': 'api_call', 'name': '分配工单',
+                'variables': {'assigneeUserId': '{{assigneeUserId}}'},
+            })
+        self.assertEqual(result['ticketNo'], '2026092459709012')
+        transfer.assert_called_once()
+        login.assert_not_called()
+
+    def test_login_rate_limit_stops_candidate_loop(self):
+        plan = DataGenerationPlan.objects.create(
+            project=self.project, name='login-check', steps=[], created_by=self.user,
+        )
+        executor = PlanExecutor(plan, triggered_by=self.user)
+        with patch.object(executor, '_resolve_login_password_for_username', return_value=['bad1', 'bad2']), \
+                patch.object(executor, '_login_user_token', side_effect=DataGenerationError('RATE_LIMIT_EXCEEDED')) as login:
+            with self.assertRaisesMessage(DataGenerationError, '已停止继续尝试'):
+                executor._login_any_username(
+                    usernames=['user-a', 'user-b'],
+                    environment=self.environment,
+                    fallback_password='unused',
+                )
+        login.assert_called_once()
+
+    def test_case_fixture_verifies_actual_status_and_assignee(self):
+        plan = DataGenerationPlan.objects.create(
+            project=self.project, name='case-state-check',
+            template_key='biz_create_and_assign',
+            default_environment=self.environment, steps=[], created_by=self.user,
+        )
+        with patch('data_generation.services.get_template_by_key', return_value=None):
+            executor = PlanExecutor(
+                plan, triggered_by=self.user,
+                trigger_type=DataGenerationRun.TRIGGER_CASE_PRE,
+                input_params={'assigneeUserId': 46},
+            )
+        executor.context.update(ticketId=100, ticketNo='T100')
+        with patch.object(executor, '_find_ticket_row_for_context', return_value={
+            'id': 100, 'ticketNo': 'T100', 'status': 'pending_process',
+            'assigneeUserId': 46,
+        }):
+            executor._verify_case_fixture_state()
+        with patch.object(executor, '_find_ticket_row_for_context', return_value={
+            'id': 100, 'ticketNo': 'T100', 'status': 'resolved',
+            'assigneeUserId': 46,
+        }), patch('data_generation.services.time.sleep'):
+            with self.assertRaisesMessage(DataGenerationError, '实际状态'):
+                executor._verify_case_fixture_state()
+
     @patch('data_generation.services.InterfaceRunner')
     def test_api_call_success_updates_context(self, mock_runner_cls):
         mock_runner = MagicMock()
@@ -348,6 +526,20 @@ class BindSuitePreDataPlanTests(DjangoTestCase):
 
 
 class IntentRouterStateTests(DjangoTestCase):
+    def test_fixture_statuses_read_precondition_not_expected_outcome(self):
+        from data_generation.testcase_pre_data import required_fixture_statuses
+
+        self.assertEqual(
+            required_fixture_statuses('存在一条状态为「待处理」的测试工单'),
+            ('待处理',),
+        )
+        self.assertEqual(
+            required_fixture_statuses(
+                '存在一条状态为「已关闭」的工单\n存在一条状态为「已解决」的工单'
+            ),
+            ('已关闭', '已解决'),
+        )
+
     def test_claim_button_expectation_requires_detail_page_evidence(self):
         from types import SimpleNamespace
         from data_generation.testcase_pre_data import build_row_action_evidence_hints
@@ -412,6 +604,19 @@ class IntentRouterStateTests(DjangoTestCase):
             # 模板字面量或渲染后都不应超过 20（无 timestamp）。
             self.assertLessEqual(len(str(summary).replace('{{timestamp}}', '123456')), 20)
             self.assertNotIn('timestamp', str(summary))
+
+    def test_closed_template_closes_from_processing_without_resolve_step(self):
+        from data_generation.templates import get_template_by_key
+
+        template = get_template_by_key('biz_create_assign_close')
+        self.assertIsNotNone(template)
+        steps = template['steps']
+        self.assertIn('关闭工单', [step.get('name') for step in steps])
+        self.assertNotIn('完成工单', [step.get('name') for step in steps])
+        self.assertEqual(
+            next(step for step in steps if step.get('name') == '关闭工单')['interface_ref'],
+            'close_ticket',
+        )
 
     def test_unassigned_pending_case_does_not_route_to_assignment_or_resolve(self):
         from data_generation.intent_router import build_input_params, infer_business_template_key
@@ -484,7 +689,10 @@ class IntentRouterStateTests(DjangoTestCase):
         )
 
     def test_claimable_pool_requires_auto_assigned_pending_ticket(self):
-        from data_generation.testcase_pre_data import _ticket_row_supports_claim
+        from data_generation.testcase_pre_data import (
+            _normalize_assignment_workflow_ticket_type,
+            _ticket_row_supports_claim,
+        )
 
         self.assertTrue(_ticket_row_supports_claim({
             'status': 'pending_process',
@@ -599,6 +807,26 @@ class IntentRouterStateTests(DjangoTestCase):
         self.assertEqual(params_after.get('sourceAssigneeName'), '李亮')
         self.assertEqual(params_after.get('assigneeName'), '黎沅欣')
 
+    def test_transfer_template_freezes_destination_before_assign_context_refresh(self):
+        from data_generation.templates import BUILTIN_BUSINESS_TEMPLATES
+
+        template = next(
+            item for item in BUILTIN_BUSINESS_TEMPLATES
+            if item.get('template_key') == 'biz_create_and_transfer'
+        )
+        transfer_step = next(
+            item for item in template['steps']
+            if item.get('name') == '转派工单'
+        )
+        self.assertEqual(
+            transfer_step['variables']['targetUserId'],
+            '{{transferTargetUserId}}',
+        )
+        self.assertEqual(
+            transfer_step['variables']['targetRole'],
+            '{{transferTargetRole}}',
+        )
+
     def test_create_and_transfer_description_still_uses_transfer_template(self):
         from data_generation.intent_router import (
             build_input_params,
@@ -629,6 +857,134 @@ class TestcasePreDataResolverTests(DjangoTestCase):
             created_by=self.user,
         )
 
+    def test_stale_close_plan_is_rebound_to_single_ticket_endpoint(self):
+        from api_interfaces.models import ApiInterface
+        from data_generation.testcase_pre_data import ensure_project_template_plan
+
+        batch = ApiInterface.objects.create(
+            project=self.project, name='批量关闭工单', method='POST',
+            url='/api/tickets/batch-close',
+        )
+        single = ApiInterface.objects.create(
+            project=self.project, name='关闭工单', method='POST',
+            url='/api/tickets/${ticketId}/close',
+        )
+        plan = DataGenerationPlan.objects.create(
+            project=self.project, name='关闭样本', template_key='biz_create_assign_close',
+            is_template=True, is_active=True, created_by=self.user,
+            template_bindings={'interfaces': {'close_ticket': batch.id}},
+            steps=[{'type': 'api_call', 'name': '关闭工单', 'interface_id': batch.id}],
+        )
+
+        ensured = ensure_project_template_plan(
+            project_id=self.project.id, template_key='biz_create_assign_close',
+        )
+        self.assertEqual(ensured.id, plan.id)
+        self.assertEqual(ensured.steps[0]['interface_id'], single.id)
+        plan.refresh_from_db()
+        self.assertEqual(plan.steps[0]['interface_id'], single.id)
+
+    def test_claim_creator_is_not_rejected_for_unrelated_processing_ticket(self):
+        from data_generation.testcase_pre_data import _inject_claim_creator_token
+
+        with patch('data_generation.testcase_pre_data._list_processing_creator_names') as creators:
+            with patch.object(ApiEnvironment, 'get_all_variables', return_value={
+                'claimAssigneeToken_46': 'cached-token',
+            }), patch('api_environments.token_refresh._token_still_valid', return_value=True), patch(
+                'jwt.decode', return_value={'sub': 46},
+            ):
+                params = _inject_claim_creator_token(
+                    {'assigneeUserId': 46, 'assigneeName': '李亮'},
+                    project_id=self.project.id,
+                    environment_id=self.environment.id,
+                )
+        self.assertEqual(params['claimCreatorTokenVar'], 'claimAssigneeToken_46')
+        creators.assert_not_called()
+
+    def test_explicit_fixture_creator_uses_token_variable_without_persisting_token(self):
+        from data_generation.testcase_pre_data import _inject_case_creator_token
+
+        with patch(
+            'data_generation.testcase_pre_data._inject_claim_creator_token',
+            return_value={'claimCreatorTokenVar': 'claimAssigneeToken_46'},
+        ) as inject:
+            params = _inject_case_creator_token(
+                {'creatorUserId': 46, 'creatorName': '李亮', 'assigneeUserId': 39},
+                project_id=self.project.id,
+                environment_id=self.environment.id,
+            )
+
+        self.assertEqual(params['creatorTokenVar'], 'claimAssigneeToken_46')
+        self.assertEqual(params['creatorUserId'], 46)
+        self.assertNotIn('accessToken', params)
+        inject.assert_called_once_with(
+            {'assigneeUserId': 46, 'assigneeName': '李亮'},
+            project_id=self.project.id,
+            environment_id=self.environment.id,
+        )
+
+    def test_completion_step_metadata_follows_case_steps_without_login_secret(self):
+        import json
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            _set_complete_ticket_step_metadata,
+        )
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project, module=self.module,
+            name='确认完成弹窗', creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase, step_number=1,
+            description='用密码 secret-should-not-leak 登录', creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase, step_number=4,
+            description='点击弹窗蓝色「确定」按钮',
+            expected_result='状态变为已解决', creator=self.user,
+        )
+        env = {}
+        _set_complete_ticket_step_metadata(env, testcase)
+        payload = json.loads(env['WHARTTEST_COMPLETE_STEPS_JSON'])
+        self.assertNotIn('1', payload)
+        self.assertEqual(payload['4']['description'], '点击弹窗蓝色「确定」按钮')
+        self.assertNotIn('secret-should-not-leak', env['WHARTTEST_COMPLETE_STEPS_JSON'])
+
+    def test_whole_state_machine_is_not_forced_into_completion_dialog_helper(self):
+        from data_generation.testcase_pre_data import is_complete_ticket_ui_case
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project, module=self.module,
+            name='工单状态机流转验证', creator=self.user,
+        )
+        for number, description in enumerate(
+            ('分配工单', '领取工单', '点击工单完成', '移交审批', '关闭工单'), 1,
+        ):
+            TestCaseStep.objects.create(
+                test_case=testcase, step_number=number,
+                description=description, creator=self.user,
+            )
+        self.assertFalse(is_complete_ticket_ui_case(testcase))
+
+    def test_processing_handover_reuses_only_actionable_ticket(self):
+        from data_generation.testcase_pre_data import _reusable_processing_handover_row
+
+        row = {
+            'ticketNo': 'T-1435',
+            'status': 'processing',
+            'approvalStatus': 'none',
+            'assigneeUserId': 46,
+            'assigneeName': '李亮',
+            'availableActions': ['submit_approval'],
+        }
+        check = lambda item: _reusable_processing_handover_row(
+            item, ticket_no='T-1435', assignee_id=46, assignee_name='李亮',
+        )
+        self.assertTrue(check(row))
+        self.assertFalse(check({**row, 'status': 'pending_process'}))
+        self.assertFalse(check({**row, 'approvalStatus': 'pending'}))
+        self.assertFalse(check({**row, 'assigneeUserId': 39}))
+        self.assertFalse(check({**row, 'availableActions': ['resolve']}))
+
     def test_infer_pending_assign_from_case_text(self):
         from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
 
@@ -649,6 +1005,147 @@ class TestcasePreDataResolverTests(DjangoTestCase):
         resolution = resolve_pre_data_for_testcase(testcase)
         self.assertEqual(resolution.source, 'inferred')
         self.assertEqual(resolution.template_key, 'biz_create_type_a')
+
+    def test_unmatched_read_only_case_skips_auto_data_and_continues(self):
+        from data_generation.testcase_pre_data import (
+            resolve_pre_data_for_testcase,
+            run_testcase_pre_data,
+        )
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='工单列表-审批状态标签展示',
+            precondition='工单列表中存在可查看审批状态的工单数据',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase,
+            step_number=1,
+            description='打开工单列表并查看审批状态标签',
+            expected_result='审批状态标签显示正确',
+            creator=self.user,
+        )
+
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.source, 'unmatched_ticket_fixture')
+        result = run_testcase_pre_data(testcase)
+
+        self.assertFalse(result.blocked)
+        self.assertIsNone(result.run)
+        self.assertIn('继续使用目标环境现有数据执行', result.message_suffix)
+
+    def test_precondition_status_wins_over_expected_result(self):
+        from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project, module=self.module,
+            name='确认完成后工单状态变为已解决',
+            precondition='存在一条状态为「处理中」的测试工单',
+            creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=testcase, step_number=1,
+            description='点击工单完成', expected_result='状态变为已解决',
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.template_key, 'biz_create_and_claim')
+
+    def test_resolved_precondition_routes_to_resolve_plan(self):
+        from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project, module=self.module,
+            name='已解决工单不显示关闭按钮',
+            precondition='存在一条状态为「已解决」的工单',
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.template_key, 'biz_create_assign_resolve')
+
+    def test_multi_state_precondition_is_not_misreported_as_one_ticket(self):
+        from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project, module=self.module,
+            name='比较已关闭和已解决工单',
+            precondition='存在状态为「已关闭」的工单；存在状态为「已解决」的工单',
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        self.assertEqual(resolution.source, 'terminal_pair')
+        self.assertEqual(resolution.template_key, 'biz_prepare_terminal_pair')
+        self.assertTrue(resolution.fail_fast)
+
+    def test_terminal_pair_composes_two_distinct_ticket_runs(self):
+        from data_generation.testcase_pre_data import (
+            _run_terminal_pair_pre_data, resolve_pre_data_for_testcase,
+        )
+
+        testcase = ManualTestCase.objects.create(
+            project=self.project, module=self.module,
+            name='已关闭和已解决详情按钮验证',
+            precondition='存在状态为「已关闭」的工单；存在状态为「已解决」的工单',
+            creator=self.user,
+        )
+        resolution = resolve_pre_data_for_testcase(testcase)
+        resolved_plan = DataGenerationPlan.objects.create(
+            project=self.project, name='resolved', template_key='biz_create_assign_resolve',
+            default_environment=self.environment, steps=[], created_by=self.user,
+        )
+        closed_plan = DataGenerationPlan.objects.create(
+            project=self.project, name='closed', template_key='biz_create_assign_close',
+            default_environment=self.environment, steps=[], created_by=self.user,
+        )
+        closed_run = MagicMock(status=DataGenerationRun.STATUS_SUCCESS, output_snapshot={
+            'ticketId': 1, 'ticketNo': 'C-1', 'ticketStatus': 'closed',
+        })
+        resolved_run = MagicMock(status=DataGenerationRun.STATUS_SUCCESS, output_snapshot={
+            'ticketId': 2, 'ticketNo': 'R-2', 'ticketStatus': 'resolved',
+        })
+        with patch('data_generation.testcase_pre_data.ensure_project_template_plan', side_effect=[resolved_plan, closed_plan]), \
+                patch('data_generation.testcase_pre_data.execute_plan', side_effect=[closed_run, resolved_run]) as execute:
+            result = _run_terminal_pair_pre_data(testcase, resolution)
+        self.assertFalse(result.blocked)
+        self.assertIn('已关闭工单号: C-1', result.message_suffix)
+        self.assertIn('已解决工单号: R-2', result.message_suffix)
+        self.assertEqual(resolved_run.output_snapshot['closedTicketNo'], 'C-1')
+        self.assertEqual(resolved_run.output_snapshot['resolvedTicketNo'], 'R-2')
+        self.assertEqual(execute.call_count, 2)
+
+    def test_navigation_target_status_routes_without_title_shortcut(self):
+        from data_generation.testcase_pre_data import resolve_pre_data_for_testcase
+
+        processing = ManualTestCase.objects.create(
+            project=self.project, module=self.module,
+            name='处理中工单-不再展示领取按钮',
+            precondition='执行前创建隔离工单并注入工单号', creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=processing, step_number=2,
+            description='找到该处理中工单，点击处理进入详情页',
+            expected_result='不展示领取按钮', creator=self.user,
+        )
+        self.assertEqual(
+            resolve_pre_data_for_testcase(processing).template_key,
+            'biz_create_and_claim',
+        )
+
+        pending = ManualTestCase.objects.create(
+            project=self.project, module=self.module,
+            name='处理中-底部发送区完整展示',
+            precondition='执行前创建隔离工单并注入工单号', creator=self.user,
+        )
+        TestCaseStep.objects.create(
+            test_case=pending, step_number=2,
+            description='选择工单状态：待处理，查询本次工单',
+            expected_result='进入详情页', creator=self.user,
+        )
+        self.assertEqual(
+            resolve_pre_data_for_testcase(pending).template_key,
+            'biz_create_and_assign',
+        )
 
     def test_transfer_ui_helper_navigation_hint(self):
         from data_generation.testcase_pre_data import (
@@ -693,7 +1190,89 @@ class TestcasePreDataResolverTests(DjangoTestCase):
         self.assertEqual(transfer_ui_helper_flow(dialog), 'dialog')
         hint_dlg = build_testcase_navigation_hint(dialog)
         self.assertIn('runTransferTicketCaseStep(page, 9)', hint_dlg)
-        self.assertNotIn('runClaimableTicketCaseStep', hint_dlg)
+        self.assertNotIn('await helpers.runClaimableTicketCaseStep(', hint_dlg)
+
+    def test_handover_lifecycle_routes_by_required_ticket_state_and_steps(self):
+        from data_generation.testcase_pre_data import (
+            build_testcase_navigation_hint,
+            is_processing_handover_case,
+            is_processing_handover_helper_case,
+            is_processing_handover_submission_case,
+            is_processing_handover_visibility_case,
+            processing_handover_flow_kind,
+            resolve_pre_data_for_testcase,
+        )
+
+        scenarios = (
+            ('待处理工单详情页-不展示移交审批按钮-状态拦截验证', 'pending_no_handover', 3,
+             {2: ('进入待处理工单详情页', '成功进入工单详情页'),
+              3: ('查看页面右上角按钮区域', '不展示「移交审批」按钮')}),
+            ('处理中工单详情页-移交审批按钮可见性验证', 'visibility', 4,
+             {4: ('查看右上角按钮', '移交审批按钮可见')}),
+            ('选择审批人弹窗-确认移交', 'submit_split', 7,
+             {4: ('选择审批人', '显示人员'), 7: ('点击确认移交', '移交成功')}),
+            ('移交成功-移交审批按钮消失展示审批详情', 'submit_compact', 4,
+             {3: ('选择审批人黎沅欣，点击确认移交', '移交成功'),
+              4: ('查看按钮区域', '显示审批详情')}),
+            ('移交成功-点击审批详情进入审批流程页', 'approval_detail', 3,
+             {3: ('点击审批详情', '进入审批流程页')}),
+            ('移交成功-审批人我的工单列表可见', 'approver_list', 3,
+             {3: ('按工单号搜索被移交审批的测试工单', '审批状态展示待审批')}),
+            ('移交成功-工单摘要字段验证', 'approval_summary', 4,
+             {3: ('点击审批详情', '进入审批流程页'),
+              4: ('查看工单摘要', '待审批，审批人黎沅欣')}),
+            ('已提交审批工单-仅展示审批详情', 'approval_button', 3,
+             {3: ('查看右上角按钮', '展示审批详情，不展示移交审批')}),
+            ('选择审批人弹窗-未选择拦截', 'selection_required', 5,
+             {4: ('不选择任何审批人', '确认移交禁用'),
+              5: ('点击确认移交', '拦截')}),
+            ('选择审批人弹窗-点击取消', 'cancel', 5,
+             {4: ('点击取消', '弹窗关闭'),
+              5: ('查看按钮', '仍可见移交审批')}),
+            ('移交审批原因-输入200字', 'submit_reason_boundary', 4,
+             {3: ('点击移交审批，输入正好200个字符', '输入正常'),
+              4: ('点击确认移交', '展示审批详情')}),
+        )
+        submitted_flows = {'approval_detail', 'approver_list', 'approval_summary', 'approval_button'}
+        submission_flows = {'submit_split', 'submit_compact', 'submit_reason_boundary'}
+        for name, expected_flow, step_count, special_steps in scenarios:
+            with self.subTest(name=name):
+                testcase = ManualTestCase.objects.create(
+                    project=self.project,
+                    module=self.module,
+                    name=name,
+                    precondition='工单中心存在可供操作的目标测试工单',
+                    creator=self.user,
+                )
+                for step_number in range(1, step_count + 1):
+                    description, expected_result = special_steps.get(
+                        step_number, (f'步骤{step_number}', '按用例预期验证'),
+                    )
+                    TestCaseStep.objects.create(
+                        test_case=testcase,
+                        step_number=step_number,
+                        description=description,
+                        expected_result=expected_result,
+                        creator=self.user,
+                    )
+                self.assertEqual(processing_handover_flow_kind(testcase), expected_flow)
+                self.assertTrue(is_processing_handover_case(testcase))
+                self.assertEqual(
+                    is_processing_handover_visibility_case(testcase),
+                    expected_flow == 'visibility',
+                )
+                self.assertEqual(
+                    is_processing_handover_submission_case(testcase),
+                    expected_flow in submission_flows,
+                )
+                self.assertTrue(is_processing_handover_helper_case(testcase))
+                hint = build_testcase_navigation_hint(testcase)
+                self.assertIn(f'runProcessingHandoverCaseStep(page, {step_count})', hint)
+                if expected_flow in submitted_flows:
+                    self.assertEqual(
+                        resolve_pre_data_for_testcase(testcase).template_key,
+                        'biz_create_and_claim',
+                    )
 
     def test_approval_processing_case_inference(self):
         from data_generation.testcase_pre_data import resolve_pre_data_for_testcase

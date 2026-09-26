@@ -884,6 +884,7 @@ def attach_testcase_step_screenshot(
     from django.core.files import File
 
     from testcases.models import TestCaseScreenshot
+    import time
 
     try:
         existing = TestCaseScreenshot.objects.filter(
@@ -904,8 +905,14 @@ def attach_testcase_step_screenshot(
             title=title or f"步骤{step_number}",
             uploader_id=uploader_id,
         )
+        # 文件名带时间戳，避免浏览器/CDN 缓存旧图导致用例详情里「截图和步骤对不上」。
+        base = os.path.basename(filepath) or f"case_{testcase_id}_step{step_number}.png"
+        stem, ext = os.path.splitext(base)
+        if not ext:
+            ext = ".png"
+        unique_name = f"{stem}_{int(time.time())}{ext}"
         with open(filepath, "rb") as handle:
-            shot.screenshot.save(os.path.basename(filepath), File(handle), save=True)
+            shot.screenshot.save(unique_name, File(handle), save=True)
         return True
     except Exception as exc:
         logger.warning(
@@ -1141,6 +1148,29 @@ def finalize_testcase_run_record(
         stopped=stopped,
         error_message=error_message,
     )
+    # A generated report may claim PASS after the wrong fixed helper completed
+    # a different step. For this flow, only the detail-page button assertion is
+    # evidence that the final step actually ran.
+    if outcome.get("status") == "pass":
+        from data_generation.testcase_pre_data import processing_handover_flow_kind
+
+        if processing_handover_flow_kind(record.testcase) == "pending_no_handover" and (
+            "RESULT=PASS: 步骤3已确认待处理工单详情未显示移交审批按钮" not in combined
+        ):
+            reason = "步骤3缺少待处理工单详情页的移交审批按钮断言，执行结果与用例步骤不一致"
+            step_results = outcome.get("step_results") or []
+            for item in step_results:
+                if item.get("step_number") == 3:
+                    item["status"] = "fail"
+                    item["actual_result"] = reason
+            outcome["status"] = "fail"
+            outcome["summary"] = build_execution_result_report(
+                record.testcase,
+                status="fail",
+                step_results=step_results,
+                fail_reason=reason,
+            )
+            outcome["step_results"] = step_results
     missing_shots = backfill_missing_step_screenshots(
         record.testcase,
         transcript=combined,

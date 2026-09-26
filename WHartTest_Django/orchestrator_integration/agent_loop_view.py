@@ -50,8 +50,10 @@ from .middleware_config import (
 )
 from .playwright_instructions import (
     CLAIMABLE_PENDING_EXECUTION_HINT,
+    COMPLETE_TICKET_UI_EXECUTION_HINT,
     MANUAL_TESTCASE_EXECUTION_HINT,
     OVERVIEW_SLA_DETAIL_EXECUTION_HINT,
+    PENDING_NO_HANDOVER_EXECUTION_HINT,
     PLAYWRIGHT_SCRIPT_INSTRUCTION,
     PROCESSING_HANDOVER_EXECUTION_HINT,
     TRANSFER_UI_EXECUTION_HINT,
@@ -774,19 +776,40 @@ async def _run_and_stream_remaining_helper_steps(
     try:
         from testcases.models import TestCase as _HelperCase
         from data_generation.testcase_pre_data import (
-            is_processing_handover_case,
+            is_claimable_ticket_detail_case,
+            is_complete_ticket_ui_case,
+            is_processing_handover_helper_case,
+            is_transfer_ready_ticket_case,
             is_transfer_ui_helper_case,
         )
 
         _tc = await sync_to_async(
             _HelperCase.objects.filter(id=int(test_case_id)).first
         )()
-        if _tc and await sync_to_async(is_transfer_ui_helper_case)(_tc):
+        if _tc and await sync_to_async(is_claimable_ticket_detail_case)(_tc):
+            template = "await helpers.runClaimableTicketCaseStep(page, {step});"
+        elif _tc and await sync_to_async(is_transfer_ui_helper_case)(_tc):
             template = "await helpers.runTransferTicketCaseStep(page, {step});"
-        elif _tc and await sync_to_async(is_processing_handover_case)(_tc):
+        elif _tc and await sync_to_async(is_processing_handover_helper_case)(_tc):
             template = "await helpers.runProcessingHandoverCaseStep(page, {step});"
+        elif _tc and await sync_to_async(is_complete_ticket_ui_case)(_tc):
+            template = "await helpers.runCompleteTicketCaseStep(page, {step});"
+        elif template and "runClaimableTicketCaseStep" in template and not (
+            _tc and await sync_to_async(is_transfer_ready_ticket_case)(_tc)
+        ):
+            template = None
     except Exception:
-        pass
+        template = None
+    if not template:
+        yield {
+            "type": "_auto_run_bundle",
+            # No fixed helper is not a test-step failure. Let the AI continue
+            # the case instead of treating a missing optimization as evidence.
+            "output": "",
+            "last_step": int(from_step) - 1,
+            "no_template": True,
+        }
+        return
     step_names = await sync_to_async(_get_testcase_step_names)(int(test_case_id))
     chunks: list[str] = []
     last_step = int(from_step)
@@ -810,7 +833,7 @@ async def _run_and_stream_remaining_helper_steps(
             ),
             tool_output=prev_display,
             step=prev_step,
-            command=(template or "await helpers.runClaimableTicketCaseStep(page, {step});").format(
+            command=template.format(
                 step=prev_step
             ),
         )
@@ -861,7 +884,7 @@ async def _run_and_stream_remaining_helper_steps(
             "summary": f"已执行步骤 {step}/{to_step}",
             "step": step,
         }
-        command = (template or "await helpers.runClaimableTicketCaseStep(page, {step});").format(
+        command = template.format(
             step=step
         )
         await _persist_helper_step_to_checkpoint(
@@ -907,10 +930,8 @@ def _build_incomplete_testcase_resume_prompt(*, done_step: int, total_steps: int
         f"【强制继续】用例共 {total_steps} 步，目前只完成到步骤 {done_step}，"
         f"步骤 {next_step}～{total_steps} 尚未执行，也没有对应 `[CASE_SCREENSHOT]`。\n"
         f"禁止输出测试报告，禁止总结，禁止跳步。\n"
-        f"立即调用 `execute_skill_script`，脚本只能写一行：\n"
-        f"`await helpers.runClaimableTicketCaseStep(page, {next_step});`\n"
-        f"若本用例不是领取工单流程，则改用与前面步骤相同的固定 helper，"
-        f"参数步骤号必须是 {next_step}。\n"
+        f"立即按本用例已选定的执行脚本调用 `execute_skill_script`，"
+        f"参数步骤号必须是 {next_step}；无法确认脚本类型时停止并报告。\n"
         f"工具输出必须含步骤 {next_step} 的 `[CASE_SCREENSHOT]` 与 RESULT=PASS/FAIL。"
     )
 
@@ -940,7 +961,7 @@ def _extract_testcase_step_from_tool_call(tool_call: Any) -> Optional[int]:
     if re.search(r"\bloginStep1\s*\(", command, flags=re.IGNORECASE):
         return 1
     patterns = (
-        r"run(?:ClaimableTicket|TransferTicket|TicketDetail|Overview|Notification)?CaseStep\s*\(\s*page\s*,\s*(\d+)",
+        r"run(?:ClaimableTicket|TransferTicket|ProcessingHandover|CompleteTicket|TicketDetail|Overview|Notification)?CaseStep\s*\(\s*page\s*,\s*(\d+)",
         r"screenshotCaseStep\s*\(\s*page\s*,\s*(\d+)",
         r"case[_-]\d+_step(\d+)",
     )
@@ -1763,15 +1784,16 @@ class AgentLoopStreamAPIView(View):
                 if pre_data_result.run is not None:
                     pre_data_run = pre_data_result.run
                     pre_data_run_id = pre_data_result.run.id
+                    # A reused run may not have its related plan cached. Resolve
+                    # the relation off the async event loop before building SSE.
+                    pre_data_plan_name = await sync_to_async(
+                        lambda: pre_data_run.plan.name if pre_data_run.plan_id else ""
+                    )()
                     yield create_sse_data(
                         {
                             "type": "pre_data_complete",
                             "status": pre_data_result.run.status,
-                            "plan_name": (
-                                pre_data_result.run.plan.name
-                                if pre_data_result.run.plan_id
-                                else ""
-                            ),
+                            "plan_name": pre_data_plan_name,
                             "source": pre_data_result.resolution.source,
                         }
                     )
@@ -1804,9 +1826,11 @@ class AgentLoopStreamAPIView(View):
 
                 from data_generation.testcase_pre_data import (
                     is_claimable_ticket_detail_case,
+                    is_complete_ticket_ui_case,
                     is_overview_sla_detail_case,
-                    is_processing_handover_case,
+                    is_processing_handover_helper_case,
                     is_transfer_ui_helper_case,
+                    processing_handover_flow_kind,
                 )
                 from testcases.models import TestCase as ManualTestCaseModel
 
@@ -1829,7 +1853,11 @@ class AgentLoopStreamAPIView(View):
                 )
                 is_processing_handover = bool(
                     sla_case
-                    and await sync_to_async(is_processing_handover_case)(sla_case)
+                    and await sync_to_async(is_processing_handover_helper_case)(sla_case)
+                )
+                is_complete_ticket = bool(
+                    sla_case
+                    and await sync_to_async(is_complete_ticket_ui_case)(sla_case)
                 )
                 if is_sla_detail:
                     effective_prompt = (effective_prompt or "") + OVERVIEW_SLA_DETAIL_EXECUTION_HINT
@@ -1844,7 +1872,16 @@ class AgentLoopStreamAPIView(View):
                     if nav_hint:
                         effective_prompt = effective_prompt + nav_hint
                 elif is_processing_handover:
-                    effective_prompt = (effective_prompt or "") + PROCESSING_HANDOVER_EXECUTION_HINT
+                    flow_kind = await sync_to_async(processing_handover_flow_kind)(sla_case)
+                    effective_prompt = (effective_prompt or "") + (
+                        PENDING_NO_HANDOVER_EXECUTION_HINT
+                        if flow_kind == "pending_no_handover"
+                        else PROCESSING_HANDOVER_EXECUTION_HINT
+                    )
+                    if nav_hint:
+                        effective_prompt = effective_prompt + nav_hint
+                elif is_complete_ticket:
+                    effective_prompt = (effective_prompt or "") + COMPLETE_TICKET_UI_EXECUTION_HINT
                     if nav_hint:
                         effective_prompt = effective_prompt + nav_hint
 
@@ -2330,6 +2367,7 @@ class AgentLoopStreamAPIView(View):
                                                     )
                                                     auto_output = ""
                                                     auto_step = helper_step
+                                                    auto_no_template = False
                                                     async for event in _run_and_stream_remaining_helper_steps(
                                                         test_case_id=int(test_case_id),
                                                         user_id=int(request.user.id),
@@ -2349,8 +2387,27 @@ class AgentLoopStreamAPIView(View):
                                                         if event.get("type") == "_auto_run_bundle":
                                                             auto_output = event.get("output") or ""
                                                             auto_step = event.get("last_step") or auto_step
+                                                            auto_no_template = bool(event.get("no_template"))
                                                             continue
                                                         yield create_flushed_sse(event)
+                                                    if auto_no_template:
+                                                        logger.info(
+                                                            "AgentLoopStreamAPI: no fixed helper for case=%s; "
+                                                            "AI continues remaining steps",
+                                                            test_case_id,
+                                                        )
+                                                        yield create_sse_data(
+                                                            {
+                                                                "type": "testcase_progress",
+                                                                "session_id": session_id,
+                                                                "test_case_id": int(test_case_id),
+                                                                "step": next_step,
+                                                                "total_steps": total_steps,
+                                                                "state": "running",
+                                                                "message": "无固定脚本，继续按用例步骤探索执行",
+                                                            }
+                                                        )
+                                                        continue
                                                     if auto_output:
                                                         content = (
                                                             f"{content}\n{auto_output}"
@@ -2626,6 +2683,7 @@ class AgentLoopStreamAPIView(View):
                         # 模型常在倒数第二步后直接出报告，跳过最后一步截图。
                         # 收尾前若发现 helper 进度未到总步数，直接在持久化浏览器会话上
                         # 强制执行剩余步骤（不依赖模型），并自动上传截图。
+                        incomplete_without_helper = ""
                         if (
                             not user_stopped
                             and not interrupt_detected
@@ -2675,6 +2733,7 @@ class AgentLoopStreamAPIView(View):
                                     )
                                     auto_output = ""
                                     helper_step = done_step
+                                    auto_no_template = False
                                     async for event in _run_and_stream_remaining_helper_steps(
                                         test_case_id=int(test_case_id),
                                         user_id=int(request.user.id),
@@ -2690,8 +2749,14 @@ class AgentLoopStreamAPIView(View):
                                         if event.get("type") == "_auto_run_bundle":
                                             auto_output = event.get("output") or ""
                                             helper_step = event.get("last_step") or helper_step
+                                            auto_no_template = bool(event.get("no_template"))
                                             continue
                                         yield create_flushed_sse(event)
+                                    if auto_no_template:
+                                        incomplete_without_helper = (
+                                            f"步骤 {next_step}～{total_case_steps} 尚未完成；"
+                                            "纯 AI 执行不能以缺少固定脚本代替实际步骤"
+                                        )
                                     if auto_output:
                                         final_content = (
                                             f"{final_content}\n{auto_output}"
@@ -2718,7 +2783,7 @@ class AgentLoopStreamAPIView(View):
                             session_id=session_id,
                             final_content=final_content,
                             messages=all_messages if "all_messages" in locals() else [],
-                            error_message=llm_failure_message,
+                            error_message=llm_failure_message or incomplete_without_helper or None,
                             agent=agent,
                             invoke_config=invoke_config,
                         )
@@ -2745,6 +2810,36 @@ class AgentLoopStreamAPIView(View):
 
                 yield "data: [DONE]\n\n"
 
+        except asyncio.CancelledError:
+            # asyncio cancellation is a BaseException, so the generic handler
+            # below does not run. Without finalizing here, testcase records stay
+            # "running" forever and the UI keeps showing the preparation spinner.
+            if test_case_id:
+                try:
+                    await _complete_testcase_run_with_report(
+                        session_id=session_id,
+                        final_content=(
+                            streamed_assistant_content
+                            if "streamed_assistant_content" in locals()
+                            else ""
+                        ),
+                        messages=(all_messages if "all_messages" in locals() else []),
+                        error_message="自动化执行流被取消或中断，未完成的步骤未执行。",
+                    )
+                except Exception:
+                    logger.exception(
+                        "AgentLoopStreamAPI: Failed to finalize cancelled testcase run. "
+                        "session_id=%s test_case_id=%s",
+                        session_id,
+                        test_case_id,
+                    )
+            logger.warning(
+                "AgentLoopStreamAPI: Testcase stream cancelled. "
+                "session_id=%s test_case_id=%s",
+                session_id,
+                test_case_id,
+            )
+            raise
         except Exception as e:
             friendly_error = get_user_friendly_llm_error(e)
             if friendly_error:

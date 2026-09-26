@@ -53,6 +53,20 @@ def _fake_case(**kwargs):
 
 
 class ExecutionResultReportTests(SimpleTestCase):
+    def test_missing_ai_steps_do_not_pass_without_fixed_helper(self):
+        outcome = ensure_execution_result_report(
+            _fake_case(),
+            transcript=(
+                "[执行进度] 正在执行步骤 1/4\n"
+                "[CASE_SCREENSHOT] /tmp/case_1520_step1.png\n"
+                "RESULT=PASS: 步骤1登录成功"
+            ),
+            error_message="步骤 2～4 尚未完成；纯 AI 执行不能以缺少固定脚本代替实际步骤",
+        )
+        self.assertEqual(outcome["status"], "fail")
+        self.assertEqual(outcome["step_results"][0]["status"], "pass")
+        self.assertTrue(any(step["status"] == "skip" for step in outcome["step_results"][1:]))
+
     def test_confirms_generated_ticket_used_from_assistant_tool_trace(self):
         data_run = SimpleNamespace(output_snapshot={"ticketNo": "2026091570663010"})
         usage = build_pre_data_usage(
@@ -336,6 +350,62 @@ class FinalizeRunRecordReportTests(TestCase):
         self.assertEqual(len(record.step_results), 2)
         self.assertEqual(record.step_results[0]["status"], "fail")
         self.assertEqual(record.step_results[1]["status"], "skip")
+
+    def test_pending_button_case_requires_actual_button_assertion(self):
+        testcase = TestCaseModel.objects.create(
+            project=self.project,
+            module=self.module,
+            name="待处理工单详情页-不展示移交审批按钮-状态拦截验证",
+            level="P1",
+            creator=self.user,
+        )
+        steps = (
+            ("使用李亮账号登录", "登录成功"),
+            ("进入待处理工单详情页", "成功进入工单详情页"),
+            ("查看页面右上角按钮区域", "不展示「移交审批」按钮"),
+        )
+        for number, (description, expected) in enumerate(steps, 1):
+            TestCaseStep.objects.create(
+                test_case=testcase,
+                step_number=number,
+                description=description,
+                expected_result=expected,
+                creator=self.user,
+            )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for run_number, final_result, expected_status in (
+                (1, "步骤3已找到造数工单；步骤4将进领取详情", "fail"),
+                (2, "步骤3已确认待处理工单详情未显示移交审批按钮", "pass"),
+            ):
+                session_id = f"pending-button-{run_number}"
+                start_testcase_run_record(
+                    testcase_id=testcase.id,
+                    user_id=self.user.id,
+                    session_id=session_id,
+                )
+                evidence = []
+                for step_number in range(1, 4):
+                    path = os.path.join(temp_dir, f"step-{run_number}-{step_number}.png")
+                    Image.new("RGB", (16, 16)).save(path, format="PNG")
+                    attach_testcase_step_screenshot(
+                        testcase_id=testcase.id,
+                        step_number=step_number,
+                        filepath=path,
+                        uploader_id=self.user.id,
+                    )
+                    message = final_result if step_number == 3 else f"步骤{step_number}通过"
+                    evidence.append(
+                        f"[执行进度] 正在执行步骤 {step_number}/3\n"
+                        f"[CASE_SCREENSHOT] {path}\nRESULT=PASS: {message}"
+                    )
+                record = finalize_testcase_run_record(
+                    session_id=session_id,
+                    transcript="\n".join(evidence),
+                )
+                self.assertEqual(record.status, expected_status)
+                self.assertEqual(record.step_results[2]["status"], expected_status)
+                if expected_status == "fail":
+                    self.assertIn("执行结果与用例步骤不一致", record.summary)
 
     def _write_step_png(self, directory, step_number):
         os.makedirs(directory, exist_ok=True)

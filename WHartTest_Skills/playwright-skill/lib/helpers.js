@@ -5200,13 +5200,96 @@ async function runTransferTicketCaseStep(page, stepNumber, caseId) {
 }
 
 /**
- * 处理中工单 → 移交审批按钮可见性（如用例 1434）。
+ * 移交审批生命周期：可见性、提交、审批详情、列表与拦截。
  * 每步只调用：await helpers.runProcessingHandoverCaseStep(page, <步骤号>);
  *
  * 与领取 helper 的关键差异：列表必须筛「处理中」（不是「待处理」），
  * 造数结果已是 claimed/processing。
  */
+/** Three-step pending-ticket check: the detail must not offer approval handover. */
+async function runPendingNoHandoverCaseStep(page, stepNumber, caseId) {
+  const step = Number(stepNumber);
+  const cid = caseId || process.env.WHARTTEST_CASE_ID || 'unknown';
+  const pathMod = require('path');
+  const target = pathMod.join(
+    process.env.SCREENSHOT_DIR || '.', `case_${cid}_step${step}.png`,
+  );
+  const ticketNo = getTicketNoFromEnv();
+  const totalSteps = Number(process.env.WHARTTEST_CASE_STEP_COUNT || 3) || 3;
+  console.log(`[执行进度] 正在执行步骤 ${step}/${totalSteps}`);
+
+  if (step === 1) return loginStep1(page, cid);
+  if (!(await ensureClaimableCaseAuthenticated(page, cid))) return null;
+
+  if (step === 2) {
+    if (!ticketNo) {
+      console.log('RESULT=FAIL: 步骤2缺少本次造数工单号');
+      return null;
+    }
+    await navigateToMyTicketsPage(page);
+    await dismissBlockingDialogs(page);
+    await fillFilterField(page, '工单号', ticketNo);
+    if (!(await selectFormDropdownOption(page, '工单状态', '待处理'))) {
+      console.log('RESULT=FAIL: 步骤2无法筛选待处理工单');
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    await clickPageButton(page, '查询');
+    await page.locator('.el-loading-mask:visible, .el-table__loading:visible')
+      .first().waitFor({ state: 'hidden', timeout: 12000 }).catch(() => {});
+    const row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
+    const rowVisible = await row.waitFor({ state: 'visible', timeout: 12000 })
+      .then(() => true).catch(() => false);
+    if (!rowVisible ||
+        !(await row.innerText().catch(() => '')).includes('待处理')) {
+      console.log(`RESULT=FAIL: 步骤2未找到待处理的本次造数工单 ${ticketNo}`);
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    const entered = await clickProcessInTableRow(page, row);
+    if (!entered || !(await waitForTicketDetailNavigation(page, 10000)) ||
+        !(await assertTicketNoOnDetailPage(page, ticketNo))) {
+      console.log(`RESULT=FAIL: 步骤2未进入本次造数工单详情 ${ticketNo}`);
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    if (!(await captureTicketDetailView(page, target, step))) {
+      console.log('RESULT=FAIL: 步骤2无法截取工单详情页');
+      return null;
+    }
+    declareCaseScreenshot(target);
+    console.log(`RESULT=PASS: 步骤2已进入本次待处理工单详情 ${ticketNo}`);
+    return target;
+  }
+
+  if (step === 3) {
+    if (!ticketNo || !(await assertTicketNoOnDetailPage(page, ticketNo))) {
+      console.log(`RESULT=FAIL: 步骤3当前详情不是本次造数工单 ${ticketNo}`);
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    }
+    if (!(await captureTicketDetailView(page, target, step))) {
+      console.log('RESULT=FAIL: 步骤3无法截取工单详情页');
+      return null;
+    }
+    declareCaseScreenshot(target);
+    const handoverVisible = await page.getByRole('button', { name: /移交审批/ }).first()
+      .isVisible().catch(() => false);
+    if (handoverVisible) {
+      console.log('RESULT=FAIL: 步骤3待处理工单详情错误显示移交审批按钮');
+      return null;
+    }
+    console.log('RESULT=PASS: 步骤3已确认待处理工单详情未显示移交审批按钮');
+    return target;
+  }
+  console.log(`RESULT=FAIL: 不支持的待处理按钮检查步骤 ${step}`);
+  return null;
+}
+
 async function runProcessingHandoverCaseStep(page, stepNumber, caseId) {
+  if (process.env.WHARTTEST_HANDOVER_FLOW === 'pending_no_handover') {
+    return runPendingNoHandoverCaseStep(page, stepNumber, caseId);
+  }
   const step = Number(stepNumber);
   const cid = caseId || process.env.WHARTTEST_CASE_ID || 'unknown';
   const pathMod = require('path');
@@ -5215,6 +5298,15 @@ async function runProcessingHandoverCaseStep(page, stepNumber, caseId) {
   const ticketNo = getTicketNoFromEnv();
   const expectedAssignee = String(process.env.WHARTTEST_CLAIM_ASSIGNEE_NAME || '').trim();
   const totalSteps = Number(process.env.WHARTTEST_CASE_STEP_COUNT || 4) || 4;
+  const flow = String(process.env.WHARTTEST_HANDOVER_FLOW || '').trim();
+  const submittedFixture = ['approval_detail', 'approval_summary', 'approval_button', 'approver_list'].includes(flow);
+  const submissionFlow = ['submit_split', 'submit_compact'].includes(flow) ||
+    (!flow && (totalSteps === 7 || process.env.WHARTTEST_PROCESSING_HANDOVER_SUBMISSION === '1'));
+  const compactSubmission = flow === 'submit_compact' || (!flow && submissionFlow && totalSteps === 4);
+  const detailAtStep2 = submissionFlow || flow === 'submit_reason_boundary' ||
+    flow === 'selection_required' || flow === 'cancel' ||
+    (submittedFixture && flow !== 'approver_list');
+  const approverName = String(process.env.WHARTTEST_HANDOVER_APPROVER_NAME || '黎沅欣').trim();
 
   console.log(`[执行进度] 正在执行步骤 ${step}/${totalSteps}`);
 
@@ -5224,17 +5316,17 @@ async function runProcessingHandoverCaseStep(page, stepNumber, caseId) {
     await page.waitForTimeout(1000);
   };
 
-  const findProcessingRow = async () => {
+  const findProcessingRow = async (requestedStatus = '处理中') => {
     if (!ticketNo) {
       console.log('RESULT=FAIL: 缺少本次造数工单号，无法定位处理中工单');
       return null;
     }
     await fillFilterField(page, '工单号', ticketNo);
-    const statusSelected = await selectFormDropdownOption(page, '工单状态', '处理中').catch(
+    const statusSelected = await selectFormDropdownOption(page, '工单状态', requestedStatus).catch(
       () => false,
     );
-    if (!statusSelected) {
-      console.log('RESULT=FAIL: 无法将工单状态筛为「处理中」');
+    if (!statusSelected && requestedStatus !== '全部') {
+      console.log(`RESULT=FAIL: 无法将工单状态筛为「${requestedStatus}」`);
       return null;
     }
     await clickPageButton(page, '查询');
@@ -5245,8 +5337,9 @@ async function runProcessingHandoverCaseStep(page, stepNumber, caseId) {
       return row;
     } catch (_) {
       console.log(
-        `RESULT=INFO: 工单号+处理中未命中，改用仅工单号查询 ${ticketNo}`,
+        `RESULT=INFO: 工单号+${requestedStatus}未命中，改用仅工单号查询 ${ticketNo}`,
       );
+      await selectFormDropdownOption(page, '工单状态', '全部').catch(() => false);
       await fillFilterField(page, '工单号', ticketNo);
       await clickPageButton(page, '查询');
       await waitForTicketListSettled();
@@ -5290,9 +5383,236 @@ async function runProcessingHandoverCaseStep(page, stepNumber, caseId) {
   if (step === 2) {
     await navigateToMyTicketsPage(page);
     await waitForPageBodyText(page, 80, 10000);
+    if (detailAtStep2) {
+      await dismissBlockingDialogs(page);
+      const row = await findProcessingRow(submittedFixture ? '全部' : '处理中');
+      if (!row) {
+        await screenshotCaseStep(page, step, cid).catch(() => null);
+        return null;
+      }
+      let entered = await clickProcessInTableRow(page, row);
+      if (!entered && submittedFixture) {
+        entered = await clickTicketNoLinkInTableRow(page, row, ticketNo);
+      }
+      if (!entered && submittedFixture) {
+        entered = await gotoTicketDetailById(page, getTicketIdFromEnv());
+      }
+      if (!entered || !(await waitForTicketDetailNavigation(page, 10000)) ||
+          !(await assertTicketNoOnDetailPage(page, ticketNo))) {
+        console.log(`RESULT=FAIL: 步骤2未进入本次造数工单详情 ${ticketNo}`);
+        await screenshotCaseStep(page, step, cid).catch(() => null);
+        return null;
+      }
+    }
     await screenshotCaseStep(page, step, cid);
-    console.log(`RESULT=PASS: 步骤2已进入我的工单列表 URL=${page.url()}`);
+    console.log(`RESULT=PASS: 步骤2已进入${detailAtStep2 ? '造数工单详情' : '我的工单列表'} URL=${page.url()}`);
     return target;
+  }
+
+  if (submittedFixture && step >= 3) {
+    const fail = async (reason) => {
+      console.log(`RESULT=FAIL: 步骤${step}${reason}`);
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    };
+    if (flow === 'approver_list') {
+      const row = await findProcessingRow('全部');
+      if (!row) return await fail(`审批人列表中未找到待审批工单 ${ticketNo}`);
+      const rowText = await row.innerText().catch(() => '');
+      if (!rowText.includes('待审批')) return await fail('目标工单未显示待审批状态');
+      await screenshotCaseStep(page, step, cid);
+      console.log('RESULT=PASS: 审批人列表可见本次待审批工单');
+      return target;
+    }
+    if (!(await assertTicketNoOnDetailPage(page, ticketNo))) {
+      return await fail(`当前详情不是本次待审批工单 ${ticketNo}`);
+    }
+    if (flow === 'approval_button') {
+      const approvalVisible = await page.getByRole('button', { name: /审批详情/ }).first()
+        .isVisible().catch(() => false);
+      const handoverVisible = await page.getByRole('button', { name: /移交审批/ }).first()
+        .isVisible().catch(() => false);
+      if (!approvalVisible || handoverVisible) return await fail('已提交审批的按钮状态不正确');
+    } else if (step === 3) {
+      const approvalButton = page.getByRole('button', { name: /审批详情/ }).first();
+      await approvalButton.waitFor({ state: 'visible', timeout: 10000 });
+      await approvalButton.click({ timeout: 10000 });
+      const approvalText = page.getByText(/审批中|待审批|已提交/).first();
+      await approvalText.waitFor({ state: 'visible', timeout: 15000 });
+    } else if (flow === 'approval_summary' && step === 4) {
+      const bodyText = await page.locator('body').innerText().catch(() => '');
+      if (!bodyText.includes('待审批') || !bodyText.includes(approverName)) {
+        return await fail(`工单摘要未显示待审批及审批人${approverName}`);
+      }
+    }
+    await screenshotCaseStep(page, step, cid);
+    console.log(`RESULT=PASS: 步骤${step}已验证待审批工单 ${ticketNo}`);
+    return target;
+  }
+
+  if (['selection_required', 'cancel', 'submit_reason_boundary'].includes(flow) && step >= 3) {
+    const dialog = page.locator('.el-dialog:visible, [role="dialog"]:visible')
+      .filter({ hasText: '选择审批人' }).last();
+    const fail = async (reason) => {
+      console.log(`RESULT=FAIL: 步骤${step}${reason}`);
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    };
+    try {
+      if (step === 3) {
+        if (!(await assertTicketNoOnDetailPage(page, ticketNo))) return await fail('当前不是造数工单详情');
+        await page.getByRole('button', { name: /移交审批/ }).first().click({ timeout: 10000 });
+        await dialog.waitFor({ state: 'visible', timeout: 10000 });
+        if (flow === 'submit_reason_boundary') {
+          const search = dialog.getByPlaceholder('搜索审批人姓名');
+          await search.fill(approverName, { timeout: 10000 });
+          const approver = dialog.locator('.approver-item-v2').filter({ hasText: approverName }).first();
+          await approver.click({ timeout: 10000 });
+          const reason = dialog.getByPlaceholder('请输入移交审批原因（选填）');
+          await reason.fill('测'.repeat(200), { timeout: 10000 });
+          if ((await reason.inputValue()).length !== 200) return await fail('移交原因未完整输入200字');
+        }
+      } else if (flow === 'submit_reason_boundary' && step === 4) {
+        const confirm = dialog.getByRole('button', { name: '确认移交' });
+        if (!(await confirm.isEnabled())) return await fail('200字原因下确认移交不可用');
+        await confirm.click({ timeout: 10000 });
+        await page.getByRole('button', { name: /审批详情/ }).first()
+          .waitFor({ state: 'visible', timeout: 15000 });
+      } else if (flow === 'selection_required' && step === 4) {
+        const confirm = dialog.getByRole('button', { name: '确认移交' });
+        if (await confirm.isEnabled()) return await fail('未选择审批人时确认移交仍可点击');
+      } else if (flow === 'selection_required' && step === 5) {
+        const confirm = dialog.getByRole('button', { name: '确认移交' });
+        if (await confirm.isEnabled()) return await fail('未选择审批人时确认移交未被拦截');
+      } else if (flow === 'cancel' && step === 4) {
+        await dialog.getByRole('button', { name: '取消' }).click({ timeout: 10000 });
+        await dialog.waitFor({ state: 'hidden', timeout: 10000 });
+      } else if (flow === 'cancel' && step === 5) {
+        if (!(await page.getByRole('button', { name: /移交审批/ }).first().isVisible())) {
+          return await fail('取消后未保留移交审批按钮');
+        }
+        if (await page.getByRole('button', { name: /审批详情/ }).first().isVisible().catch(() => false)) {
+          return await fail('取消后错误出现审批详情按钮');
+        }
+      }
+      await screenshotCaseStep(page, step, cid);
+      console.log(`RESULT=PASS: 步骤${step}已完成${flow}验证`);
+      return target;
+    } catch (error) {
+      return await fail(String(error.message || error).slice(0, 240));
+    }
+  }
+
+  if (submissionFlow && step >= 3 && step <= 7) {
+    const dialog = page.locator('.el-dialog:visible, [role="dialog"]:visible')
+      .filter({ hasText: '选择审批人' }).last();
+    const fail = async (reason) => {
+      console.log(`RESULT=FAIL: 步骤${step}${reason}`);
+      await screenshotCaseStep(page, step, cid).catch(() => null);
+      return null;
+    };
+    try {
+      if (step === 3) {
+        if (!(await assertTicketNoOnDetailPage(page, ticketNo))) {
+          return await fail(`当前详情页不是造数工单 ${ticketNo}`);
+        }
+        await page.getByRole('button', { name: /移交审批/ }).first().click({ timeout: 10000 });
+        await dialog.waitFor({ state: 'visible', timeout: 10000 });
+      } else {
+        if (compactSubmission && step === 4) {
+          if (!(await assertTicketNoOnDetailPage(page, ticketNo))) {
+            return await fail(`当前详情页不是造数工单 ${ticketNo}`);
+          }
+          const handoverVisible = await page
+            .getByRole('button', { name: /移交审批/ }).first()
+            .isVisible().catch(() => false);
+          const approvalVisible = await page
+            .getByRole('button', { name: /审批详情/ }).first()
+            .isVisible().catch(() => false);
+          await screenshotCaseStep(page, step, cid);
+          if (handoverVisible || !approvalVisible) {
+            console.log('RESULT=FAIL: 移交后按钮状态不符合预期，需「移交审批」消失并显示「审批详情」');
+            return null;
+          }
+          console.log('RESULT=PASS: 步骤4已确认「移交审批」消失并显示「审批详情」');
+          return target;
+        }
+        await dialog.waitFor({ state: 'visible', timeout: 10000 });
+      }
+      if (compactSubmission && step === 3) {
+        const search = dialog.getByPlaceholder('搜索审批人姓名');
+        await search.fill(approverName, { timeout: 10000 });
+        const approver = dialog.locator('.approver-item-v2').filter({ hasText: approverName }).first();
+        await approver.waitFor({ state: 'visible', timeout: 10000 });
+        await approver.click({ timeout: 10000 });
+        if (!(await approver.evaluate(el => el.classList.contains('selected')))) {
+          return await fail(`审批人${approverName}未选中`);
+        }
+        const confirm = dialog.getByRole('button', { name: '确认移交' });
+        if (!(await confirm.isEnabled())) return await fail('确认移交按钮不可用');
+        await confirm.click({ timeout: 10000 });
+        const dialogClosed = await dialog
+          .waitFor({ state: 'hidden', timeout: 15000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!dialogClosed) {
+          const approvalDetail = page.getByRole('button', { name: /审批详情/ }).first();
+          const submitted = await approvalDetail
+            .waitFor({ state: 'visible', timeout: 3000 })
+            .then(() => true)
+            .catch(() => false);
+          if (!submitted) return await fail('确认移交后未检测到移交成功状态');
+        }
+        await screenshotCaseStep(page, step, cid);
+        console.log(`RESULT=PASS: 步骤3已完成选择${approverName}并确认移交`);
+        return target;
+      }
+      if (step === 4) {
+        const search = dialog.getByPlaceholder('搜索审批人姓名');
+        await search.fill(approverName, { timeout: 10000 });
+        await dialog.locator('.approver-item-v2').filter({ hasText: approverName })
+          .first().waitFor({ state: 'visible', timeout: 10000 });
+      }
+      if (step === 5) {
+        const approver = dialog.locator('.approver-item-v2').filter({ hasText: approverName }).first();
+        await approver.click({ timeout: 10000 });
+        if (!(await approver.evaluate(el => el.classList.contains('selected')))) {
+          return await fail(`审批人${approverName}未选中`);
+        }
+      }
+      if (step === 6) {
+        const reason = dialog.getByPlaceholder('请输入移交审批原因（选填）');
+        await reason.waitFor({ state: 'visible', timeout: 10000 });
+        await reason.fill('自动化测试移交审批');
+      }
+      if (step === 7) {
+        const confirm = dialog.getByRole('button', { name: '确认移交' });
+        if (!(await confirm.isEnabled())) return await fail('确认移交按钮不可用');
+        await confirm.click({ timeout: 10000 });
+        // The transfer request can succeed while the dialog component is
+        // replaced asynchronously instead of becoming hidden. In that case
+        // the detail page exposes 「审批详情」 as the reliable success signal.
+        const dialogClosed = await dialog
+          .waitFor({ state: 'hidden', timeout: 15000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!dialogClosed) {
+          const approvalDetail = page.getByRole('button', { name: /审批详情/ }).first();
+          const submitted = await approvalDetail
+            .waitFor({ state: 'visible', timeout: 3000 })
+            .then(() => true)
+            .catch(() => false);
+          if (!submitted) {
+            return await fail('确认移交后弹窗未关闭，且页面未出现「审批详情」');
+          }
+        }
+      }
+      await screenshotCaseStep(page, step, cid);
+      console.log(`RESULT=PASS: 步骤${step}${step === 7 ? '已确认移交且弹窗关闭' : '已完成移交审批操作'}`);
+      return target;
+    } catch (error) {
+      return await fail(String(error.message || error).slice(0, 240));
+    }
   }
 
   if (step === 3) {
@@ -5351,6 +5671,461 @@ async function runProcessingHandoverCaseStep(page, stepNumber, caseId) {
   console.log(
     `RESULT=FAIL: 不支持的处理中/移交审批步骤 ${step}，当前固定流程最多 ${totalSteps} 步`,
   );
+  return null;
+}
+
+/**
+ * 处理中工单 → 点击「工单完成」验证确认弹窗（如用例 1447）。
+ * 每步只调用：await helpers.runCompleteTicketCaseStep(page, <步骤号>);
+ *
+ * 禁止改用 runClaimableTicketCaseStep（会按「待处理」筛选，截图停在列表页）。
+ */
+function completeTicketActionForStep(stepNumber, stepsJson = process.env.WHARTTEST_COMPLETE_STEPS_JSON) {
+  const step = Number(stepNumber);
+  if (step === 1) return 'login';
+  let definitions;
+  try {
+    definitions = JSON.parse(stepsJson || '{}');
+  } catch (_) {
+    return null;
+  }
+  const item = definitions[String(step)];
+  if (!item || typeof item !== 'object') return null;
+  const description = String(item.description || '');
+  const expected = String(item.expected || '');
+  if (/点击.*取消/.test(description)) return 'cancel_complete';
+  if (/审批未完成/.test(expected) && /工单完成|完成工单/.test(description)) return 'blocked_approval';
+  if (/返回.*我的工单|按工单号搜索/.test(description)) return 'verify_resolved_list';
+  if (/查看.*顶部.*状态|查看顶部状态徽标/.test(description)) return 'verify_resolved_badge';
+  if (/底部.*沟通/.test(description)) {
+    if (/尝试输入|点击发送/.test(description)) return 'send_message_processing';
+    if (/不展示.*输入框|无法再发送/.test(expected)) return 'verify_resolved_composer_hidden';
+    return 'verify_processing_composer';
+  }
+  if (/查看.*按钮区域/.test(description)) return 'inspect_complete_button';
+  const opensDetail = /点击.*(?:工单|处理).*进入详情|点击目标工单.*详情/.test(description);
+  const clicksComplete = /点击.*(?:工单完成|完成工单)/.test(description);
+  const confirms = /点击.*确定|点击确定/.test(description);
+  if (opensDetail && clicksComplete && confirms) return 'enter_detail_and_confirm';
+  if (clicksComplete && confirms) return 'open_and_confirm';
+  if (confirms) return 'confirm_complete';
+  if (clicksComplete) return 'open_confirm_dialog';
+  if (opensDetail) return 'enter_detail';
+  if (/进入.*我的工单|进入【工单中心】/.test(description)) return 'enter_list';
+  return null;
+}
+
+async function hasVisibleExactText(page, text) {
+  // The first exact-text match may be a hidden option/template rather than the status badge.
+  const matches = await page.getByText(text, { exact: true }).all();
+  for (const match of matches) {
+    if (await match.isVisible().catch(() => false)) return true;
+  }
+  return false;
+}
+
+async function waitForVisibleExactText(page, text, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await hasVisibleExactText(page, text)) return true;
+    if (Date.now() >= deadline) break;
+    await page.waitForTimeout(250);
+  } while (true);
+  return false;
+}
+
+async function runCompleteTicketCaseStep(page, stepNumber, caseId) {
+  const step = Number(stepNumber);
+  const cid = caseId || process.env.WHARTTEST_CASE_ID || 'unknown';
+  const pathMod = require('path');
+  const dir = process.env.SCREENSHOT_DIR || '.';
+  const target = pathMod.join(dir, `case_${cid}_step${step}.png`);
+  const ticketNo = getTicketNoFromEnv();
+  const expectedAssignee = String(process.env.WHARTTEST_CLAIM_ASSIGNEE_NAME || '').trim();
+  const totalSteps = Number(process.env.WHARTTEST_CASE_STEP_COUNT || 3) || 3;
+  const action = completeTicketActionForStep(step);
+
+  console.log(`[执行进度] 正在执行步骤 ${step}/${totalSteps}`);
+
+  const waitForTicketListSettled = async () => {
+    const loading = page.locator('.el-loading-mask:visible, .el-table__loading:visible').first();
+    await loading.waitFor({ state: 'hidden', timeout: 12000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+  };
+
+  const completeButton = () =>
+    page.getByRole('button', { name: /工单完成|完成工单/ }).first();
+
+  const confirmDialog = () =>
+    page
+      .locator('.el-message-box:visible, .el-dialog:visible, [role="dialog"]:visible')
+      .filter({ hasText: /确认完成|确定完成该工单/ })
+      .last();
+
+  const assertResolved = async () => {
+    if (!(await isTicketDetailVisible(page).catch(() => false))) return false;
+    return waitForVisibleExactText(page, '已解决');
+  };
+
+  const assertProcessing = async () => {
+    if (!(await isTicketDetailVisible(page).catch(() => false))) return false;
+    const processing = await hasVisibleExactText(page, '处理中');
+    const resolved = await hasVisibleExactText(page, '已解决');
+    return processing && !resolved;
+  };
+
+  const captureStep = async () => {
+    await page.screenshot({ path: target, fullPage: false, timeout: 8000, plain: true });
+    declareCaseScreenshot(target);
+    return target;
+  };
+
+  const confirmCompletion = async (dialog) => {
+    const confirm = dialog.getByRole('button', { name: /确定|确认/ }).first();
+    await confirm.click({ timeout: 8000 });
+    await dialog.waitFor({ state: 'hidden', timeout: 8000 }).catch(() => {});
+    const toast = page.locator('.el-message:visible').filter({ hasText: /操作成功|完成成功/ }).first();
+    const toastSeen = await toast.isVisible().catch(() => false);
+    let resolved = await assertResolved();
+    if (!resolved && isTicketDetailUrl(page.url())) {
+      // Confirm may update the server before this SPA refreshes its detail state.
+      // Reload only this same ticket once; an API response alone never counts as a UI pass.
+      console.log('RESULT=INFO: 点击「确定」后详情状态未同步，重新读取当前工单详情');
+      try {
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 10000 });
+        const sameDetail = await isTicketDetailVisible(page).catch(() => false);
+        const detailText = sameDetail ? await page.locator('body').innerText().catch(() => '') : '';
+        if (ticketNo && detailText.includes(ticketNo)) {
+          resolved = await assertResolved();
+        } else {
+          console.log('RESULT=INFO: 重新读取后未能确认仍在本次工单详情');
+        }
+      } catch (error) {
+        console.log(`RESULT=INFO: 重新读取详情失败: ${String(error?.message || error).slice(0, 120)}`);
+      }
+    }
+    if (!resolved) {
+      await captureStep().catch(() => {});
+      console.log('RESULT=FAIL: 点击「确定」并重新读取详情后仍未显示「已解决」；请核对目标工单状态与页面刷新');
+      return null;
+    }
+    await page.getByText('已解决', { exact: true }).first().scrollIntoViewIfNeeded().catch(() => {});
+    if (!toastSeen) {
+      console.log('RESULT=INFO: 成功提示可能已消失，已通过状态徽标核实完成');
+    }
+    await captureStep();
+    console.log(`RESULT=PASS: 步骤${step}确认完成后工单状态为「已解决」`);
+    return target;
+  };
+
+  const findProcessingRow = async () => {
+    if (!ticketNo) {
+      console.log('RESULT=FAIL: 缺少本次造数工单号，无法定位处理中工单');
+      return null;
+    }
+    await fillFilterField(page, '工单号', ticketNo);
+    const statusSelected = await selectFormDropdownOption(page, '工单状态', '处理中').catch(
+      () => false,
+    );
+    if (!statusSelected) {
+      console.log('RESULT=FAIL: 无法将工单状态筛为「处理中」');
+      return null;
+    }
+    await clickPageButton(page, '查询');
+    await waitForTicketListSettled();
+    let row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
+    try {
+      await row.waitFor({ state: 'visible', timeout: 12000 });
+      return row;
+    } catch (_) {
+      console.log(`RESULT=INFO: 工单号+处理中未命中，改用仅工单号查询 ${ticketNo}`);
+      await fillFilterField(page, '工单号', ticketNo);
+      await clickPageButton(page, '查询');
+      await waitForTicketListSettled();
+      row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
+      try {
+        await row.waitFor({ state: 'visible', timeout: 12000 });
+        return row;
+      } catch (__) {
+        console.log(`RESULT=FAIL: 列表中未找到本次造数工单 ${ticketNo}`);
+        return null;
+      }
+    }
+  };
+
+  if (action === 'login') {
+    let loginDone = false;
+    const loginWatchdog = (async () => {
+      await page.waitForTimeout(45000);
+      if (loginDone) return undefined;
+      console.log('RESULT=FAIL: 步骤1登录超过45秒未完成，已中止');
+      try {
+        await page.screenshot({ path: target, fullPage: false, timeout: 5000, plain: true });
+        declareCaseScreenshot(target);
+      } catch (_) {}
+      return null;
+    })();
+    try {
+      const result = await Promise.race([loginStep1(page, cid), loginWatchdog]);
+      loginDone = true;
+      return result;
+    } catch (e) {
+      loginDone = true;
+      throw e;
+    }
+  }
+
+  if (step >= 2 && !(await ensureClaimableCaseAuthenticated(page, cid))) {
+    return null;
+  }
+
+  if (action === 'enter_list') {
+    await navigateToMyTicketsPage(page);
+    if (detectWorkOrderPage(page) !== 'my-tickets') {
+      console.log('RESULT=FAIL: 未能进入「我的工单」列表');
+      return null;
+    }
+    await page.screenshot({ path: target, fullPage: false, timeout: 8000, plain: true });
+    declareCaseScreenshot(target);
+    console.log(`RESULT=PASS: 步骤${step}已进入「我的工单」列表`);
+    return target;
+  }
+
+  if (action === 'enter_detail' || action === 'enter_detail_and_confirm') {
+    if (detectWorkOrderPage(page) !== 'my-tickets') {
+      await navigateToMyTicketsPage(page);
+    }
+    await dismissBlockingDialogs(page);
+    const row = await findProcessingRow();
+    if (!row) {
+      await page.screenshot({ path: target, fullPage: false, timeout: 8000, plain: true }).catch(() => {});
+      declareCaseScreenshot(target);
+      return null;
+    }
+    const entered = await clickProcessInTableRow(page, row);
+    if (!entered || !(await waitForTicketDetailNavigation(page, 10000))) {
+      console.log(`RESULT=FAIL: 步骤2未能进入工单详情 URL=${page.url()}`);
+      await page.screenshot({ path: target, fullPage: false, timeout: 8000, plain: true }).catch(() => {});
+      declareCaseScreenshot(target);
+      return null;
+    }
+    if (!(await assertTicketNoOnDetailPage(page, ticketNo))) {
+      console.log(`RESULT=FAIL: 当前详情页不是本次造数工单 ${ticketNo}`);
+      await page.screenshot({ path: target, fullPage: false, timeout: 8000, plain: true }).catch(() => {});
+      declareCaseScreenshot(target);
+      return null;
+    }
+    try {
+      await completeButton().waitFor({ state: 'visible', timeout: 10000 });
+      await completeButton().scrollIntoViewIfNeeded().catch(() => {});
+    } catch (_) {
+      console.log('RESULT=FAIL: 详情页未出现绿色「工单完成/完成工单」按钮');
+      await page.screenshot({ path: target, fullPage: false, timeout: 8000, plain: true }).catch(() => {});
+      declareCaseScreenshot(target);
+      return null;
+    }
+    // 整页截图，确保顶栏「工单完成」按钮可见；不用 captureMainContentView（会裁切/误判成列表）。
+    if (action === 'enter_detail') {
+      await page.waitForTimeout(400);
+      await captureStep();
+    }
+    if (action === 'enter_detail') {
+      console.log(
+        `RESULT=PASS: 步骤${step}已进入处理中详情 ${ticketNo}，可见「工单完成」按钮（处理人=${expectedAssignee || '当前登录用户'}）`,
+      );
+      return target;
+    }
+  }
+
+  if (action === 'inspect_complete_button') {
+    if (!(await isTicketDetailVisible(page))) {
+      console.log('RESULT=FAIL: 当前不在工单详情页，无法检查「工单完成」按钮');
+      return null;
+    }
+    if (!(await completeButton().isVisible().catch(() => false))) {
+      console.log('RESULT=FAIL: 详情页未显示「工单完成」按钮');
+      return null;
+    }
+    await page.screenshot({ path: target, fullPage: false, timeout: 8000, plain: true });
+    declareCaseScreenshot(target);
+    console.log(`RESULT=PASS: 步骤${step}已确认「工单完成」按钮可见`);
+    return target;
+  }
+
+  if (['open_confirm_dialog', 'open_and_confirm', 'enter_detail_and_confirm', 'blocked_approval'].includes(action)) {
+    // 勿先 dismissBlockingDialogs：可能干扰随后的确认弹窗截图。
+    if (!(await isTicketDetailVisible(page).catch(() => false))) {
+      if (detectWorkOrderPage(page) !== 'my-tickets') {
+        await navigateToMyTicketsPage(page);
+      }
+      const row = await findProcessingRow();
+      if (!row) {
+        await page.screenshot({ path: target, fullPage: false, timeout: 8000, plain: true }).catch(() => {});
+        declareCaseScreenshot(target);
+        return null;
+      }
+      await clickProcessInTableRow(page, row);
+      await waitForTicketDetailNavigation(page, 10000);
+    }
+    try {
+      await completeButton().waitFor({ state: 'visible', timeout: 10000 });
+      await completeButton().click({ timeout: 8000 });
+    } catch (err) {
+      console.log(
+        `RESULT=FAIL: 无法点击「工单完成」按钮: ${String(err?.message || err).slice(0, 160)}`,
+      );
+      await page.screenshot({ path: target, fullPage: false, timeout: 8000, plain: true }).catch(() => {});
+      declareCaseScreenshot(target);
+      return null;
+    }
+    if (action === 'blocked_approval') {
+      const blockedDialogVisible = await confirmDialog().isVisible().catch(() => false);
+      const errorToast = page.locator('.el-message:visible')
+        .filter({ hasText: /审批未完成/ }).first();
+      const errorSeen = await errorToast.waitFor({ state: 'visible', timeout: 8000 })
+        .then(() => true).catch(() => false);
+      if (blockedDialogVisible || !errorSeen || !(await assertProcessing())) {
+        console.log('RESULT=FAIL: 待审批工单未按预期阻止完成操作');
+        return null;
+      }
+      await captureStep();
+      console.log(`RESULT=PASS: 步骤${step}已阻止待审批工单完成`);
+      return target;
+    }
+    const dialog = confirmDialog();
+    try {
+      await dialog.waitFor({ state: 'visible', timeout: 8000 });
+    } catch (_) {
+      console.log('RESULT=FAIL: 未弹出「确认完成」弹窗');
+      await page.screenshot({ path: target, fullPage: false, timeout: 8000, plain: true }).catch(() => {});
+      declareCaseScreenshot(target);
+      return null;
+    }
+    const dialogText = ((await dialog.innerText().catch(() => '')) || '').replace(/\s+/g, '');
+    const titleOk = dialogText.includes('确认完成');
+    const bodyOk = dialogText.includes('确定完成该工单');
+    const cancelVisible = await dialog
+      .getByRole('button', { name: /取消/ })
+      .first()
+      .isVisible()
+      .catch(() => false);
+    const confirmVisible = await dialog
+      .getByRole('button', { name: /确定|确认/ })
+      .first()
+      .isVisible()
+      .catch(() => false);
+    // 弹窗可见时立刻整页截图；禁止走 screenshotCaseStep→captureMainContentView（开头会 dismiss）。
+    if (action === 'open_confirm_dialog') {
+      await page.waitForTimeout(300);
+      await captureStep();
+    }
+    if (!titleOk || !bodyOk) {
+      console.log(
+        `RESULT=FAIL: 确认弹窗文案不符，期望含「确认完成」与「确定完成该工单?」，实际=${dialogText.slice(0, 120)}`,
+      );
+      return null;
+    }
+    if (!cancelVisible || !confirmVisible) {
+      console.log('RESULT=FAIL: 确认弹窗缺少「取消」或蓝色「确定」按钮');
+      return null;
+    }
+    if (action === 'open_and_confirm' || action === 'enter_detail_and_confirm') {
+      return confirmCompletion(dialog);
+    }
+    console.log(`RESULT=PASS: 步骤${step}已确认「工单完成」弹窗标题与文案正确`);
+    return target;
+  }
+
+  if (action === 'confirm_complete') {
+    const dialog = confirmDialog();
+    if (!(await dialog.isVisible().catch(() => false))) {
+      console.log('RESULT=FAIL: 点击「确定」前确认完成弹窗未显示');
+      return null;
+    }
+    return confirmCompletion(dialog);
+  }
+
+  if (action === 'cancel_complete') {
+    const dialog = confirmDialog();
+    if (!(await dialog.isVisible().catch(() => false))) {
+      console.log('RESULT=FAIL: 点击「取消」前确认完成弹窗未显示');
+      return null;
+    }
+    await dialog.getByRole('button', { name: /取消/ }).first().click({ timeout: 8000 });
+    await dialog.waitFor({ state: 'hidden', timeout: 8000 });
+    if (!(await assertProcessing())) {
+      console.log('RESULT=FAIL: 取消完成后工单状态未保持「处理中」');
+      return null;
+    }
+    await captureStep();
+    console.log(`RESULT=PASS: 步骤${step}取消后工单仍为「处理中」`);
+    return target;
+  }
+
+  if (action === 'verify_resolved_badge') {
+    if (!(await assertResolved())) {
+      console.log('RESULT=FAIL: 详情顶部未显示「已解决」状态');
+      return null;
+    }
+    await captureStep();
+    console.log(`RESULT=PASS: 步骤${step}已确认「已解决」状态徽标`);
+    return target;
+  }
+
+  if (action === 'verify_resolved_composer_hidden') {
+    if (!(await assertResolved()) || !(await assertCommunicationReadOnly(page))) {
+      console.log('RESULT=FAIL: 已解决详情状态或沟通区只读校验失败');
+      return null;
+    }
+    await captureStep();
+    console.log(`RESULT=PASS: 步骤${step}已解决工单无法继续发送消息`);
+    return target;
+  }
+
+  if (action === 'verify_processing_composer' || action === 'send_message_processing') {
+    if (!(await assertProcessing())) {
+      console.log('RESULT=FAIL: 工单未保持「处理中」');
+      return null;
+    }
+    const editor = page.locator('textarea:visible').first();
+    const sendButton = page.getByRole('button', { name: /发送/ }).first();
+    if (!(await editor.isVisible().catch(() => false)) ||
+        !(await sendButton.isVisible().catch(() => false))) {
+      console.log('RESULT=FAIL: 处理中工单的消息输入框或发送按钮不可用');
+      return null;
+    }
+    if (action === 'send_message_processing') {
+      const message = `自动化测试消息-${ticketNo}-${Date.now()}`;
+      await editor.fill(message);
+      await sendButton.click({ timeout: 8000 });
+      if (!(await page.getByText(message, { exact: true }).first()
+        .waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false))) {
+        console.log('RESULT=FAIL: 点击发送后未看到新消息');
+        return null;
+      }
+    }
+    await captureStep();
+    console.log(`RESULT=PASS: 步骤${step}沟通区可用且工单仍为「处理中」`);
+    return target;
+  }
+
+  if (action === 'verify_resolved_list') {
+    await navigateToMyTicketsPage(page);
+    await fillFilterField(page, '工单号', ticketNo);
+    await clickPageButton(page, '查询');
+    await waitForTicketListSettled();
+    const row = page.locator('.el-table__body tr').filter({ hasText: ticketNo }).first();
+    if (!(await row.isVisible().catch(() => false)) ||
+        !(await row.getByText('已解决', { exact: true }).first().isVisible().catch(() => false))) {
+      console.log(`RESULT=FAIL: 我的工单列表未显示 ${ticketNo} 为「已解决」`);
+      return null;
+    }
+    await captureStep();
+    console.log(`RESULT=PASS: 步骤${step}列表状态已同步为「已解决」`);
+    return target;
+  }
+
+  console.log(`RESULT=FAIL: 无法识别工单完成步骤 ${step}/${totalSteps} 的操作类型，请检查用例步骤描述`);
   return null;
 }
 
@@ -5881,10 +6656,33 @@ async function ensureClaimableCaseAuthenticated(page, caseId) {
   return true;
 }
 
+function normalizeFilterFieldLabel(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^(?:精准|模糊)?搜索/, '')
+    .replace(/^(?:请输入|请填写|输入)/, '')
+    .replace(/[\s:：*…\.。_\-]/g, '')
+    .replace(/工单(?:编号|号码|号)/g, '工单号')
+    .toLowerCase();
+}
+
+function filterInputLabelMatches(requestedLabel, candidateLabel) {
+  const requested = normalizeFilterFieldLabel(requestedLabel);
+  const candidate = normalizeFilterFieldLabel(candidateLabel);
+  if (!requested || !candidate) return false;
+  return candidate === requested || candidate.startsWith(requested) || requested.startsWith(candidate);
+}
+
 async function fillFilterField(page, labelText, value) {
   if (isLoginPageUrl(page.url())) {
     console.log(`RESULT=FAIL: 当前在登录页，无法填写筛选「${labelText}」 URL=${page.url()}`);
     throw new Error('LOGIN_PAGE: cannot fill filter while logged out');
+  }
+  const statusValues = /^(?:全部|待分配|待处理|处理中|已解决|已关闭|已完成|已取消|待审批|审批中)$/;
+  if (normalizeFilterFieldLabel(labelText) === '工单号' && statusValues.test(String(value).trim())) {
+    throw new Error(
+      `筛选值「${String(value).trim()}」是工单状态，不是工单号；请使用 selectFormDropdownOption(page, '工单状态', '${String(value).trim()}')，不要填入工单号搜索框`,
+    );
   }
   await dismissBlockingDialogs(page);
   await ensureFilterPanelVisible(page);
@@ -5894,11 +6692,38 @@ async function fillFilterField(page, labelText, value) {
     .first();
   if ((await filterField.count()) > 0) {
     const input = filterField.locator('input').first();
-    await input.waitFor({ state: 'visible', timeout: 8000 });
-    await input.fill(String(value));
-    return;
+    if (await input.isVisible().catch(() => false)) {
+      await input.fill(String(value));
+      return;
+    }
   }
-  await page.getByPlaceholder(new RegExp(labelText)).fill(String(value), { timeout: 8000 });
+
+  // Labels and placeholders often differ slightly (e.g. “工单编号” vs
+  // “搜索工单号…”). Match the semantic field name against the rendered input,
+  // rather than waiting on a guessed placeholder regex.
+  const inputs = await page.locator('input:visible').all();
+  for (const input of inputs) {
+    const candidates = [
+      await input.getAttribute('placeholder'),
+      await input.getAttribute('aria-label'),
+      await input.getAttribute('name'),
+    ].filter(Boolean);
+    if (candidates.some((candidate) => filterInputLabelMatches(labelText, candidate))) {
+      await input.fill(String(value), { timeout: 3000 });
+      return;
+    }
+  }
+
+  const visibleFields = inputs.length
+    ? (await Promise.all(inputs.map(async (input) => (
+      (await input.getAttribute('placeholder')) ||
+      (await input.getAttribute('aria-label')) ||
+      (await input.getAttribute('name')) || '<无标签输入框>'
+    )))).join('、')
+    : '无';
+  throw new Error(
+    `筛选字段「${labelText}」未匹配到页面可见的文本输入框。当前可见输入框：${visibleFields}。状态条件请使用 selectFormDropdownOption；不要猜占位文字。`,
+  );
 }
 
 module.exports = {
@@ -5966,9 +6791,15 @@ module.exports = {
   runClaimableTicketCaseStep,
   runTransferTicketCaseStep,
   runProcessingHandoverCaseStep,
+  runCompleteTicketCaseStep,
+  completeTicketActionForStep,
+  hasVisibleExactText,
+  waitForVisibleExactText,
   filterTicketList,
   handleCookieBanner,
   retryWithBackoff,
+  normalizeFilterFieldLabel,
+  filterInputLabelMatches,
   createContext,
   detectDevServers,
   getExtraHeadersFromEnv,

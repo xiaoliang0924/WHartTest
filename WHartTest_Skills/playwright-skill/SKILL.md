@@ -74,3 +74,9 @@ node run.js "await helpers.loginStep1(page);"
 
 按用例步骤编号一步一脚本、一步一截图。登录步骤的截图由 `loginStep1` 自带，不要重复截图。登录输出 `RESULT=FAIL` 时立即停止，禁止继续菜单步骤。筛选步只做筛选和验收，不要在同一步点进详情；若用例已拆分为「步骤3查询、步骤4进详情」，则分别执行，或使用 `runTicketDetailCaseStep`。
 禁止用 `page.getByText('某状态').click()` 选状态下拉（表格里常有多行同文案）。
+
+### 工单列表字段定位
+
+- 步骤说“找到状态为 X 的工单”时，用页面真实的「工单状态」下拉筛选：`selectFormDropdownOption(page, '工单状态', '处理中')` 或 `filterWorkOrdersByStatus(page, '处理中')`。不要把“处理中”等状态文本填入工单号搜索框。
+- 字段标签和输入框 placeholder 可能有文案差异。先用 `describePageForAI(page)` 查看当前页面实际字段；例如用例写“工单编号”，页面可能显示“搜索工单号…”。`fillFilterField` 会做常见别名匹配；如果仍找不到，应报告页面实际可见字段和原始定位错误，不要猜 placeholder，也不要归因成“缺失业务”。
+- 失败报告要保留触发失败的原始步骤和控件错误。后续步骤因前一步失败未执行时，标记“未执行”，不要把超时改写为后续步骤“缺失业务”。

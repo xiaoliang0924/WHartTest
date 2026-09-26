@@ -19,7 +19,9 @@ INTERFACE_REF_HINTS: Dict[str, tuple[str, ...]] = {
     'unassign_ticket': ('取消分配工单', 'unassign'),
     'transfer_ticket': ('转派工单', 'transfer'),
     'claim_ticket': ('领取工单', 'claim'),
+    'submit_approval': ('提交审批', '/submit-approval'),
     'resolve_ticket': ('完成工单', 'resolve', 'close'),
+    'close_ticket': ('关闭工单', 'close ticket', '/close'),
     'update_subject': ('修改工单主题', 'update subject', 'subject'),
     'ticket_detail': ('查询工单详情', 'ticket detail', 'ticket detail'),
 }
@@ -106,11 +108,18 @@ def get_project_template_bindings(
 def _find_interface_id(project_id: int, ref: str, bindings: Dict[str, Any]) -> int:
     interfaces = bindings.get('interfaces') if isinstance(bindings.get('interfaces'), dict) else {}
     if ref in interfaces:
-        return int(interfaces[ref])
+        interface_id = int(interfaces[ref])
+        if ref != 'close_ticket':
+            return interface_id
+        candidate = ApiInterface.objects.filter(pk=interface_id, project_id=project_id).first()
+        if candidate and _is_single_close_interface(candidate):
+            return interface_id
 
     hints = INTERFACE_REF_HINTS.get(ref, (ref.replace('_', ' '),))
     queryset = ApiInterface.objects.filter(project_id=project_id, type=ApiInterface.TYPE_HTTP)
     for iface in queryset.order_by('id'):
+        if ref == 'close_ticket' and not _is_single_close_interface(iface):
+            continue
         name = (iface.name or '').lower()
         url = ''
         try:
@@ -125,6 +134,14 @@ def _find_interface_id(project_id: int, ref: str, bindings: Dict[str, Any]) -> i
         f'无法解析接口引用 "{ref}"：请在模板计划的 template_bindings.interfaces 中配置，'
         f'或在步骤中直接使用 interface_id'
     )
+
+
+def _is_single_close_interface(interface: ApiInterface) -> bool:
+    try:
+        url = str(interface.get_interface_data().get('url') or '').lower().rstrip('/')
+    except Exception:
+        return False
+    return url.endswith('/close') and '/batch-close' not in url
 
 
 def _find_database_config_id(project_id: int, ref: str, bindings: Dict[str, Any]) -> int:

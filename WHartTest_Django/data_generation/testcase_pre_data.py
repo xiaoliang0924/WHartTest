@@ -22,7 +22,7 @@ from .intent_router import (
 )
 from .models import DataGenerationPlan, DataGenerationRun
 from .plan_validation import ensure_plan_has_environment
-from .services import execute_plan
+from .services import apply_params_schema_defaults, execute_plan
 from .templates import get_template_by_key
 
 logger = logging.getLogger(__name__)
@@ -78,6 +78,78 @@ def _inject_unlocked_creator_token(exec_params, *, environment_id):
         )
     except Exception:
         logger.exception('Claimable pre-data: failed to inject unlocked creator token')
+    return params
+
+
+def _inject_claim_creator_token(exec_params, *, project_id: int, environment_id: int):
+    """Create a no-initial-chat claim fixture as its assignee, without replacing admin auth."""
+    import jwt
+
+    from api_environments.models import ApiEnvironment, ApiEnvironmentVariable
+    from api_environments.token_refresh import _login_for_token, _token_still_valid
+
+    params = dict(exec_params or {})
+    desired_id = params.get('assigneeUserId')
+    desired_name = str(params.get('assigneeName') or '').strip()
+    env = ApiEnvironment.objects.filter(id=environment_id, project_id=project_id).first()
+    if env is None or desired_id in (None, '') or not desired_name:
+        raise DataGenerationError('领取类造数缺少环境或目标处理人')
+    token_name = f'claimAssigneeToken_{desired_id}'
+    cached = str(env.get_all_variables().get(token_name) or '')
+    token = None
+    if _token_still_valid(cached):
+        try:
+            if str(jwt.decode(cached, options={'verify_signature': False}).get('sub')) == str(desired_id):
+                token = cached
+        except jwt.PyJWTError:
+            pass
+    if token is None:
+        credential = (
+            ProjectCredential.objects.filter(project_id=project_id, user_role__iexact=desired_name)
+            .exclude(password='').first()
+        )
+        if credential is None:
+            raise DataGenerationError(f'目标处理人“{desired_name}”没有已保存的登录凭据')
+        try:
+            token = _login_for_token(
+                env.base_url, credential.username, credential.password,
+                verify_ssl=env.verify_ssl,
+            )
+        except Exception as exc:
+            raise DataGenerationError(f'目标处理人“{desired_name}”登录失败，无法创建可领取工单: {exc}') from exc
+        if str(jwt.decode(token, options={'verify_signature': False}).get('sub')) != str(desired_id):
+            raise DataGenerationError('目标处理人登录令牌与预期用户 ID 不一致')
+        ApiEnvironmentVariable.objects.update_or_create(
+            environment=env, name=token_name,
+            defaults={
+                'value': token,
+                'type': 'string',
+                'is_sensitive': True,
+                'description': '工单造数计划目标处理人短期登录令牌',
+            },
+        )
+    # Pass only the variable name into the persisted run; never store the JWT
+    # in input_params, output_snapshot, or step_logs.
+    params['claimCreatorTokenVar'] = token_name
+    return params
+
+
+def _inject_case_creator_token(exec_params, *, project_id: int, environment_id: int):
+    """Resolve a short-lived creator token for fixtures that assert creator permissions."""
+    params = dict(exec_params or {})
+    creator_id = params.get('creatorUserId')
+    creator_name = str(params.get('creatorName') or '').strip()
+    if creator_id in (None, ''):
+        return params
+    if not creator_name:
+        raise DataGenerationError('指定造数发起人时必须同时提供 creatorName')
+
+    token_params = _inject_claim_creator_token(
+        {'assigneeUserId': creator_id, 'assigneeName': creator_name},
+        project_id=project_id,
+        environment_id=environment_id,
+    )
+    params['creatorTokenVar'] = token_params['claimCreatorTokenVar']
     return params
 
 
@@ -224,6 +296,46 @@ def collect_testcase_text(testcase: TestCase) -> str:
     return '\n'.join(part for part in parts if part)
 
 
+_FIXTURE_STATUS_TO_TEMPLATE = {
+    '待分配': 'biz_create_type_a',
+    '未分配': 'biz_create_type_a',
+    '待处理': 'biz_create_and_assign',
+    '处理中': 'biz_create_and_claim',
+    '已解决': 'biz_create_assign_resolve',
+    '已关闭': 'biz_create_assign_close',
+}
+_TERMINAL_PAIR_KEY = 'biz_prepare_terminal_pair'
+_FIXTURE_STATUS_PATTERN = re.compile(
+    r'(?:状态为|状态：|状态:|状态是)\s*[「“"\']?'
+    r'(已关闭|已解决|处理中|待处理|待分配|未分配)'
+)
+
+
+def required_fixture_statuses(precondition: str) -> tuple[str, ...]:
+    """Only explicit *preconditions* define starting ticket states.
+
+    Titles and expected results often describe what the UI test will do later,
+    so routing on all testcase text can prepare the wrong state up front.
+    """
+    return tuple(dict.fromkeys(_FIXTURE_STATUS_PATTERN.findall(precondition or '')))
+
+
+def _required_statuses_from_navigation_steps(testcase: TestCase) -> tuple[str, ...]:
+    """Fallback to navigation actions, never assertions about the UI outcome."""
+    statuses = []
+    target_pattern = re.compile(
+        r'(?:找到|定位|点击|进入|搜索|筛选|选择).{0,35}?'
+        r'(?:状态为|状态：|状态:|状态的|该)?\s*[「“"\']?'
+        r'(已关闭|已解决|处理中|待处理|待分配|未分配)'
+    )
+    for step in testcase.steps.order_by('step_number')[:3]:
+        description = step.description or ''
+        for status in target_pattern.findall(description):
+            if status not in statuses:
+                statuses.append(status)
+    return tuple(statuses)
+
+
 def is_page_access_permission_case(text: str) -> bool:
     return any(keyword in (text or '') for keyword in _PAGE_ACCESS_KEYWORDS)
 
@@ -364,6 +476,25 @@ def ensure_project_template_plan(
         is_active=True,
     ).first()
     if plan is not None:
+        if template_key == 'biz_create_assign_close':
+            from copy import deepcopy
+            from api_interfaces.models import ApiInterface
+            from .template_resolver import _find_interface_id, _is_single_close_interface
+
+            steps = deepcopy(plan.steps or [])
+            for step in steps:
+                if step.get('type') != 'api_call' or step.get('name') != '关闭工单':
+                    continue
+                interface = ApiInterface.objects.filter(
+                    pk=step.get('interface_id'), project_id=project_id,
+                ).first()
+                if interface is None or not _is_single_close_interface(interface):
+                    step['interface_id'] = _find_interface_id(
+                        project_id, 'close_ticket', plan.template_bindings or {},
+                    )
+                    plan.steps = steps
+                    plan.save(update_fields=['steps'])
+                break
         return plan
 
     template = get_template_by_key(
@@ -987,16 +1118,60 @@ def resolve_pre_data_for_testcase(testcase: TestCase) -> PreDataResolution:
             skip_reason='未识别到工单类前置数据需求',
         )
 
-    template_key = infer_business_template_key(text)
+    fixture_statuses = required_fixture_statuses(testcase.precondition or '')
+    inferred_key = infer_business_template_key(text)
+    status_filter_case = (
+        inferred_key == 'biz_prepare_status_filter_data'
+        and bool(re.search(r'筛选|过滤|查询|检索', testcase.name or ''))
+    )
+    if (
+        not fixture_statuses
+        and not status_filter_case
+        and inferred_key not in {'biz_create_approval_processing', 'biz_create_and_transfer'}
+    ):
+        fixture_statuses = _required_statuses_from_navigation_steps(testcase)
+    if set(fixture_statuses) == {'已关闭', '已解决'}:
+        return PreDataResolution(
+            plan=None,
+            template_key=_TERMINAL_PAIR_KEY,
+            input_params=build_input_params(text, {'input_params': {}, 'steps': []}),
+            default_environment_id=None,
+            source='terminal_pair',
+            fail_fast=True,
+        )
+    if len(fixture_statuses) > 1:
+        status_labels = '、'.join(fixture_statuses)
+        return PreDataResolution(
+            plan=None,
+            template_key=None,
+            input_params={},
+            default_environment_id=None,
+            source='unsupported_fixture',
+            fail_fast=True,
+            skip_reason=(
+                f'用例前置条件需要「{status_labels}」工单；当前单工单模板无法安全准备该组合或已关闭状态，'
+                '请配置能创建并验证全部目标状态的造数计划'
+            ),
+        )
+
+    handover_flow = processing_handover_flow_kind(testcase)
+    if handover_flow in _SUBMITTED_HANDOVER_FLOWS:
+        template_key = 'biz_create_and_claim'
+    elif inferred_key == 'biz_create_approval_processing':
+        template_key = inferred_key
+    elif fixture_statuses:
+        template_key = _FIXTURE_STATUS_TO_TEMPLATE.get(fixture_statuses[0])
+    else:
+        template_key = inferred_key
     if not template_key:
         return PreDataResolution(
             plan=None,
             template_key=None,
             input_params={},
             default_environment_id=None,
-            source='none',
-            fail_fast=False,
-            skip_reason='无法推断造数模板',
+            source='unmatched_ticket_fixture',
+            fail_fast=getattr(testcase, 'pre_data_fail_fast', True),
+            skip_reason='用例需要工单前置数据，但无法推断造数模板；请明确前置状态或绑定计划',
         )
 
     # 文本中可能仍保留了旧模板键；将它当作 TYPE_A 创建的别名处理，
@@ -1005,6 +1180,11 @@ def resolve_pre_data_for_testcase(testcase: TestCase) -> PreDataResolution:
         return resolve_claimable_ticket_pre_data(testcase)
 
     input_params = build_input_params(text, {'input_params': {}, 'steps': []})
+    if handover_flow == 'approver_list':
+        # The login account in this case is the approver, not the ticket owner.
+        # Let the claim-plan schema supply the processing ticket's owner.
+        input_params.pop('assigneeName', None)
+        input_params.pop('assigneeUserId', None)
     plan = DataGenerationPlan.objects.filter(
         project_id=testcase.project_id,
         template_key=template_key,
@@ -1075,12 +1255,326 @@ def is_transfer_ui_helper_case(testcase: TestCase) -> bool:
 
 
 def is_processing_handover_case(testcase: TestCase) -> bool:
-    """Processing ticket detail → 移交审批 button visibility helper."""
+    """Cases needing a processing ticket for an approval-handover scenario."""
     name = (getattr(testcase, 'name', '') or '').strip()
     blob = collect_testcase_text(testcase)
+    if processing_handover_flow_kind(testcase):
+        return True
     if '移交审批' in name:
         return True
     return '移交审批' in blob and '处理中' in blob
+
+
+_SUBMITTED_HANDOVER_FLOWS = frozenset({
+    'approval_detail', 'approval_summary', 'approval_button', 'approver_list',
+})
+
+
+def processing_handover_flow_kind(testcase: TestCase) -> str:
+    """Classify the required approval state and UI actions from ordered steps."""
+    steps = list(testcase.steps.order_by('step_number'))
+    descriptions = [str(step.description or '') for step in steps]
+    expectations = [str(step.expected_result or '') for step in steps]
+    count = len(steps)
+    if (
+        count == 3
+        and '待处理' in f'{testcase.name or ""} {testcase.precondition or ""}'
+        and '详情' in descriptions[1]
+        and '按钮' in descriptions[2]
+        and '不展示' in expectations[2]
+        and '移交审批' in expectations[2]
+    ):
+        return 'pending_no_handover'
+    if count == 4 and '移交审批' in ' '.join(descriptions + expectations) and '按钮可见性' in (testcase.name or ''):
+        return 'visibility'
+    if count == 7 and any('选择审批人' in text for text in descriptions + expectations) and '确认移交' in descriptions[-1]:
+        return 'submit_split'
+    if count == 4 and '200' in descriptions[2] and '移交审批' in descriptions[2] and '确认移交' in descriptions[3]:
+        return 'submit_reason_boundary'
+    if count == 4 and '确认移交' in descriptions[2] and '审批详情' in expectations[3]:
+        return 'submit_compact'
+    if count == 3 and '审批详情' in descriptions[2] and '审批流程' in expectations[2]:
+        return 'approval_detail'
+    if count == 4 and '审批详情' in descriptions[2] and '工单摘要' in descriptions[3] and '待审批' in expectations[3]:
+        return 'approval_summary'
+    if count == 3 and '工单号' in descriptions[2] and '待审批' in expectations[2] and '移交审批' in descriptions[2]:
+        return 'approver_list'
+    if count == 3 and '审批详情' in expectations[2] and '不展示' in expectations[2] and '移交审批' in expectations[2]:
+        return 'approval_button'
+    if count == 5 and '不选择任何审批人' in descriptions[3] and '确认移交' in descriptions[4]:
+        return 'selection_required'
+    if count == 5 and '取消' in descriptions[3] and '移交审批' in expectations[4]:
+        return 'cancel'
+    return ''
+
+
+def is_processing_handover_visibility_case(testcase: TestCase) -> bool:
+    """Only the four-step button-visibility case uses the fixed helper."""
+    return processing_handover_flow_kind(testcase) == 'visibility'
+
+
+def is_processing_handover_submission_case(testcase: TestCase) -> bool:
+    """Approval handover submission in either compact or fully split steps."""
+    return processing_handover_flow_kind(testcase) in {
+        'submit_split', 'submit_compact', 'submit_reason_boundary',
+    }
+
+
+def is_processing_handover_helper_case(testcase: TestCase) -> bool:
+    return bool(processing_handover_flow_kind(testcase))
+
+
+def _resolve_handover_approver_params(
+    testcase: TestCase, params: Dict[str, Any], *, environment_id: int,
+) -> Dict[str, Any]:
+    """Resolve the actual business user ID before submitting approval."""
+    import requests
+
+    from api_environments.models import ApiEnvironment
+    from api_environments.token_refresh import refresh_environment_tokens
+
+    resolved = dict(params)
+    text = collect_testcase_text(testcase)
+    named = re.search(r'审批人[「“]?([\u4e00-\u9fff]{2,4})(?=[，。\s、”」]|$)', text)
+    name = str(resolved.get('approverName') or (named.group(1) if named else '') or '黎沅欣').strip()
+    environment = ApiEnvironment.objects.filter(id=environment_id, project_id=testcase.project_id).first()
+    if environment is None:
+        raise DataGenerationError('缺少审批造数 API 环境')
+    variables = refresh_environment_tokens(
+        base_url=environment.base_url,
+        variables=environment.get_all_variables(),
+        verify_ssl=environment.verify_ssl,
+        environment_id=environment.id,
+        persist=True,
+    )
+    token = variables.get('adminToken') or variables.get('accessToken')
+    if not token:
+        raise DataGenerationError('审批造数缺少管理员查询令牌')
+    candidates = []
+    for role in ('customer_service', 'product', 'test'):
+        try:
+            response = requests.get(
+                environment.base_url.rstrip('/') + '/api/users/transfer-candidates',
+                headers={'Authorization': f'Bearer {token}'},
+                params={'keyword': name, 'role': role, 'page': 1, 'pageSize': 100},
+                verify=environment.verify_ssl,
+                timeout=20,
+            )
+            response.raise_for_status()
+            rows = response.json().get('data')
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning('Lookup approver %s role=%s failed: %s', name, role, exc)
+            continue
+        if isinstance(rows, list):
+            candidates.extend(
+                row for row in rows
+                if isinstance(row, dict)
+                and str(row.get('name') or '').strip() == name
+                and row.get('id') not in (None, '')
+                and row.get('isActive', True)
+            )
+    ids = {str(row['id']) for row in candidates}
+    if len(ids) != 1:
+        raise DataGenerationError(f'审批人“{name}”匹配到 {len(ids)} 个用户 ID，无法安全提交审批')
+    found_id = next(iter(ids))
+    if resolved.get('approverUserId') not in (None, '') and str(resolved['approverUserId']) != found_id:
+        raise DataGenerationError(f'审批人“{name}”的指定用户 ID 与业务系统不一致')
+    resolved['approverUserId'] = int(found_id)
+    resolved['approverName'] = name
+    resolved.setdefault('comment', '自动化测试准备待审批工单')
+    return resolved
+
+
+def _build_submitted_handover_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Append approval submission after the claim plan has produced its ticket."""
+    from copy import deepcopy
+
+    submission = {
+        'type': 'api_call',
+        'name': '提交审批',
+        'interface_ref': 'submit_approval',
+        'environment_ref': 'default',
+        'variables': {
+            'ticketId': '{{ticketId}}',
+            'approverUserId': '{{approverUserId}}',
+            'approverName': '{{approverName}}',
+            'comment': '{{comment}}',
+        },
+    }
+    result: list[dict[str, Any]] = []
+    submitted = False
+    for original in steps:
+        step = deepcopy(original)
+        if not submitted and step.get('type') in {'set_env_var', 'set_public_data'}:
+            result.append(submission)
+            submitted = True
+        if step.get('type') == 'set_env_var':
+            step.setdefault('variables', {}).update({
+                'ticketStatus': 'pending_approval',
+                'approvalStatus': 'pending_approval',
+                'approverName': '{{approverName}}',
+            })
+        elif step.get('type') == 'set_public_data':
+            step.setdefault('items', []).extend([
+                {'key': 'approvalStatus', 'value': 'pending_approval', 'type': 0},
+                {'key': 'approverName', 'value': '{{approverName}}', 'type': 0},
+            ])
+            for item in step['items']:
+                if isinstance(item, dict) and item.get('key') == 'ticketStatus':
+                    item['value'] = 'pending_approval'
+        result.append(step)
+    if not submitted:
+        result.append(submission)
+    return result
+
+
+def _verify_submitted_handover_fixture(
+    run: DataGenerationRun, *, environment_id: int, approver_name: str,
+) -> None:
+    """Fail before UI execution if the new ticket has no pending approval."""
+    import requests
+
+    from api_environments.models import ApiEnvironment
+    from api_environments.token_refresh import refresh_environment_tokens
+
+    snapshot = run.output_snapshot if isinstance(run.output_snapshot, dict) else {}
+    ticket_no = str(snapshot.get('ticketNo') or '').strip()
+    if not ticket_no:
+        raise DataGenerationError('提交审批后缺少本次造数工单号')
+    environment = ApiEnvironment.objects.filter(id=environment_id, project_id=run.project_id).first()
+    if environment is None:
+        raise DataGenerationError('提交审批后找不到 API 环境')
+    variables = refresh_environment_tokens(
+        base_url=environment.base_url,
+        variables=environment.get_all_variables(),
+        verify_ssl=environment.verify_ssl,
+        environment_id=environment.id,
+        persist=True,
+    )
+    token = variables.get('adminToken') or variables.get('accessToken')
+    if not token:
+        raise DataGenerationError('无法验证审批结果：缺少管理员查询令牌')
+    for attempt in range(5):
+        try:
+            response = requests.get(
+                environment.base_url.rstrip('/') + '/api/tickets',
+                headers={'Authorization': f'Bearer {token}'},
+                params={'ticketNo': ticket_no, 'page': 1, 'pageSize': 5},
+                verify=environment.verify_ssl,
+                timeout=20,
+            )
+            response.raise_for_status()
+            rows = response.json().get('data')
+        except (requests.RequestException, ValueError) as exc:
+            raise DataGenerationError('无法查询已提交审批工单状态') from exc
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict) or str(row.get('ticketNo') or '') != ticket_no:
+                continue
+            status = str(row.get('status') or '').lower()
+            approval = str(row.get('approvalStatus') or '').lower()
+            if status == 'pending_approval' or approval in {'pending', 'pending_approval'}:
+                snapshot.update({
+                    'ticketStatus': row.get('status'),
+                    'approvalStatus': row.get('approvalStatus') or 'pending_approval',
+                    'approverName': approver_name,
+                })
+                run.output_snapshot = snapshot
+                run.save(update_fields=['output_snapshot'])
+                return
+        if attempt < 4:
+            time.sleep(0.8)
+    raise DataGenerationError(f'工单 {ticket_no} 未进入待审批状态，已停止 UI 执行')
+
+
+def _reusable_processing_handover_row(
+    row: Dict[str, Any], *, ticket_no: str, assignee_id: Any, assignee_name: str,
+) -> bool:
+    """Reuse only this case's still-actionable processing ticket."""
+    if str(row.get('ticketNo') or '') != ticket_no:
+        return False
+    if str(row.get('status') or '') not in {'processing', 'claimed'}:
+        return False
+    if str(row.get('approvalStatus') or 'none') != 'none':
+        return False
+    if assignee_id not in (None, '') and str(row.get('assigneeUserId')) != str(assignee_id):
+        return False
+    if assignee_name and str(row.get('assigneeName') or '') != assignee_name:
+        return False
+    actions = row.get('availableActions')
+    return not isinstance(actions, list) or 'submit_approval' in actions
+
+
+def _reuse_processing_handover_pre_data(
+    testcase: TestCase, resolution: PreDataResolution,
+) -> Optional[TestcasePreDataResult]:
+    """Retry an unfinished handover on its own fixture instead of stacking creator locks."""
+    from testcases.models import TestCaseRunRecord
+
+    env_id = resolution.default_environment_id or (
+        resolution.plan.default_environment_id if resolution.plan else None
+    )
+    if not env_id:
+        return None
+    params = apply_params_schema_defaults(
+        resolution.input_params,
+        resolution.plan.template_params_schema if resolution.plan else {},
+    )
+    desired_id = params.get('assigneeUserId')
+    desired_name = str(params.get('assigneeName') or '').strip()
+    records = (
+        TestCaseRunRecord.objects.select_related('data_generation_run')
+        .filter(
+            testcase_id=testcase.id,
+            data_generation_run__status=DataGenerationRun.STATUS_SUCCESS,
+            data_generation_run__plan__template_key='biz_create_and_claim',
+        )
+        .order_by('-id')[:5]
+    )
+    for record in records:
+        run = record.data_generation_run
+        snapshot = run.output_snapshot if isinstance(run.output_snapshot, dict) else {}
+        ticket_no = str(snapshot.get('ticketNo') or '').strip()
+        if not ticket_no:
+            continue
+        rows = _list_tickets_from_api(
+            project_id=testcase.project_id,
+            environment_id=int(env_id),
+            query_path=f'/api/tickets?ticketNo={ticket_no}&page=1&pageSize=5',
+        )
+        if not any(
+            _reusable_processing_handover_row(
+                row, ticket_no=ticket_no,
+                assignee_id=desired_id, assignee_name=desired_name,
+            )
+            for row in rows
+        ):
+            continue
+        resolution.source = 'reused-processing-handover'
+        return TestcasePreDataResult(
+            run=run,
+            resolution=resolution,
+            message_suffix=(
+                '\n【复用本用例未提交审批的处理中测试工单】'
+                f'\n- 本次工单号: {ticket_no}'
+                '\n- 已校验工单仍由目标处理人处理，且尚未提交审批。'
+            ),
+        )
+    return None
+
+
+def is_complete_ticket_ui_case(testcase: TestCase) -> bool:
+    """Processing ticket detail → click 工单完成 and assert confirm dialog."""
+    from .intent_router import _needs_complete_button_ui_fixture
+
+    # A whole ticket state-machine scenario is not a completion-dialog case.
+    # Sending it to the focused helper would execute the wrong workflow.
+    descriptions = ' '.join(
+        str(step.description or '') for step in testcase.steps.all()
+    )
+    other_transitions = ('分配工单', '领取工单', '移交审批', '审批通过', '关闭工单')
+    if sum(marker in descriptions for marker in other_transitions) >= 2:
+        return False
+    return _needs_complete_button_ui_fixture(collect_testcase_text(testcase))
 
 
 def transfer_ui_helper_flow(testcase: TestCase) -> str:
@@ -1391,21 +1885,52 @@ def build_testcase_navigation_hint(testcase: TestCase) -> str:
             ]
         )
         return '\n'.join(lines)
-    if is_processing_handover_case(testcase):
+    if is_processing_handover_helper_case(testcase):
         step_count = testcase.steps.count()
+        flow = processing_handover_flow_kind(testcase)
+        fixture_state = (
+            '待处理且未移交审批' if flow == 'pending_no_handover'
+            else '待审批' if flow in _SUBMITTED_HANDOVER_FLOWS
+            else '处理中且尚未提交审批'
+        )
         lines = [
             '',
-            '【处理中工单→移交审批 — 固定 Playwright 脚本，禁止改写】',
+            f'【移交审批生命周期：{fixture_state} — 固定 Playwright 脚本，禁止改写】',
             '全程 session_id 不变；每步只执行下面一行 JavaScript：',
         ]
         for step in testcase.steps.order_by('step_number'):
             lines.append(
                 f'- 步骤{step.step_number}: `await helpers.runProcessingHandoverCaseStep(page, {step.step_number});`'
             )
+        if flow == 'pending_no_handover':
+            lines.append('- 步骤2进入本次待处理工单详情；步骤3检查右上角不显示「移交审批」，并截取详情页。')
+            lines.append('- 禁止改用 runClaimableTicketCaseStep；它的步骤3停留在列表筛选页。')
+        else:
+            lines.extend([
+                '- helper 使用本次造数工单号定位；待审批用例的前置数据会先完成提交审批。',
+                '- helper 根据实际步骤执行提交、审批详情、审批人列表、输入边界或取消/校验流程。',
+                '- 禁止改用 runClaimableTicketCaseStep（那会按「待处理」筛选，必然找不到已领取工单）。',
+            ])
+        lines.extend([
+            '- helper 返回 null 或输出 RESULT=FAIL 时立即判不通过，禁止自行补截图或改报通过。',
+            f'- 本用例共 {step_count} 步。',
+        ])
+        return '\n'.join(lines)
+    if is_complete_ticket_ui_case(testcase):
+        step_count = testcase.steps.count()
+        lines = [
+            '',
+            '【处理中工单→工单完成 — 按用例步骤分派 Playwright 动作】',
+            '全程 session_id 不变；每步只执行下面一行 JavaScript：',
+        ]
+        for step in testcase.steps.order_by('step_number'):
+            lines.append(
+                f'- 步骤{step.step_number}: `await helpers.runCompleteTicketCaseStep(page, {step.step_number});`'
+            )
         lines.extend(
             [
-                '- helper 使用造数工单号，在「我的工单」按「处理中」筛选后点处理进详情。',
-                '- 禁止改用 runClaimableTicketCaseStep（那会按「待处理」筛选，必然找不到已领取工单）。',
+                '- helper 使用本次造数工单号，并依据每一步描述分别执行进入详情、弹窗、确定/取消及状态校验；不得跳过步骤。',
+                '- 禁止改用 runClaimableTicketCaseStep（会按「待处理」筛选，截图停在列表页）。',
                 '- helper 返回 null 或输出 RESULT=FAIL 时立即判不通过，禁止自行补截图或改报通过。',
                 f'- 本用例共 {step_count} 步。',
             ]
@@ -1662,6 +2187,14 @@ def _resolve_transfer_assignee_params(
             f'请在用例中指定不同的转派对象，避免 TRANSFER_TO_SELF'
         )
 
+    # assigneeUserId is also used by the executor for the ticket's current
+    # assignee and is refreshed after the assign/claim steps. Preserve the
+    # transfer destination separately so the later transfer step cannot be
+    # turned into a self-transfer.
+    params['transferTargetUserId'] = params.get('assigneeUserId')
+    params['transferTargetName'] = params.get('assigneeName')
+    params['transferTargetRole'] = params.get('assigneeRole') or 'customer_service'
+
     return params
 
 
@@ -1671,16 +2204,19 @@ def _normalize_assignment_workflow_ticket_type(
 ) -> Dict[str, Any]:
     """Normalize ticket types for assignment-related pre-data templates.
 
-    - assign / transfer / resolve: force TYPE_A (manual assign path).
+    - assign / transfer / resolve: force TYPE_A (assignment workflow).
     - claim / 处理中 / 移交审批: force TYPE_C so auto-assign lands on a holder
       whose API login works (e.g. 林业丰), then transfer+claim to the target.
       TYPE_A often lands on 张岩, whose UI password may not work on /api/auth/login.
+      Transfer fixtures use an administrator transfer to place that new ticket
+      with the source assignee, without logging in as 张岩.
     """
     params = dict(input_params or {})
     if template_key in {
         'biz_create_and_assign',
         'biz_create_and_transfer',
         'biz_create_assign_resolve',
+        'biz_create_assign_close',
     }:
         params['ticketType'] = 'TYPE_A'
     elif template_key == 'biz_create_and_claim':
@@ -1690,12 +2226,94 @@ def _normalize_assignment_workflow_ticket_type(
     return params
 
 
+def _run_terminal_pair_pre_data(testcase: TestCase, resolution: PreDataResolution, *, triggered_by=None) -> TestcasePreDataResult:
+    """Compose two reusable single-ticket plans for closed + resolved cases."""
+    resolved_plan = ensure_project_template_plan(
+        project_id=testcase.project_id,
+        template_key='biz_create_assign_resolve',
+        created_by=triggered_by or testcase.creator,
+    )
+    if resolved_plan is None or not resolved_plan.default_environment_id:
+        return TestcasePreDataResult(
+            run=None, resolution=resolution, blocked=True,
+            block_message='前置数据准备失败: 缺少已解决工单计划或其 API 环境',
+        )
+    env_id = resolved_plan.default_environment_id
+    closed_plan = ensure_project_template_plan(
+        project_id=testcase.project_id,
+        template_key='biz_create_assign_close',
+        created_by=triggered_by or testcase.creator,
+        default_environment_id=env_id,
+    )
+    if closed_plan is None:
+        return TestcasePreDataResult(
+            run=None, resolution=resolution, blocked=True,
+            block_message='前置数据准备失败: 缺少已关闭工单计划或关闭接口绑定',
+        )
+    base_params = dict(resolution.input_params or {})
+    base_summary = str(base_params.get('summary') or '终态验证工单')[:14]
+    closed_params = _normalize_assignment_workflow_ticket_type(
+        closed_plan.template_key, {**base_params, 'summary': f'{base_summary}闭单'[:20]},
+    )
+    resolved_params = _normalize_assignment_workflow_ticket_type(
+        resolved_plan.template_key, {**base_params, 'summary': f'{base_summary}解单'[:20]},
+    )
+    closed_run = execute_plan(
+        closed_plan, trigger_type=DataGenerationRun.TRIGGER_CASE_PRE,
+        input_params=closed_params, triggered_by=triggered_by,
+        default_environment_id=env_id,
+    )
+    if closed_run.status != DataGenerationRun.STATUS_SUCCESS:
+        return TestcasePreDataResult(
+            run=closed_run, resolution=resolution, blocked=True,
+            block_message=f'前置数据准备失败: 已关闭样本: {closed_run.error_message or "造数失败"}',
+        )
+    resolved_run = execute_plan(
+        resolved_plan, trigger_type=DataGenerationRun.TRIGGER_CASE_PRE,
+        input_params=resolved_params, triggered_by=triggered_by,
+        default_environment_id=env_id, parent_run=closed_run,
+    )
+    if resolved_run.status != DataGenerationRun.STATUS_SUCCESS:
+        return TestcasePreDataResult(
+            run=resolved_run, resolution=resolution, blocked=True,
+            block_message=f'前置数据准备失败: 已解决样本: {resolved_run.error_message or "造数失败"}',
+        )
+    closed_snapshot = closed_run.output_snapshot if isinstance(closed_run.output_snapshot, dict) else {}
+    resolved_snapshot = resolved_run.output_snapshot if isinstance(resolved_run.output_snapshot, dict) else {}
+    closed_no = str(closed_snapshot.get('ticketNo') or '').strip()
+    resolved_no = str(resolved_snapshot.get('ticketNo') or '').strip()
+    if not closed_no or not resolved_no or closed_no == resolved_no:
+        return TestcasePreDataResult(
+            run=resolved_run, resolution=resolution, blocked=True,
+            block_message='前置数据准备失败: 双状态样本的工单号缺失或重复',
+        )
+    resolved_run.output_snapshot = {
+        **resolved_snapshot,
+        'closedTicketId': closed_snapshot.get('ticketId'),
+        'closedTicketNo': closed_no,
+        'resolvedTicketId': resolved_snapshot.get('ticketId'),
+        'resolvedTicketNo': resolved_no,
+    }
+    resolved_run.save(update_fields=['output_snapshot'])
+    resolution.plan = resolved_plan
+    return TestcasePreDataResult(
+        run=resolved_run, resolution=resolution,
+        message_suffix=(
+            '\n【系统自动准备的两张独立工单】'
+            f'\n- 已关闭工单号: {closed_no}（只用于用例中“已关闭”步骤）'
+            f'\n- 已解决工单号: {resolved_no}（只用于用例中“已解决”步骤）'
+            '\n- 必须分别按上述工单号定位，禁止把同一工单用于两个状态断言。'
+        ),
+    )
+
+
 def run_testcase_pre_data(
     testcase: TestCase,
     *,
     triggered_by=None,
 ) -> TestcasePreDataResult:
     resolution = resolve_pre_data_for_testcase(testcase)
+    handover_flow = processing_handover_flow_kind(testcase)
 
     if resolution.source == _CLAIMABLE_MANUAL_SOURCE:
         snapshot = dict(resolution.input_params or {})
@@ -1704,6 +2322,14 @@ def run_testcase_pre_data(
             resolution=resolution,
             message_suffix=_build_manual_claimable_suffix(snapshot),
         )
+
+    if resolution.source == 'terminal_pair':
+        return _run_terminal_pair_pre_data(testcase, resolution, triggered_by=triggered_by)
+
+    if is_processing_handover_submission_case(testcase):
+        reused = _reuse_processing_handover_pre_data(testcase, resolution)
+        if reused is not None:
+            return reused
 
     plan = resolution.plan
     if plan is None and resolution.template_key:
@@ -1716,7 +2342,25 @@ def run_testcase_pre_data(
         resolution.plan = plan
 
     if plan is None:
-        if resolution.template_key and resolution.fail_fast:
+        if resolution.source == 'unmatched_ticket_fixture':
+            # An inferred fixture is a convenience, not a prerequisite for AI
+            # exploration. If the case text does not specify a safe reusable
+            # template, do not fail before the agent can inspect the target
+            # system's existing data. Explicitly bound plans and recognized
+            # templates still fail fast when their preparation fails.
+            return TestcasePreDataResult(
+                run=None,
+                resolution=resolution,
+                message_suffix=(
+                    '\n【前置数据提示】未能安全推断通用造数方案，已跳过自动造数；'
+                    '将继续使用目标环境现有数据执行。若目标工单不存在，'
+                    '后续步骤会明确报告缺少目标数据。'
+                ),
+            )
+        if resolution.fail_fast and (
+            resolution.template_key
+            or resolution.source in {'unmatched_ticket_fixture', 'unsupported_fixture'}
+        ):
             message = resolution.skip_reason or f'无法加载造数模板: {resolution.template_key}'
             return TestcasePreDataResult(
                 run=None,
@@ -1742,6 +2386,20 @@ def run_testcase_pre_data(
         resolution.input_params,
     )
     env_id = resolution.default_environment_id or plan.default_environment_id
+    if exec_params.get('creatorUserId') not in (None, ''):
+        try:
+            exec_params = _inject_case_creator_token(
+                exec_params,
+                project_id=testcase.project_id,
+                environment_id=int(env_id),
+            )
+        except (DataGenerationError, TypeError, ValueError) as exc:
+            return TestcasePreDataResult(
+                run=None,
+                resolution=resolution,
+                blocked=True,
+                block_message=f'前置数据准备失败: {exc}',
+            )
     if resolution.template_key == 'biz_create_and_transfer':
         try:
             exec_params = _resolve_transfer_assignee_params(
@@ -1763,20 +2421,55 @@ def run_testcase_pre_data(
                 exc,
             )
 
+    if handover_flow in _SUBMITTED_HANDOVER_FLOWS:
+        if resolution.template_key != 'biz_create_and_claim':
+            return TestcasePreDataResult(
+                run=None, resolution=resolution, blocked=True,
+                block_message='前置数据准备失败: 已提交审批用例需要“创建并领取工单”造数计划',
+            )
+        try:
+            exec_params = _resolve_handover_approver_params(
+                testcase, exec_params, environment_id=int(env_id),
+            )
+        except (DataGenerationError, TypeError, ValueError) as exc:
+            return TestcasePreDataResult(
+                run=None, resolution=resolution, blocked=True,
+                block_message=f'前置数据准备失败: {exc}',
+            )
+
     steps_override = None
     transfer_ready = is_transfer_ready_ticket_case(testcase)
-    if resolution.source == _CLAIMABLE_AUTO_SOURCE or transfer_ready:
-        if resolution.source == _CLAIMABLE_AUTO_SOURCE:
+    claim_plan = resolution.template_key == 'biz_create_and_claim'
+    if resolution.source == _CLAIMABLE_AUTO_SOURCE or transfer_ready or claim_plan:
+        if resolution.source == _CLAIMABLE_AUTO_SOURCE or claim_plan:
             steps_override = _build_claimable_steps_without_initial_chat(plan)
             if steps_override:
                 logger.info(
                     'Claimable pre-data: using %s to avoid INITIATOR_LOCKED',
                     _CLAIMABLE_CREATE_INTERFACE_NAME,
                 )
-        exec_params = _inject_unlocked_creator_token(
-            exec_params,
-            environment_id=env_id,
-        )
+        if claim_plan:
+            exec_params = apply_params_schema_defaults(exec_params, plan.template_params_schema)
+            if not steps_override:
+                return TestcasePreDataResult(
+                    run=None, resolution=resolution, blocked=True,
+                    block_message=f'前置数据准备失败: 缺少“{_CLAIMABLE_CREATE_INTERFACE_NAME}”接口',
+                )
+            try:
+                exec_params = _inject_claim_creator_token(
+                    exec_params, project_id=testcase.project_id, environment_id=int(env_id),
+                )
+            except (DataGenerationError, TypeError, ValueError) as exc:
+                return TestcasePreDataResult(
+                    run=None, resolution=resolution, blocked=True,
+                    block_message=f'前置数据准备失败: {exc}',
+                )
+            if handover_flow in _SUBMITTED_HANDOVER_FLOWS:
+                steps_override = _build_submitted_handover_steps(steps_override)
+        else:
+            exec_params = _inject_unlocked_creator_token(
+                exec_params, environment_id=env_id,
+            )
 
     run = execute_plan(
         plan,
@@ -1802,6 +2495,19 @@ def run_testcase_pre_data(
             message,
         )
         return TestcasePreDataResult(run=run, resolution=resolution)
+
+    if handover_flow in _SUBMITTED_HANDOVER_FLOWS:
+        try:
+            _verify_submitted_handover_fixture(
+                run,
+                environment_id=int(env_id),
+                approver_name=str(exec_params['approverName']),
+            )
+        except (DataGenerationError, TypeError, ValueError) as exc:
+            return TestcasePreDataResult(
+                run=run, resolution=resolution, blocked=True,
+                block_message=f'前置数据准备失败: {exc}',
+            )
 
     env_id = resolution.default_environment_id or plan.default_environment_id
     case_text = collect_testcase_text(testcase)

@@ -38,6 +38,7 @@ def _apply_env_config() -> None:
             'transfer_ticket': 491,
             'claim_ticket': 490,
             'resolve_ticket': 520,
+            'close_ticket': 521,
             'update_subject': 479,
             'ticket_detail': 509,
         },

@@ -26,7 +26,12 @@ from ui_automation.models import UiPublicData
 from .exceptions import DataGenerationError
 from .models import DataGenerationPlan, DataGenerationRun
 from .template_resolver import resolve_template_steps
-from .templates import REF_ASSIGN_TICKET, REF_CLAIM_TICKET, get_template_by_key
+from .templates import (
+    REF_ASSIGN_TICKET,
+    REF_CLAIM_TICKET,
+    REF_TRANSFER_TICKET,
+    get_template_by_key,
+)
 from .sql_utils import execute_sql_step, extract_sql_result
 
 logger = logging.getLogger(__name__)
@@ -274,6 +279,19 @@ def _query_ticket_rows_for_plan(
         )
         runner.run_interface({})
         response_data = runner.get_response()
+
+        business_body = _parse_response_body(
+            (response_data.get('response') or {}).get('content')
+        )
+        if isinstance(business_body, dict):
+            business_status = business_body.get('statusCode')
+            if business_body.get('success') is False or (
+                isinstance(business_status, int) and business_status >= 400
+            ):
+                raise DataGenerationError(
+                    f'接口 [{interface.name}] 业务执行失败: '
+                    f'{business_body.get("message") or business_body.get("code") or business_status}'
+                )
         body = _parse_response_body((response_data.get('response') or {}).get('content'))
         if isinstance(body, dict):
             block = body.get('data')
@@ -314,7 +332,9 @@ class PlanExecutor:
         self.trigger_type = trigger_type
         schema = plan.template_params_schema if isinstance(plan.template_params_schema, dict) else {}
         if not schema and plan.template_key:
-            template = get_template_by_key(plan.template_key, project_id=plan.project_id)
+            # Schema lookup does not need interface binding resolution. Plans
+            # with their own steps may not have project template bindings yet.
+            template = get_template_by_key(plan.template_key)
             if template:
                 schema = template.get('params_schema') or {}
         if not schema and plan.is_template:
@@ -329,10 +349,45 @@ class PlanExecutor:
         )
         self.steps_override = steps_override
         self.context: Dict[str, Any] = dict(self.input_params)
+        if self.plan.template_key == 'biz_create_and_transfer':
+            # Compatibility for manually run plans and old DB rows that do not
+            # yet contain the new stable transfer-target variables.
+            self.context.setdefault(
+                'transferTargetUserId',
+                self.context.get('assigneeUserId'),
+            )
+            self.context.setdefault(
+                'transferTargetName',
+                self.context.get('assigneeName'),
+            )
+            self.context.setdefault(
+                'transferTargetRole',
+                self.context.get('assigneeRole') or 'customer_service',
+            )
         if 'summary' not in self.context:
             self.context['summary'] = f"造数{int(timezone.now().timestamp()) % 100000}"[:20]
         self.step_logs: list[Dict[str, Any]] = []
         self._active_run: Optional[DataGenerationRun] = None
+        self._claim_created_ticket_id: Any = None
+        self._claim_created_ticket_no: Optional[str] = None
+
+    def _ensure_claim_created_ticket(self, row: Optional[Dict[str, Any]] = None) -> None:
+        if self.plan.template_key != 'biz_create_and_claim':
+            return
+        ticket_id = self._claim_created_ticket_id
+        ticket_no = self._claim_created_ticket_no
+        if not ticket_id or not ticket_no:
+            raise DataGenerationError('领取造数缺少本次新建工单的 ID 或工单号')
+        if (
+            str(self.context.get('ticketId') or '') != str(ticket_id)
+            or str(self.context.get('ticketNo') or '') != ticket_no
+        ):
+            raise DataGenerationError('领取造数工单号被替换，已停止执行，禁止复用历史工单')
+        if row is not None and (
+            str(row.get('id') or row.get('ticketId') or '') != str(ticket_id)
+            or str(row.get('ticketNo') or '') != ticket_no
+        ):
+            raise DataGenerationError('查询到的工单不是本次新建工单，已停止执行')
 
     def _snapshot_context(self) -> Dict[str, Any]:
         return {
@@ -340,6 +395,49 @@ class PlanExecutor:
             for k, v in self.context.items()
             if not isinstance(v, (dict, list))
         }
+
+    def _verify_case_fixture_state(self) -> None:
+        """Do not report case pre-data success based only on a written snapshot."""
+        if self.trigger_type != DataGenerationRun.TRIGGER_CASE_PRE:
+            return
+        allowed_statuses = {
+            'biz_create_and_assign': {'pending_process'},
+            'biz_create_and_claim': {'processing', 'claimed'},
+            'biz_create_assign_resolve': {'resolved'},
+            'biz_create_assign_close': {'closed'},
+        }.get(self.plan.template_key)
+        if not allowed_statuses:
+            return
+        ticket_id = self.context.get('ticketId')
+        ticket_no = str(self.context.get('ticketNo') or '').strip()
+        if not ticket_id or not ticket_no:
+            raise DataGenerationError('造数没有返回本次工单 ID 和工单号')
+        row = None
+        for attempt in range(3):
+            row = self._find_ticket_row_for_context()
+            if row and str(row.get('status') or '').strip() in allowed_statuses:
+                break
+            if attempt < 2:
+                time.sleep(0.5)
+        if not row or (
+            str(row.get('id') or row.get('ticketId') or '') != str(ticket_id)
+            or str(row.get('ticketNo') or '') != ticket_no
+        ):
+            raise DataGenerationError('造数后无法读回本次新建工单，未通过前置数据验收')
+        actual_status = str(row.get('status') or '').strip()
+        if actual_status not in allowed_statuses:
+            raise DataGenerationError(
+                f'本次工单 {ticket_no} 的实际状态为 {actual_status or "空"}，'
+                f'不符合计划 {self.plan.template_key} 的目标状态'
+            )
+        target_user_id = self.input_params.get('assigneeUserId')
+        if target_user_id not in (None, '', 0) and not _assignee_matches_desired(
+            row, desired_user_id=target_user_id,
+        ):
+            raise DataGenerationError(
+                f'本次工单 {ticket_no} 的实际处理人与目标处理人不一致'
+            )
+        self.context['ticketStatus'] = actual_status
 
     def execute(self, run: Optional[DataGenerationRun] = None) -> DataGenerationRun:
         if run is None:
@@ -368,6 +466,8 @@ class PlanExecutor:
                 if not isinstance(raw_step, dict):
                     raise DataGenerationError(f'步骤 #{index} 格式无效')
                 self._execute_step(index, raw_step)
+
+            self._verify_case_fixture_state()
 
             continued_failures = [
                 entry
@@ -465,6 +565,10 @@ class PlanExecutor:
             raise DataGenerationError(f'不支持的步骤类型: {step_type}')
 
         try:
+            if self._claim_created_ticket_no:
+                self._ensure_claim_created_ticket()
+            if step_type in {'set_env_var', 'set_public_data'}:
+                self._verify_case_fixture_state()
             if step_type == 'api_call':
                 result = self._run_api_call(step)
                 log_entry.update(result)
@@ -483,6 +587,8 @@ class PlanExecutor:
             elif step_type == 'delay':
                 result = self._run_delay(step)
                 log_entry.update(result)
+            if self._claim_created_ticket_no:
+                self._ensure_claim_created_ticket()
         except DataGenerationError as exc:
             if step.get('continue_on_error'):
                 log_entry['status'] = 'failed_continued'
@@ -546,6 +652,20 @@ class PlanExecutor:
         name = str(interface.name or '')
         return '分配工单' in name or (name.startswith('分配') and '取消' not in name)
 
+    def _is_transfer_api_step(self, step: Dict[str, Any]) -> bool:
+        if str(step.get('name') or '').strip() == '转派工单':
+            return True
+        if step.get('interface_ref') == REF_TRANSFER_TICKET:
+            return True
+        interface_id = step.get('interface_id')
+        if not interface_id:
+            return False
+        interface = ApiInterface.objects.filter(
+            id=interface_id,
+            project_id=self.plan.project_id,
+        ).first()
+        return bool(interface and '转派工单' in str(interface.name or ''))
+
     def _find_ticket_row_for_context(self) -> Optional[Dict[str, Any]]:
         env_id = self.default_environment_id
         if not env_id:
@@ -608,6 +728,8 @@ class PlanExecutor:
         row = self._find_ticket_row_for_context()
         if row is None or not _ticket_row_is_already_assigned(row):
             return None
+        if self.plan.template_key == 'biz_create_and_claim':
+            self._ensure_claim_created_ticket(row)
         desired = self._desired_assign_target(step)
         # TYPE_A 创建后常被自动分给其他人；只有目标处理人一致时才能跳过手动分配，
         # 否则登录账号与造数工单会对不上（如李亮登录却分给了张岩）。
@@ -790,6 +912,10 @@ class PlanExecutor:
                     )
                     return username, token
                 except DataGenerationError as exc:
+                    if 'RATE_LIMIT_EXCEEDED' in str(exc) or '429' in str(exc):
+                        raise DataGenerationError(
+                            f'处理人 {username} 登录触发限流，已停止继续尝试账号；请等待限流恢复'
+                        ) from exc
                     errors.append(f'{username}/{password[:2]}***: {exc}')
         detail = '；'.join(errors[:4]) if errors else '无可用账号'
         raise DataGenerationError(f'处理人登录失败（{detail}）')
@@ -891,6 +1017,20 @@ class PlanExecutor:
         statuses: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Reuse a ticket already owned by the desired person when reassign is impossible."""
+        # Never replace a ticket created (or explicitly selected) by this run
+        # with an unrelated historical ticket. That made data generation report
+        # success while downstream UI tests searched for the wrong ticket.
+        current_ticket_id = self.context.get('ticketId')
+        current_ticket_no = str(self.context.get('ticketNo') or '').strip()
+        if current_ticket_id not in (None, '', 0) or current_ticket_no:
+            logger.warning(
+                'Refuse to adopt an unrelated existing ticket while a run ticket is set '
+                'ticketId=%s ticketNo=%s',
+                current_ticket_id,
+                current_ticket_no,
+            )
+            return None
+
         env_id = self.default_environment_id
         if not env_id:
             return None
@@ -965,6 +1105,18 @@ class PlanExecutor:
         row = self._find_ticket_row_for_context()
         if row is None:
             return None
+        if self.plan.template_key == 'biz_create_and_claim':
+            self._ensure_claim_created_ticket(row)
+            desired = {
+                'assigneeUserId': self.input_params.get('assigneeUserId'),
+                'assigneeName': self.input_params.get('assigneeName'),
+            }
+            if not _assignee_matches_desired(
+                row,
+                desired_user_id=desired['assigneeUserId'],
+                desired_name=desired['assigneeName'],
+            ):
+                raise DataGenerationError('本次新建工单尚未归属目标处理人，不能跳过领取')
         status = str(row.get('status') or '').strip()
         if status in {'processing', 'claimed'}:
             self._merge_assign_context_from_ticket_row(row)
@@ -999,7 +1151,17 @@ class PlanExecutor:
                 verify_ssl=environment.verify_ssl,
             )
         except Exception as exc:
-            raise DataGenerationError(f'登录账号 {username} 失败: {exc}') from exc
+            response = getattr(exc, 'response', None)
+            detail = ''
+            if response is not None:
+                try:
+                    payload = response.json()
+                    if isinstance(payload, dict):
+                        detail = str(payload.get('code') or payload.get('message') or '')[:120]
+                except ValueError:
+                    pass
+            suffix = f'（服务端原因: {detail}）' if detail else ''
+            raise DataGenerationError(f'登录账号 {username} 失败: {exc}{suffix}') from exc
 
     def _reassign_if_wrong_assignee(self, step: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """When TYPE_A auto-assign lands on the wrong person, move it to the desired assignee.
@@ -1032,6 +1194,92 @@ class PlanExecutor:
             raise DataGenerationError('工单已被其他人领取/分配，但缺少 ticketId，无法改派')
         if desired_user_id in (None, '', 0):
             raise DataGenerationError(f'缺少目标处理人 ID，无法从 {current_name} 改派给 {desired_label}')
+
+        if self.plan.template_key in {
+            'biz_create_and_transfer',
+            'biz_create_and_claim',
+            'biz_create_and_assign',
+            'biz_create_assign_resolve',
+            'biz_create_assign_close',
+        }:
+            # Keep the ticket created by this run. Auto-assigned tickets can be
+            # transferred by an administrator without logging in as the holder.
+            if self.plan.template_key == 'biz_create_and_claim':
+                self._ensure_claim_created_ticket(row)
+            created_id = self.context.get('ticketId')
+            created_no = self.context.get('ticketNo')
+            if (
+                not created_no
+                or str(created_id) != str(ticket_id)
+                or str(row.get('ticketNo') or '') != str(created_no)
+            ):
+                raise DataGenerationError('转派造数工单与本次新建工单不一致，已停止改派')
+            from api_environments.token_refresh import refresh_environment_tokens
+
+            env_variables = environment.get_all_variables()
+            if not isinstance(env_variables, dict):
+                env_variables = {}
+            refreshed = refresh_environment_tokens(
+                base_url=environment.base_url,
+                variables=env_variables,
+                verify_ssl=environment.verify_ssl,
+                environment_id=environment.id,
+                persist=True,
+            )
+            if isinstance(refreshed, dict):
+                env_variables.update(refreshed)
+            admin_token = env_variables.get('adminToken') or env_variables.get('accessToken')
+            if not admin_token:
+                raise DataGenerationError('API 环境缺少管理员令牌，无法改派本次新建工单')
+            transfer_iface = ApiInterface.objects.filter(
+                project_id=self.plan.project_id,
+                name='转派工单',
+            ).first()
+            if transfer_iface is None:
+                raise DataGenerationError('项目未配置「转派工单」接口，无法改派本次新建工单')
+            self._run_named_ticket_mutation(
+                interface=transfer_iface,
+                environment=environment,
+                ticket_id=ticket_id,
+                step=step,
+                trace_prefix='data-gen-source-transfer',
+                extra_variables={
+                    'assigneeToken': admin_token,
+                    'targetUserId': desired_user_id,
+                    'targetRole': (
+                        self.context.get('sourceAssigneeRole')
+                        if self.plan.template_key == 'biz_create_and_transfer'
+                        else self.context.get('assigneeRole')
+                    ) or 'customer_service',
+                    'reason': self.context.get('transferReason') or '自动化测试准备目标处理人',
+                },
+            )
+            assigned_row = self._find_ticket_row_for_context()
+            if (
+                assigned_row is None
+                or str(assigned_row.get('ticketNo') or '') != str(created_no)
+                or not _assignee_matches_desired(
+                    assigned_row,
+                    desired_user_id=desired_user_id,
+                    desired_name=desired.get('assigneeName'),
+                )
+            ):
+                raise DataGenerationError('改派接口返回成功，但本次新建工单的处理人未变为预期处理人')
+            self._merge_assign_context_from_ticket_row(assigned_row)
+            return {
+                'skipped': True,
+                'reason': (
+                    'created_ticket_transferred_to_source_assignee'
+                    if self.plan.template_key == 'biz_create_and_transfer'
+                    else (
+                        'created_ticket_transferred_to_assignee'
+                        if self.plan.template_key == 'biz_create_and_assign'
+                        else 'created_ticket_transferred_to_claim_assignee'
+                    )
+                ),
+                'ticketNo': created_no,
+                'assigneeUserId': desired_user_id,
+            }
 
         # 1) Try cancel assign.
         unassign_error = None
@@ -1396,6 +1644,40 @@ class PlanExecutor:
         interface_data['body_source'] = 'data_generation_plan'
         _normalize_legacy_auth_header_placeholders(interface_data)
 
+        if (
+            self.plan.template_key == 'biz_create_assign_close'
+            and str(step.get('name') or '').strip() == '关闭工单'
+            and isinstance(interface_data.get('body'), dict)
+            and interface_data['body'].get('type') == 'none'
+        ):
+            # The target close endpoint expects JSON, including for an empty
+            # payload. A body-less POST currently returns HTTP 500 there.
+            interface_data['body'] = {'type': 'raw', 'content': {}}
+
+        force_assignee_token = (
+            self.plan.template_key == 'biz_create_and_transfer'
+            and self._is_transfer_api_step(step)
+        ) or (
+            self.plan.template_key == 'biz_create_and_claim'
+            and self._is_claim_api_step(step)
+        )
+        if force_assignee_token:
+            # Persisted interface definitions may contain a literal JWT.
+            headers = interface_data.get('headers')
+            if not isinstance(headers, list):
+                headers = []
+            headers = [
+                item for item in headers
+                if not isinstance(item, dict)
+                or str(item.get('key') or '').lower() != 'authorization'
+            ]
+            headers.append({
+                'key': 'Authorization',
+                'value': 'Bearer $assigneeToken',
+                'enabled': True,
+            })
+            interface_data['headers'] = headers
+
         if environment:
             interface_data['base_url'] = environment.base_url or ''
             interface_data['verify'] = environment.verify_ssl
@@ -1409,13 +1691,18 @@ class PlanExecutor:
             env_variables = environment.get_all_variables()
             if not isinstance(env_variables, dict):
                 env_variables = {}
+            forced_token_vars = _collect_force_refresh_token_vars(interface_data)
+            if self.plan.template_key == 'biz_create_and_claim' and self._is_claim_api_step(step):
+                forced_token_vars = [
+                    key for key in forced_token_vars if key != 'assigneeToken'
+                ]
             refreshed_variables = refresh_environment_tokens(
                 base_url=environment.base_url,
                 variables=env_variables,
                 verify_ssl=environment.verify_ssl,
                 environment_id=environment.id,
                 persist=True,
-                force_token_vars=_collect_force_refresh_token_vars(interface_data),
+                force_token_vars=forced_token_vars,
             )
             if isinstance(refreshed_variables, dict):
                 runner.variables.update(refreshed_variables)
@@ -1430,7 +1717,179 @@ class PlanExecutor:
 
         step_variables = substitute_templates(step.get('variables') or {}, self.context)
         if isinstance(step_variables, dict):
+            if self._is_transfer_api_step(step):
+                # Older persisted plans still reference {{assigneeUserId}},
+                # which now contains the current/source assignee after the
+                # assign step. Prefer the immutable run inputs so this guard
+                # also works for plans without a template_key.
+                target_id = (
+                    self.input_params.get('transferTargetUserId')
+                    or self.input_params.get('assigneeUserId')
+                    or self.context.get('transferTargetUserId')
+                )
+                target_role = (
+                    self.input_params.get('transferTargetRole')
+                    or self.input_params.get('assigneeRole')
+                    or self.context.get('transferTargetRole')
+                )
+                if target_id not in (None, ''):
+                    step_variables['targetUserId'] = target_id
+                if target_role not in (None, ''):
+                    step_variables['targetRole'] = target_role
             runner.variables.update(step_variables)
+
+        if (
+            self.plan.template_key == 'biz_create_and_claim'
+            and str(step.get('name') or '').startswith('创建工单')
+            and environment is not None
+            and self.input_params.get('claimCreatorTokenVar')
+        ):
+            creator_token = environment.get_all_variables().get(
+                self.input_params['claimCreatorTokenVar']
+            )
+            from api_environments.token_refresh import _token_still_valid
+            import jwt
+
+            if (
+                not _token_still_valid(creator_token)
+                or str(jwt.decode(creator_token, options={'verify_signature': False}).get('sub'))
+                != str(self.input_params.get('assigneeUserId'))
+            ):
+                raise DataGenerationError('领取造数的发起人令牌已失效，未创建工单')
+            runner.variables['accessToken'] = creator_token
+
+        if (
+            self.input_params.get('creatorTokenVar')
+            and str(step.get('name') or '').startswith('创建工单')
+            and environment is not None
+        ):
+            creator_token = str(
+                environment.get_all_variables().get(self.input_params['creatorTokenVar']) or ''
+            ).strip()
+            creator_id = self.input_params.get('creatorUserId')
+            from api_environments.token_refresh import _token_still_valid
+            import jwt
+
+            try:
+                creator_claims = jwt.decode(
+                    creator_token,
+                    options={'verify_signature': False},
+                ) if _token_still_valid(creator_token) else {}
+            except jwt.PyJWTError:
+                creator_claims = {}
+            if not creator_claims or str(creator_claims.get('sub')) != str(creator_id):
+                raise DataGenerationError('指定造数发起人的登录令牌无效或用户不匹配')
+            runner.variables['accessToken'] = creator_token
+
+        if self.plan.template_key == 'biz_create_and_transfer' and self._is_transfer_api_step(step):
+            admin_token = runner.variables.get('adminToken') or runner.variables.get('accessToken')
+            if not admin_token:
+                raise DataGenerationError('API 环境缺少管理员令牌，无法转派本次新建工单')
+            runner.variables['assigneeToken'] = admin_token
+
+        if self.plan.template_key == 'biz_create_and_claim' and self._is_claim_api_step(step):
+            self._ensure_claim_created_ticket(self._find_ticket_row_for_context())
+            if environment is None:
+                raise DataGenerationError('缺少 API 环境，无法用目标处理人领取本次新建工单')
+            admin_token = runner.variables.get('adminToken') or runner.variables.get('accessToken')
+            if not admin_token:
+                raise DataGenerationError('API 环境缺少管理员令牌，无法查询目标处理人账号')
+            desired_id = self.input_params.get('assigneeUserId')
+            desired_name = str(self.input_params.get('assigneeName') or '').strip()
+            import jwt
+            from api_environments.token_refresh import _token_still_valid
+
+            token_var_name = f'claimAssigneeToken_{desired_id}'
+            cached_token = str(environment.get_all_variables().get(token_var_name) or '')
+            claim_token = None
+            if _token_still_valid(cached_token):
+                try:
+                    cached_user_id = jwt.decode(
+                        cached_token, options={'verify_signature': False}
+                    ).get('sub')
+                    if str(cached_user_id) == str(desired_id):
+                        claim_token = cached_token
+                except jwt.PyJWTError:
+                    pass
+
+            if claim_token is None:
+                usernames = self._lookup_user_login_candidates(
+                    display_name=desired_name,
+                    environment=environment,
+                    access_token=admin_token,
+                    preferred_role=str(self.input_params.get('assigneeRole') or 'customer_service'),
+                )
+                if not usernames:
+                    raise DataGenerationError(f'未找到目标处理人“{desired_name}”的 API 登录账号')
+                from projects.models import ProjectCredential
+
+                credential = (
+                    ProjectCredential.objects.filter(project_id=self.plan.project_id)
+                    .filter(user_role__iexact=desired_name, username__in=usernames)
+                    .exclude(password='')
+                    .first()
+                )
+                if credential is not None:
+                    try:
+                        claim_token = self._login_user_token(
+                            environment=environment,
+                            username=credential.username,
+                            password=credential.password,
+                        )
+                    except DataGenerationError as exc:
+                        raise DataGenerationError(
+                            f'目标处理人“{desired_name}”登录失败，无法领取本次新建工单: {exc}'
+                        ) from exc
+                else:
+                    _, claim_token = self._login_any_username(
+                        usernames=usernames,
+                        environment=environment,
+                        fallback_password='000000',
+                        display_name=desired_name,
+                    )
+
+            token_user_id = jwt.decode(claim_token, options={'verify_signature': False}).get('sub')
+            if str(token_user_id) != str(desired_id):
+                raise DataGenerationError('目标处理人登录令牌与预期用户 ID 不一致，已停止领取')
+            if claim_token != cached_token:
+                ApiEnvironmentVariable.objects.update_or_create(
+                    environment=environment,
+                    name=token_var_name,
+                    defaults={
+                        'value': claim_token,
+                        'type': 'string',
+                        'is_sensitive': True,
+                        'description': '工单造数计划目标处理人短期登录令牌',
+                    },
+                )
+            runner.variables['assigneeToken'] = claim_token
+
+        if (
+            self.plan.template_key == 'biz_create_and_claim'
+            and str(interface_data.get('url') or '').endswith('/submit-approval')
+        ):
+            # Submitting approval is an action by the current ticket handler.
+            # The configured interface otherwise uses the admin accessToken.
+            from api_environments.token_refresh import _token_still_valid
+            import jwt
+
+            if environment is None:
+                raise DataGenerationError('提交审批缺少 API 环境')
+            desired_id = self.input_params.get('assigneeUserId')
+            claim_token = str(
+                environment.get_all_variables().get(f'claimAssigneeToken_{desired_id}') or ''
+            )
+            if not _token_still_valid(claim_token):
+                raise DataGenerationError('目标处理人令牌已失效，无法提交审批')
+            try:
+                token_user_id = jwt.decode(
+                    claim_token, options={'verify_signature': False},
+                ).get('sub')
+            except jwt.PyJWTError as exc:
+                raise DataGenerationError('目标处理人令牌无效，无法提交审批') from exc
+            if str(token_user_id) != str(desired_id):
+                raise DataGenerationError('提交审批的登录用户不是当前工单处理人')
+            runner.variables['accessToken'] = claim_token
 
         runner.run_interface({})
         response_data = runner.get_response()
@@ -1467,7 +1926,44 @@ class PlanExecutor:
                         'interface_name': interface.name,
                         'status_code': status_code,
                     }
+                # Ticket creation may auto-assign asynchronously. If our first
+                # lookup raced that transition, the manual assign request gets
+                # TICKET_STATUS_INVALID. Re-check the newly-created ticket and
+                # use the same safe transfer path as the preflight branch.
+                if (
+                    row is not None
+                    and _ticket_row_is_already_assigned(row)
+                    and self.plan.template_key in {
+                        'biz_create_and_transfer',
+                        'biz_create_and_claim',
+                        'biz_create_and_assign',
+                        'biz_create_assign_resolve',
+                        'biz_create_assign_close',
+                    }
+                ):
+                    recovered = self._reassign_if_wrong_assignee(step)
+                    if recovered is not None:
+                        logger.warning(
+                            'Recovered auto-assigned ticket after assign API rejection '
+                            'ticketNo=%s template=%s',
+                            row.get('ticketNo') or self.context.get('ticketNo'),
+                            self.plan.template_key,
+                        )
+                        return recovered
             raise DataGenerationError(f'接口 [{interface.name}] 调用失败: {error_detail}')
+
+        business_body = _parse_response_body(
+            (response_data.get('response') or {}).get('content')
+        )
+        if isinstance(business_body, dict):
+            business_status = business_body.get('statusCode')
+            if business_body.get('success') is False or (
+                isinstance(business_status, int) and business_status >= 400
+            ):
+                raise DataGenerationError(
+                    f'接口 [{interface.name}] 业务调用失败: '
+                    f'{business_body.get("message") or business_body.get("code") or business_status}'
+                )
 
         extracted = dict(response_data.get('extracted_variables') or {})
         custom_extract = step.get('extract') or {}
@@ -1482,6 +1978,86 @@ class PlanExecutor:
             extracted.update(_extract_values(response_body, custom_extract))
 
         self.context.update(extracted)
+
+        if (
+            self.plan.template_key == 'biz_create_assign_close'
+            and str(step.get('name') or '').strip() == '关闭工单'
+        ):
+            # Some target deployments return HTTP 200 before the close has
+            # actually taken effect. Retry once only while this run's ticket
+            # remains processing, then require a business-state readback.
+            for _ in range(8):
+                row = self._find_ticket_row_for_context()
+                if row and str(row.get('status') or '') == 'closed':
+                    break
+                time.sleep(1)
+            else:
+                # Claim-to-close transitions can briefly lag in the target
+                # service. Recheck after the settle window, then retry once.
+                retry_runner = InterfaceRunner(interface_data)
+                retry_runner.variables = dict(runner.variables)
+                retry_runner.run_interface({})
+                retry_response = retry_runner.get_response()
+                retry_body = _parse_response_body(
+                    (retry_response.get('response') or {}).get('content')
+                )
+                if (retry_response.get('status_code') or 0) >= 400 or not retry_response.get('success'):
+                    raise DataGenerationError(f'接口 [{interface.name}] 重试关闭失败')
+                if isinstance(retry_body, dict) and (
+                    retry_body.get('success') is False
+                    or (
+                        isinstance(retry_body.get('statusCode'), int)
+                        and retry_body['statusCode'] >= 400
+                    )
+                ):
+                    raise DataGenerationError(
+                        f'接口 [{interface.name}] 重试关闭业务失败: '
+                        f'{retry_body.get("message") or retry_body.get("code")}'
+                    )
+                for _ in range(8):
+                    row = self._find_ticket_row_for_context()
+                    if row and str(row.get('status') or '') == 'closed':
+                        break
+                    time.sleep(1)
+                else:
+                    raise DataGenerationError(
+                        '关闭接口返回成功，但本次工单实际仍未关闭'
+                        f'（接口消息: {retry_body.get("message") if isinstance(retry_body, dict) else "无"}；'
+                        f'当前状态: {row.get("status") if row else "未找到"}）'
+                    )
+
+        if self.plan.template_key == 'biz_create_and_claim':
+            if str(step.get('name') or '').strip().startswith('创建工单'):
+                self._claim_created_ticket_id = extracted.get('ticketId')
+                self._claim_created_ticket_no = str(extracted.get('ticketNo') or '')
+                self._ensure_claim_created_ticket()
+            elif self._is_claim_api_step(step):
+                claimed_row = self._find_ticket_row_for_context()
+                self._ensure_claim_created_ticket(claimed_row)
+                if (
+                    claimed_row is None
+                    or str(claimed_row.get('status') or '') not in {'processing', 'claimed'}
+                    or not _assignee_matches_desired(
+                        claimed_row,
+                        desired_user_id=self.input_params.get('assigneeUserId'),
+                        desired_name=self.input_params.get('assigneeName'),
+                    )
+                ):
+                    raise DataGenerationError('领取接口返回成功，但本次新建工单尚未由目标处理人领取')
+                self._merge_assign_context_from_ticket_row(claimed_row)
+
+        if self.plan.template_key == 'biz_create_and_transfer' and self._is_transfer_api_step(step):
+            transferred_row = self._find_ticket_row_for_context()
+            created_no = self.context.get('ticketNo')
+            target_id = self.input_params.get('transferTargetUserId') or self.input_params.get('assigneeUserId')
+            if (
+                transferred_row is None
+                or not created_no
+                or str(transferred_row.get('ticketNo') or '') != str(created_no)
+                or not _assignee_matches_desired(transferred_row, desired_user_id=target_id)
+            ):
+                raise DataGenerationError('转派接口返回成功，但本次新建工单未归属预期转派目标')
+            self._merge_assign_context_from_ticket_row(transferred_row)
 
         return {
             'interface_id': interface.id,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Dict, List
 
 # 逻辑引用名（interface_ref / environment_ref），运行时由 template_resolver 按项目解析为实际 ID。
@@ -12,6 +13,7 @@ REF_ASSIGN_TICKET = 'assign_ticket'
 REF_TRANSFER_TICKET = 'transfer_ticket'
 REF_CLAIM_TICKET = 'claim_ticket'
 REF_RESOLVE_TICKET = 'resolve_ticket'
+REF_CLOSE_TICKET = 'close_ticket'
 REF_UPDATE_SUBJECT = 'update_subject'
 REF_TICKET_DETAIL = 'ticket_detail'
 
@@ -261,12 +263,12 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
     {
         'template_key': 'biz_create_and_transfer',
         'name': '创建并转派工单',
-        'description': '创建 TYPE_C 工单，分配并领取后调用「转派工单」接口，将工单转派给指定处理人。',
+        'description': '创建 TYPE_A 工单，必要时由管理员改派给原处理人，再转派给指定处理人。',
         'target_type': 'both',
         'icon': 'swap',
         'params_schema': {
             'summary': {'type': 'string', 'label': '工单摘要', 'default': '转派测试工单'},
-            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_C'},
+            'ticketType': {'type': 'string', 'label': '工单类型', 'default': 'TYPE_A'},
             'assigneeUserId': {'type': 'number', 'label': '目标用户 ID', 'default': 46},
             'assigneeName': {'type': 'string', 'label': '目标用户名', 'default': '李亮'},
             'assigneeDepartment': {'type': 'string', 'label': '目标部门', 'default': '客服部'},
@@ -301,19 +303,15 @@ BUILTIN_BUSINESS_TEMPLATES: List[Dict[str, Any]] = [
             },
             {
                 'type': 'api_call',
-                'name': '当前处理人领取工单',
-                'interface_ref': REF_CLAIM_TICKET,
-                'environment_ref': ENV_REF_DEFAULT,
-                'variables': {},
-            },
-            {
-                'type': 'api_call',
                 'name': '转派工单',
                 'interface_ref': REF_TRANSFER_TICKET,
                 'environment_ref': ENV_REF_DEFAULT,
                 'variables': {
-                    'targetUserId': '{{assigneeUserId}}',
-                    'targetRole': '{{assigneeRole}}',
+                    # assigneeUserId/Name are also used for the ticket's current
+                    # assignee and are refreshed after the assignment step.
+                    # Keep the transfer destination in a stable namespace.
+                    'targetUserId': '{{transferTargetUserId}}',
+                    'targetRole': '{{transferTargetRole}}',
                     'reason': '{{transferReason}}',
                 },
             },
@@ -650,6 +648,28 @@ BUILTIN_STEP_TEST_TEMPLATES: List[Dict[str, Any]] = [
         'cleanup_steps': [],
     },
 ]
+
+_closed_template = deepcopy(next(
+    item for item in BUILTIN_BUSINESS_TEMPLATES
+    if item['template_key'] == 'biz_create_assign_resolve'
+))
+_closed_template.update({
+    'template_key': 'biz_create_assign_close',
+    'name': '创建→分配→领取→关闭工单',
+    'description': '从处理中状态关闭本次工单，并读回已关闭状态。',
+})
+for _step in _closed_template['steps']:
+    if _step.get('name') == '完成工单':
+        _step['name'] = '关闭工单'
+        _step['interface_ref'] = REF_CLOSE_TICKET
+    elif _step.get('type') == 'set_env_var':
+        _step['variables']['ticketStatus'] = 'closed'
+    elif _step.get('type') == 'set_public_data':
+        for _item in _step['items']:
+            if _item.get('key') == 'ticketStatus':
+                _item['value'] = 'closed'
+BUILTIN_BUSINESS_TEMPLATES.append(_closed_template)
+
 
 BUILTIN_CLEANUP_TEMPLATES: List[Dict[str, Any]] = [
     {

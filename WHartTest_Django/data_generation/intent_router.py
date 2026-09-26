@@ -142,6 +142,7 @@ def _needs_unassigned_pending_ticket(text: str) -> bool:
 
 # Ordered rules: first match wins (more specific keywords before generic ones).
 # 「转派」不在此表：需区分「仅准备可转派待处理工单」与「前置已完成转派」。
+# 「点击工单完成/确认弹窗」也不走 resolve：那些用例要的是处理中可点完成的工单。
 _INTENT_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (('审批工单', 'approval'), 'biz_create_approval_processing'),
     (('完成工单', '工单完成', '闭环', 'resolve', '已完成', '已关闭'), 'biz_create_assign_resolve'),
@@ -150,6 +151,27 @@ _INTENT_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (('待处理', 'pending_process', '我的工单'), 'biz_create_and_assign'),
     (('待分配', 'pending_assign'), 'biz_create_type_a'),
 )
+
+
+def _needs_complete_button_ui_fixture(text: str) -> bool:
+    """UI cases that click 「工单完成」 and assert the confirm dialog.
+
+    These need a processing ticket still owned by the login user — not a ticket
+    already resolved by the pre-data template.
+    """
+    blob = text or ''
+    if '工单完成' not in blob and '完成工单' not in blob:
+        return False
+    markers = (
+        '确认弹窗',
+        '确认完成',
+        '确定完成该工单',
+        '点击绿色',
+        '点击「工单完成」',
+        '点击工单完成',
+        '可见绿色',
+    )
+    return any(marker in blob for marker in markers)
 
 
 def _is_valid_person_name(name: Optional[str]) -> bool:
@@ -334,6 +356,10 @@ def infer_business_template_key(description: str) -> Optional[str]:
         # TYPE_A 创建后由系统自动分配；执行时按自动分配结果登录，不强制改派到文案里的人名。
         return 'biz_create_type_a'
 
+    # 点击「工单完成」验确认弹窗：只要处理中工单，禁止走 resolve 造数把单结掉。
+    if _needs_complete_button_ui_fixture(text):
+        return 'biz_create_and_claim'
+
     for keywords, template_key in _INTENT_RULES:
         if any(keyword in text or keyword in text.lower() for keyword in keywords):
             if template_key == 'biz_create_type_a':
@@ -432,6 +458,9 @@ def build_input_params(description: str, llm_payload: Dict[str, Any]) -> Dict[st
     elif automatic_assignment:
         params['ticketType'] = 'TYPE_A'
         params.setdefault('summary', '自动分配测试工单')
+    elif ticket_type == 'approval':
+        params['ticketType'] = 'approval'
+        params.setdefault('summary', '审批工单测试数据')
     elif '移交审批' in text or '处理中' in text:
         # 领取/处理中类：TYPE_C 自动分配到可登录处理人，再转派到目标人。
         params['ticketType'] = 'TYPE_C'

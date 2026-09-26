@@ -562,7 +562,7 @@ async function main() {
           fs.mkdirSync(dir, { recursive: true });
           const requestedSteps = [
             ...String(code || '').matchAll(
-              /(?:screenshotCaseStep|runClaimableTicketCaseStep|runTransferTicketCaseStep|runTicketDetailCaseStep)\s*\(\s*page\s*,\s*(\d+)/gi,
+              /(?:screenshotCaseStep|runClaimableTicketCaseStep|runTransferTicketCaseStep|runProcessingHandoverCaseStep|runCompleteTicketCaseStep|runTicketDetailCaseStep)\s*\(\s*page\s*,\s*(\d+)/gi,
             ),
           ];
           if (requestedSteps.length === 0) {
