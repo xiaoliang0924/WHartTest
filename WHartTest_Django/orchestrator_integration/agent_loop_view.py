@@ -138,6 +138,14 @@ def _decode_sse_payload(event: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _testcase_bound_ui_timeout_seconds() -> float:
+    """Total wall-clock limit for a bound UI case (individual browser calls also have limits)."""
+    try:
+        return max(30.0, float(os.environ.get("TESTCASE_BOUND_UI_TIMEOUT_SECONDS", "600")))
+    except (TypeError, ValueError):
+        return 600.0
+
+
 async def _persist_helper_step_to_checkpoint(
     *,
     agent,
@@ -2128,30 +2136,49 @@ class AgentLoopStreamAPIView(View):
                 attempt_events = []
                 terminal_events = []
                 attempt_error = ""
-                try:
-                    async for event in _run_testcase_with_bound_ui_script(
-                        request=request,
-                        project=project,
+                from testcases.models import TestCaseRunRecord
+
+                # Mark the concrete route before awaiting the browser runner, so a
+                # live record never remains indistinguishable from queued work.
+                await sync_to_async(
+                    lambda: TestCaseRunRecord.objects.filter(
                         session_id=session_id,
-                        thread_id=thread_id,
-                        chat_session=chat_session,
-                        testcase_id=int(test_case_id),
-                        ui_test_case_id=int(ui_test_case_id),
-                        display_message=display_message or user_message,
-                        data_generation_run=pre_data_run,
-                        execution_mode="hybrid",
-                        actual_execution_path="bound_ui_script",
-                        stream_mode="agent_loop",
-                        suppress_failure_report=True,
-                        emit_start=True,
-                    ):
-                        payload = _decode_sse_payload(event)
-                        if payload and payload.get("type") in {"stream", "complete"}:
-                            terminal_events.append(event)
-                        elif isinstance(event, str) and event.strip() == "data: [DONE]":
-                            terminal_events.append(event)
-                        else:
-                            yield event
+                        status=TestCaseRunRecord.STATUS_CHOICES[0][0],
+                    ).update(actual_execution_path="bound_ui_script")
+                )()
+                try:
+                    async with asyncio.timeout(_testcase_bound_ui_timeout_seconds()):
+                        async for event in _run_testcase_with_bound_ui_script(
+                            request=request,
+                            project=project,
+                            session_id=session_id,
+                            thread_id=thread_id,
+                            chat_session=chat_session,
+                            testcase_id=int(test_case_id),
+                            ui_test_case_id=int(ui_test_case_id),
+                            display_message=display_message or user_message,
+                            data_generation_run=pre_data_run,
+                            execution_mode="hybrid",
+                            actual_execution_path="bound_ui_script",
+                            stream_mode="agent_loop",
+                            suppress_failure_report=True,
+                            emit_start=True,
+                        ):
+                            payload = _decode_sse_payload(event)
+                            if payload and payload.get("type") in {"stream", "complete"}:
+                                terminal_events.append(event)
+                            elif isinstance(event, str) and event.strip() == "data: [DONE]":
+                                terminal_events.append(event)
+                            else:
+                                yield event
+                except asyncio.CancelledError:
+                    from testcases.run_record_service import finalize_testcase_run_record
+
+                    await sync_to_async(finalize_testcase_run_record)(
+                        session_id=session_id,
+                        error_message="绑定 UI 自动化执行流被中断，未确认用例完成。",
+                    )
+                    raise
                 except Exception as exc:
                     attempt_error = str(exc)[:1000]
                     logger.warning(
@@ -2173,8 +2200,6 @@ class AgentLoopStreamAPIView(View):
                     for event in terminal_events:
                         yield event
                     return
-
-                from testcases.models import TestCaseRunRecord
 
                 def prepare_agent_fallback():
                     record = TestCaseRunRecord.objects.get(session_id=session_id)
@@ -2228,18 +2253,27 @@ class AgentLoopStreamAPIView(View):
 
             try:
                 if execution_mode == "script_only":
-                    async for event in _run_testcase_with_bound_ui_script(
-                        request=request,
-                        project=project,
-                        session_id=session_id,
-                        thread_id=thread_id,
-                        chat_session=chat_session,
-                        testcase_id=int(test_case_id),
-                        ui_test_case_id=int(ui_test_case_id),
-                        display_message=display_message or user_message,
-                        data_generation_run=pre_data_run,
-                    ):
-                        yield event
+                    async with asyncio.timeout(_testcase_bound_ui_timeout_seconds()):
+                        async for event in _run_testcase_with_bound_ui_script(
+                            request=request,
+                            project=project,
+                            session_id=session_id,
+                            thread_id=thread_id,
+                            chat_session=chat_session,
+                            testcase_id=int(test_case_id),
+                            ui_test_case_id=int(ui_test_case_id),
+                            display_message=display_message or user_message,
+                            data_generation_run=pre_data_run,
+                        ):
+                            yield event
+            except asyncio.CancelledError:
+                from testcases.run_record_service import finalize_testcase_run_record
+
+                await sync_to_async(finalize_testcase_run_record)(
+                    session_id=session_id,
+                    error_message="UI 自动化执行流被中断，未确认用例完成。",
+                )
+                raise
             except Exception as exc:
                 logger.exception(
                     "AgentLoopStreamAPI: script-only UI execution failed, case=%s ui_case=%s",

@@ -9,6 +9,8 @@ export interface OpenLangGraphChatOptions {
   testCaseId?: number;
   promptId?: number | null;
   generatePlaywrightScript?: boolean;
+  executionMode?: 'hybrid' | 'script_only' | 'ai_only';
+  uiTestCaseId?: number | null;
 }
 
 function appendExecCaseQuery(query: Record<string, string>, options?: OpenLangGraphChatOptions): void {
@@ -24,6 +26,12 @@ function appendExecCaseQuery(query: Record<string, string>, options?: OpenLangGr
   }
   if (options.generatePlaywrightScript) {
     query.generate_playwright_script = '1';
+  }
+  if (options.executionMode) {
+    query.execution_mode = options.executionMode;
+  }
+  if (options.uiTestCaseId != null) {
+    query.ui_test_case_id = String(options.uiTestCaseId);
   }
 }
 

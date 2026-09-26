@@ -32,6 +32,7 @@ from ..agent_loop_view import (
     _run_and_stream_remaining_helper_steps,
     _extract_testcase_step_from_tool_call,
     _map_ui_script_results_to_testcase_steps,
+    _testcase_bound_ui_timeout_seconds,
 )
 
 
@@ -42,6 +43,23 @@ class SsePayloadDecodeTests(SimpleTestCase):
 
     def test_ignores_non_json_terminal_event(self):
         self.assertIsNone(_decode_sse_payload("data: [DONE]\n\n"))
+
+
+class BoundUiTimeoutConfigTests(SimpleTestCase):
+    def test_uses_safe_default_timeout(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TESTCASE_BOUND_UI_TIMEOUT_SECONDS", None)
+            self.assertEqual(_testcase_bound_ui_timeout_seconds(), 600.0)
+
+    def test_accepts_configured_timeout_and_enforces_minimum(self):
+        with patch.dict(os.environ, {"TESTCASE_BOUND_UI_TIMEOUT_SECONDS": "900"}):
+            self.assertEqual(_testcase_bound_ui_timeout_seconds(), 900.0)
+        with patch.dict(os.environ, {"TESTCASE_BOUND_UI_TIMEOUT_SECONDS": "1"}):
+            self.assertEqual(_testcase_bound_ui_timeout_seconds(), 30.0)
+
+    def test_invalid_timeout_falls_back_to_default(self):
+        with patch.dict(os.environ, {"TESTCASE_BOUND_UI_TIMEOUT_SECONDS": "invalid"}):
+            self.assertEqual(_testcase_bound_ui_timeout_seconds(), 600.0)
 
 
 class GeneratedUiCaseFollowupTests(SimpleTestCase):

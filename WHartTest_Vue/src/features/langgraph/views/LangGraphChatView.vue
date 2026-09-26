@@ -2868,6 +2868,8 @@ const tryAutostartExecCaseStream = async () => {
     prompt_id: ctx.promptId ?? undefined,
     test_case_id: ctx.testCaseId,
     generate_playwright_script: ctx.generatePlaywrightScript ?? false,
+    execution_mode: ctx.executionMode,
+    ui_test_case_id: ctx.uiTestCaseId ?? undefined,
   };
   sessionId.value = sid;
   saveSessionId(sid);

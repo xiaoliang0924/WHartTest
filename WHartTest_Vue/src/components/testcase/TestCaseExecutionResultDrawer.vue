@@ -444,6 +444,8 @@ const openChatInCurrentPage = () => {
   openLangGraphChatInCurrentPage(router, sid, props.projectId, {
     execAutostart: true,
     testCaseId: props.testCase?.id,
+    executionMode: record.value?.execution_mode,
+    uiTestCaseId: record.value?.ui_test_case_id_snapshot ?? props.testCase?.ui_test_case ?? null,
   });
 };
 
@@ -456,6 +458,8 @@ const openChatInNewWindow = () => {
   openLangGraphChatInNewWindow(router, sid, props.projectId, {
     execAutostart: true,
     testCaseId: props.testCase?.id,
+    executionMode: record.value?.execution_mode,
+    uiTestCaseId: record.value?.ui_test_case_id_snapshot ?? props.testCase?.ui_test_case ?? null,
   });
 };
 

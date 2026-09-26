@@ -83,6 +83,13 @@ export function resolveExecCaseAutostartContext(
   const projectId = parseOptionalInt(routeQuery.project_id);
   const generatePlaywrightScript = routeQuery.generate_playwright_script === '1'
     || routeQuery.generate_playwright_script === 'true';
+  const requestedMode = routeQuery.execution_mode;
+  const executionMode = requestedMode === 'hybrid'
+    || requestedMode === 'script_only'
+    || requestedMode === 'ai_only'
+    ? requestedMode
+    : undefined;
+  const uiTestCaseId = parseOptionalInt(routeQuery.ui_test_case_id) ?? null;
 
   const message = buildExecCaseAgentMessage(testCaseId);
   return {
@@ -92,5 +99,7 @@ export function resolveExecCaseAutostartContext(
     testCaseId,
     projectId,
     generatePlaywrightScript,
+    executionMode,
+    uiTestCaseId,
   };
 }

@@ -501,6 +501,8 @@ const openExecCaseChatInCurrentPage = (close?: () => void) => {
     testCaseId: ctx?.testCaseId ?? executionResultTestCase.value?.id,
     promptId: ctx?.promptId,
     generatePlaywrightScript: ctx?.generatePlaywrightScript,
+    executionMode: ctx?.executionMode,
+    uiTestCaseId: ctx?.uiTestCaseId,
   });
   close?.();
 };
@@ -519,6 +521,8 @@ const openExecCaseChatInNewWindow = (close?: () => void) => {
     testCaseId: ctx?.testCaseId ?? executionResultTestCase.value?.id,
     promptId: ctx?.promptId,
     generatePlaywrightScript: ctx?.generatePlaywrightScript,
+    executionMode: ctx?.executionMode,
+    uiTestCaseId: ctx?.uiTestCaseId,
   });
   close?.();
 };
