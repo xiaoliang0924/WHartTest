@@ -25,9 +25,81 @@ from ..agent_loop_view import (
     _is_linked_image_url_allowed,
     _normalize_uploaded_image_base64_list,
     _prepare_agent_loop_human_message,
+    _build_ui_generation_observations,
+    _force_save_generated_ui_case,
     _run_and_stream_remaining_helper_steps,
     _extract_testcase_step_from_tool_call,
 )
+
+
+class GeneratedUiCaseFollowupTests(SimpleTestCase):
+    def test_followup_forces_save_tool_using_only_observed_browser_evidence(self):
+        class SaveTool:
+            name = "save_generated_ui_testcase"
+
+            async def ainvoke(self, args):
+                return '{"status":"success","ui_test_case_id":321}'
+
+        class BoundModel:
+            async def ainvoke(self, messages):
+                self.messages = messages
+                return AIMessage(tool_calls=[{
+                    "name": "save_generated_ui_testcase",
+                    "args": {"payload_json": '{"steps":[]}'},
+                    "id": "save-ui-1",
+                }])
+
+        class FakeModel:
+            def bind_tools(self, tools, **kwargs):
+                self.tools = tools
+                self.kwargs = kwargs
+                self.bound = BoundModel()
+                return self.bound
+
+        model = FakeModel()
+        tool = SaveTool()
+        messages = [
+            HumanMessage(content="执行用例 1464"),
+            AIMessage(tool_calls=[{
+                "name": "execute_skill_script",
+                "args": {"command": "await page.getByRole('button', {name: '返回'}).click();"},
+            }]),
+            ToolMessage(
+                content="RESULT=PASS: 页面返回成功",
+                tool_call_id="browser-1",
+                name="execute_skill_script",
+            ),
+        ]
+
+        result = async_to_sync(_force_save_generated_ui_case)(
+            llm=model,
+            tools=[tool],
+            messages=messages,
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["ui_test_case_id"], 321)
+        self.assertEqual(model.kwargs["tool_choice"], "required")
+        prompt_text = "\n".join(str(message.content) for message in model.bound.messages)
+        self.assertIn("getByRole", prompt_text)
+        self.assertIn("RESULT=PASS", prompt_text)
+
+    def test_followup_reports_missing_browser_evidence_without_calling_llm(self):
+        class SaveTool:
+            name = "save_generated_ui_testcase"
+
+        class NeverCalledModel:
+            def bind_tools(self, *args, **kwargs):
+                raise AssertionError("LLM must not be called without browser evidence")
+
+        result = async_to_sync(_force_save_generated_ui_case)(
+            llm=NeverCalledModel(),
+            tools=[SaveTool()],
+            messages=[HumanMessage(content="执行用例")],
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("浏览器操作证据", result["message"])
 
 
 class CompletionHelperProgressTests(SimpleTestCase):
