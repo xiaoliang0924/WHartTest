@@ -2,6 +2,7 @@ import os
 import tempfile
 import time
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
@@ -29,7 +30,44 @@ from ..agent_loop_view import (
     _force_save_generated_ui_case,
     _run_and_stream_remaining_helper_steps,
     _extract_testcase_step_from_tool_call,
+    _map_ui_script_results_to_testcase_steps,
 )
+
+
+class ScriptOnlyResultMappingTests(SimpleTestCase):
+    def setUp(self):
+        self.steps = [
+            SimpleNamespace(step_number=1, description="登录", expected_result="首页"),
+            SimpleNamespace(step_number=2, description="打开详情", expected_result="详情页"),
+        ]
+
+    def test_maps_each_successful_ui_group_to_functional_step(self):
+        results, status, reason = _map_ui_script_results_to_testcase_steps(
+            self.steps,
+            [{"group": 1, "status": "success"}, {"group": 2, "status": "pass"}],
+            ui_status=2,
+        )
+        self.assertEqual(status, "pass")
+        self.assertEqual(reason, "")
+        self.assertEqual([item["status"] for item in results], ["pass", "pass"])
+
+    def test_group_count_mismatch_fails_closed(self):
+        results, status, reason = _map_ui_script_results_to_testcase_steps(
+            self.steps, [{"group": 1, "status": "success"}], ui_status=2,
+        )
+        self.assertEqual(status, "fail")
+        self.assertIn("无法逐步对应", reason)
+        self.assertEqual([item["status"] for item in results], ["fail", "skip"])
+
+    def test_failed_ui_group_fails_functional_step(self):
+        results, status, _ = _map_ui_script_results_to_testcase_steps(
+            self.steps,
+            [{"group": 1, "status": "success"}, {"group": 2, "status": "failed"}],
+            ui_status=3,
+            ui_error="按钮未出现",
+        )
+        self.assertEqual(status, "fail")
+        self.assertEqual([item["status"] for item in results], ["pass", "fail"])
 
 
 class GeneratedUiCaseFollowupTests(SimpleTestCase):

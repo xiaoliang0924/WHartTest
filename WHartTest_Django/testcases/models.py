@@ -781,6 +781,14 @@ class TestCaseRunRecord(models.Model):
     step_results = models.JSONField(_("步骤结果"), default=list, blank=True)
     execution_log = models.TextField(_("执行日志"), blank=True, default="")
     generate_playwright_script = models.BooleanField(_("生成脚本"), default=False)
+    execution_mode = models.CharField(
+        _("本次执行模式"), max_length=20,
+        choices=[("hybrid", "智能双模"), ("script_only", "仅 UI 自动化"), ("ai_only", "纯 AI")],
+        default="hybrid",
+    )
+    ui_test_case_id_snapshot = models.PositiveIntegerField(
+        _("本次 UI 自动化用例 ID"), null=True, blank=True,
+    )
     data_generation_run = models.ForeignKey(
         'data_generation.DataGenerationRun',
         on_delete=models.SET_NULL,

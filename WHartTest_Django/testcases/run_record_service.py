@@ -1034,6 +1034,8 @@ def start_testcase_run_record(
     user_id: int,
     session_id: str,
     generate_playwright_script: bool = False,
+    execution_mode: str = "hybrid",
+    ui_test_case_id: Optional[int] = None,
     data_generation_run_id: Optional[int] = None,
 ) -> Optional[TestCaseRunRecord]:
     try:
@@ -1060,6 +1062,8 @@ def start_testcase_run_record(
             "executor_id": user_id,
             "status": "running",
             "generate_playwright_script": generate_playwright_script,
+            "execution_mode": execution_mode,
+            "ui_test_case_id_snapshot": ui_test_case_id,
             "data_generation_run_id": data_generation_run_id,
         },
     )
@@ -1075,6 +1079,8 @@ def start_testcase_run_record(
             execution_log="",
             completed_at=None,
             generate_playwright_script=generate_playwright_script,
+            execution_mode=execution_mode,
+            ui_test_case_id_snapshot=ui_test_case_id,
             data_generation_run_id=data_generation_run_id,
             started_at=timezone.now(),
         )
