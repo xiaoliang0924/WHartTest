@@ -39,7 +39,10 @@ services:
 YAML
 
 echo "=== migrate ==="
-docker compose -f docker-compose.yml -f docker-compose.override.yml run --rm backend python manage.py migrate --noinput
+# Override the long-running backend entrypoint for one-shot management commands;
+# otherwise the migration completes but supervisord keeps the temporary container
+# alive and the deployment script never reaches the restart step.
+docker compose -f docker-compose.yml -f docker-compose.override.yml run --rm --entrypoint python backend manage.py migrate --noinput
 
 echo "=== restart ==="
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --remove-orphans

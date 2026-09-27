@@ -207,11 +207,38 @@ def extract_failure_context(
     ope_value = None
     step_description = failed_step_data.get("description", "") if failed_step_data else ""
     step_id_val = failed_step_data.get("step_id") if failed_step_data else None
+    runtime_group = None
+    runtime_step_index = None
+    if isinstance(step_id_val, str):
+        runtime_match = re.fullmatch(r"group(\d+)_(\d+)", step_id_val.strip())
+        if runtime_match:
+            runtime_group = int(runtime_match.group(1))
+            runtime_step_index = int(runtime_match.group(2))
+
+    # The recorder uses runtime references such as ``group1_2``.  They are not
+    # database primary keys, so only numeric IDs may be used for the precise
+    # database lookup below.  Keep the runtime reference for the case-step
+    # fallback instead of letting Django raise a type error.
+    numeric_step_id = None
+    if runtime_group is None and step_id_val not in (None, ""):
+        try:
+            numeric_step_id = int(step_id_val)
+        except (TypeError, ValueError):
+            numeric_step_id = None
+
+    operation_hints = {
+        "goto", "wait", "click", "fill", "check", "uncheck", "press",
+        "assert_visible", "assert_hidden", "assert_enabled", "assert_disabled",
+        "assert_checked", "assert_text", "assert_contain_text", "assert_value",
+        "assert_count", "assert_url", "assert_title", "upload",
+    }
+    if step_description in operation_hints:
+        operation_type = step_description
 
     # 1. 优先通过 step_id 精准反查 UiPageStepsDetailed
-    if step_id_val:
+    if numeric_step_id is not None:
         from ui_automation.models import UiPageStepsDetailed
-        detailed_step = UiPageStepsDetailed.objects.filter(id=step_id_val).select_related(
+        detailed_step = UiPageStepsDetailed.objects.filter(id=numeric_step_id).select_related(
             "element", "page_step", "page_step__page"
         ).first()
         if detailed_step:
@@ -232,13 +259,25 @@ def extract_failure_context(
         case_steps = list(testcase.ui_test_case.case_steps.all().select_related(
             "page_step", "page_step__page"
         ).order_by("case_sort"))
-        if 0 <= step_sort - 1 < len(case_steps):
-            target_step = case_steps[step_sort - 1]
+        # Runtime group numbers identify the page-step group.  ``step_sort``
+        # counts recorder results and includes the synthetic leading ``goto``,
+        # so it cannot be used as a case-step index for recorder executions.
+        case_step_index = runtime_group - 1 if runtime_group is not None else step_sort - 1
+        if 0 <= case_step_index < len(case_steps):
+            target_step = case_steps[case_step_index]
             if target_step.page_step and target_step.page_step.page:
                 page_name = page_name or target_step.page_step.page.name
             details = list(target_step.page_step.step_details.all().select_related("element").order_by("step_sort"))
             if details:
-                first_detail = details[0]
+                matching_details = [detail for detail in details if detail.ope_key == operation_type]
+                if matching_details:
+                    first_detail = matching_details[0]
+                elif runtime_step_index is not None:
+                    # The recorder prepends one synthetic goto to each group.
+                    detail_index = max(runtime_step_index - 2, 0)
+                    first_detail = details[min(detail_index, len(details) - 1)]
+                else:
+                    first_detail = details[0]
                 operation_type = operation_type or first_detail.ope_key or ""
                 ope_value = ope_value or first_detail.ope_value
                 if first_detail.element:

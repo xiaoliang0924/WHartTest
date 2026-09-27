@@ -1132,7 +1132,10 @@ async def _finalize_generated_ui_case(
         if ui_case_id:
             repair_attempts = validation.get("repair_attempts") or []
             applied_attempts = [item for item in repair_attempts if item.get("status") == "applied"]
-            if applied_attempts:
+            failed_attempts = [item for item in repair_attempts if item.get("status") == "failed"]
+            if failed_attempts:
+                repair_summary = f"AI 自动修复流程失败：{failed_attempts[-1].get('reason') or '失败分析未完成'}。"
+            elif applied_attempts:
                 repair_summary = f"AI 已尝试安全修复 {len(applied_attempts)} 次，但再次回放仍未通过。"
             elif repair_attempts:
                 repair_summary = "AI 已完成失败分析，但未找到不会改变业务期望的安全修复方案。"
