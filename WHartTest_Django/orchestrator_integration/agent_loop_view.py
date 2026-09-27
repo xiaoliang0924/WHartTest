@@ -242,13 +242,24 @@ async def _complete_testcase_run_with_report(
 def _map_ui_script_results_to_testcase_steps(
     case_steps, raw_results, *, ui_status: int, ui_error: str = ""
 ):
-    """Map recorder page-step groups to functional steps; fail closed on mismatch."""
+    """Map recorder actions to functional steps using their recorded group IDs.
+
+    Recorder results are flattened for display and identify page groups through
+    ``step_id=groupN_index``. Treating every flattened action as a page group
+    produced misleading step-count mismatch errors, especially on failed runs.
+    """
     groups: dict[int, list[dict]] = {}
     for index, item in enumerate(raw_results or [], start=1):
         if not isinstance(item, dict):
             continue
+        group_value = item.get("group")
+        if group_value is None:
+            step_id = str(item.get("step_id") or "")
+            match = re.match(r"^group(\d+)_", step_id)
+            if match:
+                group_value = match.group(1)
         try:
-            group_no = int(item.get("group") or index)
+            group_no = int(group_value or index)
         except (TypeError, ValueError):
             group_no = index
         groups.setdefault(group_no, []).append(item)
@@ -256,7 +267,9 @@ def _map_ui_script_results_to_testcase_steps(
     expected_count = len(case_steps)
     actual_count = len(groups)
     alignment_error = ""
-    if expected_count != actual_count:
+    # 对失败执行优先呈现执行器返回的真实错误；步骤数不一致只对“脚本
+    # 已通过、但无法证明功能步骤均被覆盖”的情况作为安全失败原因。
+    if ui_status == 2 and expected_count != actual_count:
         alignment_error = (
             f"绑定 UI 用例包含 {actual_count} 组页面步骤，功能用例有 {expected_count} 步，"
             "无法逐步对应；为避免误报通过，本次按未对齐处理。"
@@ -275,12 +288,16 @@ def _map_ui_script_results_to_testcase_steps(
             and group_items
             and not group_failed
         ):
+            # 执行器可能在动作日志写入后才报告组级失败（例如截图/收尾异常）。
+            # 将最后一组标失败，避免把“有动作日志”误当成整组通过。
             group_failed = True
         if alignment_error:
             if index <= actual_count:
                 status, actual = "fail", alignment_error
             else:
                 status, actual = "skip", "无对应的 UI 自动化步骤"
+        elif not group_items and ui_status != 2 and index > actual_count:
+            status, actual = "skip", "UI 自动化执行在此步骤前已失败，未执行"
         elif group_failed or not group_items:
             status, actual = "fail", ui_error or alignment_error or "对应 UI 自动化步骤未全部通过"
         else:

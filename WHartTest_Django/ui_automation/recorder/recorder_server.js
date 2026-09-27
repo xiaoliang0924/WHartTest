@@ -1714,6 +1714,25 @@ async function runOneStep(page, step) {
     return null;
   }
 
+  // 页面级断言没有元素选择器，必须在解析 locator 之前执行。
+  // 旧逻辑会对 null locator 调 waitFor，导致 assert_url/title 抛异常。
+  if (opeKey === 'assert_url') {
+    const expectedUrl = String(opeValue.expected || opeValue.value || inputValue || '');
+    if (!expectedUrl) return 'URL 断言缺少期望值';
+    await page.waitForURL(expectedUrl, { timeout: 10000 });
+    return null;
+  }
+  if (opeKey === 'assert_title') {
+    const expectedTitle = String(opeValue.expected || opeValue.value || inputValue || '');
+    if (!expectedTitle) return '标题断言缺少期望值';
+    await page.waitForFunction(
+      (title) => document.title === title,
+      expectedTitle,
+      { timeout: 10000 },
+    );
+    return null;
+  }
+
   // 定位器降级链（与执行器一致）：主定位严格冲突/失效自动切备用
   const sel = step.element || step.selector;
   const resolved = await resolveLocatorWithFallback(page, sel, (m) => {
@@ -1724,6 +1743,7 @@ async function runOneStep(page, step) {
   if (opeKey.startsWith('assert_')) {
     const assertType = opeKey.replace('assert_', '');
     const options = { timeout: 10000 };
+    if (!locator) return '断言步骤缺少元素定位（' + opeKey + '）';
     if (assertType === 'visible') await locator.waitFor({ state: 'visible', ...options });
     else if (assertType === 'hidden') await locator.waitFor({ state: 'hidden', ...options });
     else if (assertType === 'enabled') await locator.waitFor({ state: 'attached', ...options });

@@ -1055,6 +1055,19 @@ class PlaywrightExecutor:
             await page_operations[operation]()
             logger.debug(f"步骤 {step.step_id}: {operation} 耗时 {time.time() - op_start:.2f}s")
             return True, f"页面操作 {operation} 执行成功", None
+
+        # 页面级断言不依赖元素定位器。必须在通用定位器校验前处理，
+        # 否则合法的 assert_url / assert_title 会被误判为缺少元素定位。
+        if operation in {'assert_url', 'assert_title'}:
+            expected = step.input_value or ''
+            if operation == 'assert_url':
+                await expect(page).to_have_url(expected)
+                assertion = 'url'
+            else:
+                await expect(page).to_have_title(expected)
+                assertion = 'title'
+            logger.debug(f"步骤 {step.step_id}: assert_{assertion} 耗时 {time.time() - op_start:.2f}s")
+            return True, f"页面断言 {assertion} 通过", None
         
         # 元素操作（需要定位器）- 先验证定位器是否有效
         if not step.locator_value or not step.locator_value.strip():
@@ -1181,8 +1194,6 @@ class PlaywrightExecutor:
                 'text': lambda: expect(locator).to_have_text(step.input_value),
                 'value': lambda: expect(locator).to_have_value(step.input_value),
                 'contain_text': lambda: expect(locator).to_contain_text(step.input_value),
-                'url': lambda: expect(page).to_have_url(step.input_value),
-                'title': lambda: expect(page).to_have_title(step.input_value),
                 'count': lambda: expect(locator).to_have_count(int(float(step.input_value)) if step.input_value else 0),
             }
             if assert_type in assert_operations:

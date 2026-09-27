@@ -233,6 +233,37 @@ class ScriptOnlyResultMappingTests(SimpleTestCase):
         self.assertIn("无法逐步对应", reason)
         self.assertEqual([item["status"] for item in results], ["fail", "skip"])
 
+    def test_recorder_flattened_actions_are_grouped_by_step_id(self):
+        results, status, reason = _map_ui_script_results_to_testcase_steps(
+            self.steps,
+            [
+                {"step_id": "group1_1", "status": "success", "description": "goto"},
+                {"step_id": "group1_2", "status": "success", "description": "assert_url"},
+                {"step_id": "group2_1", "status": "success", "description": "click"},
+            ],
+            ui_status=2,
+        )
+
+        self.assertEqual(status, "pass")
+        self.assertEqual(reason, "")
+        self.assertEqual([item["status"] for item in results], ["pass", "pass"])
+
+    def test_failed_run_reports_execution_error_not_step_count_mismatch(self):
+        results, status, reason = _map_ui_script_results_to_testcase_steps(
+            self.steps,
+            [
+                {"step_id": "group1_1", "status": "success", "description": "goto"},
+                {"step_id": "group1_2", "status": "failed", "message": "URL 断言失败"},
+            ],
+            ui_status=3,
+            ui_error="URL 断言失败",
+        )
+
+        self.assertEqual(status, "fail")
+        self.assertEqual(reason, "URL 断言失败")
+        self.assertNotIn("无法逐步对应", reason)
+        self.assertEqual([item["status"] for item in results], ["fail", "skip"])
+
 
 class CompletionHelperProgressTests(SimpleTestCase):
     def test_complete_ticket_helper_step_is_reported(self):

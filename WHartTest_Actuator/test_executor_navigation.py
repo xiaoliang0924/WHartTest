@@ -25,7 +25,7 @@ def _install_playwright_stub() -> None:
 
 _install_playwright_stub()
 
-from executor import PlaywrightExecutor  # noqa: E402
+from executor import PlaywrightExecutor, StepConfig  # noqa: E402
 
 
 class NavigationOptionsTests(unittest.TestCase):
@@ -78,6 +78,50 @@ class NavigationOptionsTests(unittest.TestCase):
         self.assertEqual(first_kwargs['timeout'], 30000)
         self.assertEqual(second_kwargs['wait_until'], 'domcontentloaded')
         self.assertEqual(second_kwargs['timeout'], 30000)
+
+    def test_page_url_assertion_does_not_require_locator(self):
+        page = MagicMock()
+        page.locator = MagicMock(side_effect=AssertionError('page assertion must not resolve a locator'))
+        expected = 'https://example.com/work-order/my-tickets'
+
+        from executor import expect
+        expect.return_value.to_have_url = AsyncMock()
+        step = StepConfig(
+            step_id=2,
+            operation_type='assert_url',
+            locator_type='',
+            locator_value='',
+            input_value=expected,
+        )
+
+        success, message, screenshot = asyncio.run(self.executor._execute_step(page, step))
+
+        self.assertTrue(success)
+        self.assertIn('页面断言 url 通过', message)
+        self.assertIsNone(screenshot)
+        expect.return_value.to_have_url.assert_awaited_once_with(expected)
+        page.locator.assert_not_called()
+
+    def test_page_title_assertion_does_not_require_locator(self):
+        page = MagicMock()
+        page.locator = MagicMock(side_effect=AssertionError('page assertion must not resolve a locator'))
+        expected = 'My page title'
+
+        from executor import expect
+        expect.return_value.to_have_title = AsyncMock()
+        step = StepConfig(
+            step_id=3,
+            operation_type='assert_title',
+            locator_type='',
+            locator_value='',
+            input_value=expected,
+        )
+
+        success, _message, _screenshot = asyncio.run(self.executor._execute_step(page, step))
+
+        self.assertTrue(success)
+        expect.return_value.to_have_title.assert_awaited_once_with(expected)
+        page.locator.assert_not_called()
 
 
 if __name__ == '__main__':
