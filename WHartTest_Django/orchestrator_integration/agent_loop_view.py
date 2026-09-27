@@ -601,10 +601,177 @@ async def _force_save_generated_ui_case(*, llm, tools, messages) -> Dict[str, An
         return {"status": "failed", "message": f"UI 用例保存失败：{str(exc)[:500]}"}
 
 
-async def _finalize_generated_ui_case(
-    *, llm, tools, messages, test_case_id, project_id, record
+async def _validate_generated_ui_case(
+    *, user, project_id: int, ui_test_case_id: int, validation_session_id: str
 ) -> Dict[str, Any]:
-    """Generate, bind, and report a UI case after any successful testcase finish path."""
+    """Replay a freshly generated UI case before reporting it as usable.
+
+    The replay deliberately goes through the existing recorder execution path so
+    validation has the same step results, screenshots, and Trace data as a
+    normal UI-case execution.  This phase only validates; it does not mutate
+    generated steps or attempt AI repair.
+    """
+    if user is None:
+        # Kept for callers/tests that only exercise persistence. Production
+        # generation always supplies the authenticated request user.
+        return {
+            "status": "skipped",
+            "message": "已生成并绑定，但缺少执行用户，未进行回放验证。",
+        }
+
+    from django.utils import timezone
+    from ui_automation.consumers import SocketUserManager
+    from ui_automation.models import UiExecutionRecord, UiTestCase
+
+    consumer = SocketUserManager.get_web_user(user.username)
+    if consumer is None:
+        message = "UI 自动化连接不可用，无法自动回放验证。请刷新页面后重试。"
+        await sync_to_async(
+            lambda: UiTestCase.objects.filter(id=ui_test_case_id).update(
+                status=3,
+                error_message=message,
+                result_data={
+                    "generation_validation": {
+                        "status": "unavailable",
+                        "message": message,
+                    }
+                },
+            )
+        )()
+        return {"status": "failed", "validation_status": "unavailable", "message": message}
+
+    active_task = getattr(consumer, "_recorder_exec_task", None)
+    if active_task is not None and not active_task.done():
+        message = "当前用户已有 UI 自动化任务正在执行，无法进行生成用例回放验证。"
+        await sync_to_async(
+            lambda: UiTestCase.objects.filter(id=ui_test_case_id).update(
+                status=3,
+                error_message=message,
+                result_data={
+                    "generation_validation": {
+                        "status": "unavailable",
+                        "message": message,
+                    }
+                },
+            )
+        )()
+        return {"status": "failed", "validation_status": "unavailable", "message": message}
+
+    await sync_to_async(
+        lambda: UiTestCase.objects.filter(id=ui_test_case_id).update(
+            status=1,
+            error_message=None,
+            result_data={
+                "generation_validation": {
+                    "status": "running",
+                    "message": "正在回放验证生成的 UI 自动化用例。",
+                }
+            },
+        )
+    )()
+
+    started_at = timezone.now()
+    # Reuse the consumer's stop/cancel mechanism while the validation replay
+    # is running, just like a normal recorder execution started by the UI.
+    validation_task = asyncio.current_task()
+    consumer._recorder_exec_task = validation_task
+    try:
+        await consumer._execute_via_recorder(
+            "case",
+            {
+                "case_id": int(ui_test_case_id),
+                "execution_request_id": validation_session_id,
+                "actuator_id": "recorder-browser",
+                "executor_id": int(user.id),
+                "executor_name": user.username,
+            },
+            user.username,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Generated UI testcase replay raised an exception: project=%s ui_case=%s",
+            project_id,
+            ui_test_case_id,
+        )
+        message = f"生成 UI 用例回放异常：{str(exc)[:700]}"
+        await sync_to_async(
+            lambda: UiTestCase.objects.filter(id=ui_test_case_id).update(
+                status=3,
+                error_message=message,
+                result_data={
+                    "generation_validation": {
+                        "status": "failed",
+                        "message": message,
+                    }
+                },
+            )
+        )()
+        return {"status": "failed", "validation_status": "failed", "message": message}
+    finally:
+        if getattr(consumer, "_recorder_exec_task", None) is validation_task:
+            consumer._recorder_exec_task = None
+
+    def load_record():
+        return (
+            UiExecutionRecord.objects.filter(
+                test_case_id=ui_test_case_id,
+                executor_id=user.id,
+                created_at__gte=started_at,
+            )
+            .order_by("-created_at")
+            .first()
+        )
+
+    execution_record = await sync_to_async(load_record)()
+    if execution_record is None:
+        message = "生成 UI 用例回放结束，但没有生成执行记录。"
+        await sync_to_async(
+            lambda: UiTestCase.objects.filter(id=ui_test_case_id).update(
+                status=3,
+                error_message=message,
+                result_data={
+                    "generation_validation": {
+                        "status": "failed",
+                        "message": message,
+                    }
+                },
+            )
+        )()
+        return {"status": "failed", "validation_status": "failed", "message": message}
+
+    passed = execution_record.status == 2
+    message = (
+        "生成 UI 用例回放验证通过。"
+        if passed
+        else (execution_record.error_message or execution_record.log or "生成 UI 用例回放失败。")
+    )[:1000]
+
+    def persist_validation_metadata():
+        case = UiTestCase.objects.get(id=ui_test_case_id)
+        result_data = dict(case.result_data or {})
+        result_data["generation_validation"] = {
+            "status": "passed" if passed else "failed",
+            "execution_record_id": execution_record.id,
+            "message": message,
+        }
+        case.status = 2 if passed else 3
+        case.error_message = None if passed else message
+        case.result_data = result_data
+        case.save(update_fields=["status", "error_message", "result_data", "updated_at"])
+
+    await sync_to_async(persist_validation_metadata)()
+    return {
+        "status": "success" if passed else "failed",
+        "validation_status": "passed" if passed else "failed",
+        "execution_record_id": execution_record.id,
+        "message": message,
+    }
+
+
+async def _finalize_generated_ui_case(
+    *, llm, tools, messages, test_case_id, project_id, record, user=None
+) -> Dict[str, Any]:
+    """Generate, replay-validate, bind, and report a UI case after success."""
     if not test_case_id:
         return {
             "enabled": True,
@@ -664,11 +831,23 @@ async def _finalize_generated_ui_case(
         if reported_ui_case_id and not ui_case_id and not generation_error:
             generation_error = "保存工具报告成功，但数据库中未查到绑定记录。"
 
-    if ui_case_id:
-        note = (
-            "\n\n### UI 自动化用例生成\n"
-            f"成功：UI 自动化用例 #{ui_case_id} 已生成并绑定。"
+    validation = {"status": "skipped", "message": "未进行回放验证。"}
+    if ui_case_id and user is not None:
+        validation = await _validate_generated_ui_case(
+            user=user,
+            project_id=int(project_id),
+            ui_test_case_id=int(ui_case_id),
+            validation_session_id=f"ui-generation-validation-{uuid.uuid4().hex}",
         )
+
+    if ui_case_id and validation.get("status") in {"success", "skipped"}:
+        if validation.get("status") == "success":
+            generation_note = f"成功：UI 自动化用例 #{ui_case_id} 已生成、绑定并通过回放验证。"
+            result_message = f"UI 自动化用例 #{ui_case_id} 已生成、绑定并通过回放验证。"
+        else:
+            generation_note = f"已生成：UI 自动化用例 #{ui_case_id} 已生成并绑定，但未进行回放验证。"
+            result_message = f"UI 自动化用例 #{ui_case_id} 已生成并绑定，但未进行回放验证。"
+        note = f"\n\n### UI 自动化用例生成\n{generation_note}"
         if record and "### UI 自动化用例生成" not in (record.summary or ""):
             record.summary = (record.summary or "") + note
             await sync_to_async(record.save)(update_fields=["summary"])
@@ -676,23 +855,40 @@ async def _finalize_generated_ui_case(
             "enabled": True,
             "status": "success",
             "ui_test_case_id": ui_case_id,
-            "message": f"UI 自动化用例 #{ui_case_id} 已生成并绑定。",
+            "validation_status": validation.get("validation_status", "skipped"),
+            "execution_record_id": validation.get("execution_record_id"),
+            "message": result_message,
         }
 
     if record and record.status == "pass":
-        note = (
-            "\n\n### UI 自动化用例生成\n"
-            "失败：功能用例已通过，但本次执行没有成功保存并绑定 UI 自动化用例。"
-            + (f"原因：{generation_error}。" if generation_error else "")
-        )
+        validation_message = validation.get("message") or "回放验证失败。"
+        if ui_case_id:
+            note = (
+                "\n\n### UI 自动化用例生成\n"
+                f"已生成但需要修正：UI 自动化用例 #{ui_case_id} 已保存并绑定，但回放验证失败。"
+                f"原因：{validation_message}"
+            )
+            result_message = f"UI 自动化用例 #{ui_case_id} 已生成，但回放验证失败，需要修正。"
+            result_reason = validation_message
+        else:
+            result_reason = generation_error or "本次执行没有成功保存并绑定 UI 自动化用例。"
+            note = (
+                "\n\n### UI 自动化用例生成\n"
+                "失败：功能用例已通过，但本次执行没有成功保存并绑定 UI 自动化用例。"
+                f"原因：{result_reason}"
+            )
+            result_message = "功能用例通过，但未检测到已保存并绑定的 UI 自动化用例。"
         if "### UI 自动化用例生成" not in (record.summary or ""):
             record.summary = (record.summary or "") + note
             await sync_to_async(record.save)(update_fields=["summary"])
         return {
             "enabled": True,
             "status": "failed",
-            "message": "功能用例通过，但未检测到已保存并绑定的 UI 自动化用例。",
-            "reason": generation_error or None,
+            "ui_test_case_id": ui_case_id,
+            "validation_status": validation.get("validation_status", "failed"),
+            "execution_record_id": validation.get("execution_record_id"),
+            "message": result_message,
+            "reason": result_reason or None,
         }
 
     return {
@@ -3172,7 +3368,7 @@ class AgentLoopStreamAPIView(View):
                                                                     "session_id": session_id,
                                                                     "test_case_id": int(test_case_id),
                                                                     "state": "generating_ui_case",
-                                                                    "message": "功能用例已通过，正在补充生成并绑定 UI 自动化用例",
+                                                                    "message": "功能用例已通过，正在生成并回放验证 UI 自动化用例",
                                                                 }
                                                             )
                                                         script_generation_result = await _finalize_generated_ui_case(
@@ -3182,6 +3378,7 @@ class AgentLoopStreamAPIView(View):
                                                             test_case_id=test_case_id,
                                                             project_id=project_id,
                                                             record=record,
+                                                            user=request.user,
                                                         )
                                                     complete_event = {
                                                         "type": "complete",
@@ -3305,7 +3502,7 @@ class AgentLoopStreamAPIView(View):
                                                                     "session_id": session_id,
                                                                     "test_case_id": int(test_case_id),
                                                                     "state": "generating_ui_case",
-                                                                    "message": "功能用例已通过，正在补充生成并绑定 UI 自动化用例",
+                                                                    "message": "功能用例已通过，正在生成并回放验证 UI 自动化用例",
                                                                 }
                                                             )
                                                         generation_messages = await _get_agent_state_messages(
@@ -3318,6 +3515,7 @@ class AgentLoopStreamAPIView(View):
                                                             test_case_id=test_case_id,
                                                             project_id=project_id,
                                                             record=record,
+                                                            user=request.user,
                                                         )
                                                     complete_event = {
                                                         "type": "complete",
@@ -3688,7 +3886,7 @@ class AgentLoopStreamAPIView(View):
                                     "session_id": session_id,
                                     "test_case_id": int(test_case_id) if test_case_id else None,
                                     "state": "generating_ui_case",
-                                    "message": "功能用例已通过，正在补充生成并绑定 UI 自动化用例",
+                                    "message": "功能用例已通过，正在生成并回放验证 UI 自动化用例",
                                 }
                             )
                         script_generation_result = await _finalize_generated_ui_case(
@@ -3698,6 +3896,7 @@ class AgentLoopStreamAPIView(View):
                             test_case_id=test_case_id,
                             project_id=project_id,
                             record=record,
+                            user=request.user,
                         )
                         if complete_data.get("test_case_run") and record:
                             complete_data["test_case_run"]["summary"] = record.summary

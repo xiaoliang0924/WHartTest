@@ -452,7 +452,30 @@ const notifyExecutionOutcome = async (
     return;
   }
   if (status === 'pass') {
-    Message.success(isEnglish.value ? 'Case passed. See result drawer.' : '用例执行通过，请查看右侧执行结果。');
+    const scriptGeneration = payload?.script_generation;
+    const scriptResult = scriptGeneration && typeof scriptGeneration === 'object'
+      ? scriptGeneration as Record<string, unknown>
+      : null;
+    if (scriptResult?.status === 'failed') {
+      const detail = typeof scriptResult.message === 'string'
+        ? scriptResult.message
+        : (typeof scriptResult.reason === 'string' ? scriptResult.reason : '');
+      Notification.warning({
+        title: isEnglish.value
+          ? 'Case passed, but the UI automation case needs correction'
+          : '用例执行通过，但 UI 自动化用例需要修正',
+        content: detail || (isEnglish.value ? 'Replay validation failed.' : '生成的 UI 用例回放验证失败。'),
+        duration: 10000,
+      });
+    } else if (scriptResult?.status === 'success' && scriptResult.validation_status === 'passed') {
+      Message.success(
+        isEnglish.value
+          ? 'Case passed and the generated UI automation case passed replay validation.'
+          : '用例执行通过，生成的 UI 自动化用例已通过回放验证。',
+      );
+    } else {
+      Message.success(isEnglish.value ? 'Case passed. See result drawer.' : '用例执行通过，请查看右侧执行结果。');
+    }
     return;
   }
   Message.info(isEnglish.value ? 'Execution finished. See result drawer.' : '用例执行已结束，请查看右侧执行结果。');
