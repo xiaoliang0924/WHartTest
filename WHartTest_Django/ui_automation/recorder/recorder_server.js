@@ -1719,6 +1719,7 @@ async function runOneStep(page, step) {
   if (opeKey === 'assert_url') {
     const expectedUrl = String(opeValue.expected || opeValue.value || inputValue || '');
     if (!expectedUrl) return 'URL 断言缺少期望值';
+    const assertionTimeout = Math.max(1000, Math.min(60000, Number(opeValue.timeout || 10) * 1000));
     // SPA 的 history.pushState 路由切换不会触发完整页面 load；waitForURL
     // 默认还等待 load，因此即便地址栏已到目标路由也会误报超时。直接轮询
     // location.href，只验证 URL，不依赖网络导航或 load 事件。
@@ -1733,17 +1734,18 @@ async function runOneStep(page, step) {
         return normalize(window.location.href) === normalize(target);
       },
       targetUrl,
-      { timeout: 10000 },
+      { timeout: assertionTimeout },
     );
     return null;
   }
   if (opeKey === 'assert_title') {
     const expectedTitle = String(opeValue.expected || opeValue.value || inputValue || '');
     if (!expectedTitle) return '标题断言缺少期望值';
+    const assertionTimeout = Math.max(1000, Math.min(60000, Number(opeValue.timeout || 10) * 1000));
     await page.waitForFunction(
       (title) => document.title === title,
       expectedTitle,
-      { timeout: 10000 },
+      { timeout: assertionTimeout },
     );
     return null;
   }

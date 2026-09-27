@@ -768,6 +768,257 @@ async def _validate_generated_ui_case(
     }
 
 
+MAX_GENERATED_UI_REPAIR_ATTEMPTS = 2
+
+
+async def _apply_safe_generated_ui_repair(
+    *, project_id: int, ui_test_case_id: int, diagnosis: Dict[str, Any], attempt: int
+) -> Dict[str, Any]:
+    """Apply only an evidence-backed locator change to the generated case.
+
+    Generated cases can share page elements with manually maintained cases.  A
+    repair must therefore clone the element and rewire only details belonging
+    to this UI case; changing the shared element in-place could silently alter
+    unrelated tests.
+    """
+    suggestion = diagnosis.get("healing_suggestion") or {}
+    if diagnosis.get("root_cause_type") != "SCRIPT_DEFECT":
+        return {"status": "skipped", "reason": "AI 判断为业务或环境问题，未自动修改用例。"}
+    if suggestion.get("can_self_heal") is not True:
+        return {"status": "skipped", "reason": "AI 未确认存在安全的自动修复方案。"}
+
+    # URL/title assertions keep their expected value immutable.  For a real
+    # page transition that is merely slower than the default, allow one small,
+    # bounded wait increase.  The recorder honours this timeout below; it does
+    # not turn a failed URL/title assertion into a pass.
+    failure_info = diagnosis.get("failure_step_info") or {}
+    operation_type = str(failure_info.get("operation_type") or "").strip()
+    error_text = str(failure_info.get("error_message") or "")
+    if (
+        suggestion.get("can_self_heal") is True
+        and "timeout" in error_text.lower()
+        and (
+            operation_type in {"assert_url", "assert_title"}
+            or "waitforfunction" in error_text.lower()
+        )
+    ):
+        from ui_automation.models import UiCaseStepsDetailed, UiPageStepsDetailed
+
+        def extend_assertion_wait():
+            from django.db import transaction
+
+            with transaction.atomic():
+                candidate_keys = (
+                    [operation_type]
+                    if operation_type in {"assert_url", "assert_title"}
+                    else ["assert_url", "assert_title"]
+                )
+                candidates = list(UiPageStepsDetailed.objects.filter(
+                    page_step__case_usages__test_case_id=ui_test_case_id,
+                    ope_key__in=candidate_keys,
+                ).distinct().order_by("page_step_id", "step_sort"))
+                # Multiple identical assertions cannot be mapped safely from a
+                # generic failure message; leave them for a human instead.
+                if len(candidates) != 1:
+                    return {"status": "skipped", "reason": "无法唯一定位超时断言，未自动调整等待时间。"}
+                detail = candidates[0]
+                if UiCaseStepsDetailed.objects.filter(
+                    page_step_id=detail.page_step_id,
+                ).exclude(test_case_id=ui_test_case_id).exists():
+                    return {"status": "skipped", "reason": "超时断言所在页面步骤被其他用例复用，未自动修改。"}
+                value = dict(detail.ope_value or {})
+                expected = value.get("expected") if "expected" in value else value.get("value")
+                if not expected:
+                    return {"status": "skipped", "reason": "断言缺少期望值，未自动调整等待时间。"}
+                try:
+                    old_timeout = int(value.get("timeout") or 10)
+                except (TypeError, ValueError):
+                    old_timeout = 10
+                new_timeout = min(max(old_timeout + 5, 10), 60)
+                if new_timeout <= old_timeout:
+                    return {"status": "skipped", "reason": "断言等待时间已达到安全上限。"}
+                value["timeout"] = new_timeout
+                detail.ope_value = value
+                detail.save(update_fields=["ope_value", "updated_at"])
+                return {
+                    "status": "applied",
+                    "repair_type": "wait",
+                    "old_wait_seconds": old_timeout,
+                    "new_wait_seconds": new_timeout,
+                    "reason": "仅增加断言等待时间，未修改 URL/标题期望值。",
+                }
+
+        return await sync_to_async(extend_assertion_wait)()
+
+    try:
+        element_id = int(suggestion.get("element_id"))
+    except (TypeError, ValueError):
+        return {"status": "skipped", "reason": "AI 未返回当前用例可定位的元素。"}
+
+    locator_type = str(suggestion.get("suggested_locator_type") or "").strip()
+    locator_value = str(suggestion.get("suggested_locator_value") or "").strip()
+    from ui_automation.models import UiCaseStepsDetailed, UiElement, UiPageStepsDetailed
+
+    valid_locator_types = {value for value, _label in UiElement.LOCATOR_TYPE_CHOICES}
+    if locator_type not in valid_locator_types or not locator_value:
+        return {"status": "skipped", "reason": "AI 返回的定位器格式不安全，未自动修改用例。"}
+    if len(locator_value) > 4000:
+        return {"status": "skipped", "reason": "AI 返回的定位器过长，未自动修改用例。"}
+
+    def apply_repair():
+        from django.db import transaction
+
+        with transaction.atomic():
+            element = UiElement.objects.select_for_update().filter(
+                id=element_id, page__project_id=project_id
+            ).first()
+            if element is None:
+                return {"status": "skipped", "reason": "待修复元素不存在或不属于当前项目。"}
+
+            details = UiPageStepsDetailed.objects.filter(
+                page_step__case_usages__test_case_id=ui_test_case_id,
+                element_id=element.id,
+            ).distinct()
+            if not details.exists():
+                return {"status": "skipped", "reason": "AI 指向的元素不属于当前生成用例。"}
+            page_step_ids = details.values_list("page_step_id", flat=True)
+            if UiCaseStepsDetailed.objects.filter(
+                page_step_id__in=page_step_ids,
+            ).exclude(test_case_id=ui_test_case_id).exists():
+                return {"status": "skipped", "reason": "目标页面步骤被其他用例复用，未自动修改。"}
+            if (
+                element.locator_type == locator_type
+                and element.locator_value == locator_value
+            ):
+                return {"status": "skipped", "reason": "AI 建议与当前定位器相同，未重复修改。"}
+
+            # Keep the old locator as a fallback on the cloned element.  The
+            # repair never changes assertion ope_value or any business value.
+            clone = UiElement.objects.create(
+                page=element.page,
+                name=f"{element.name}（AI修复{attempt}）"[:64],
+                locator_type=locator_type,
+                locator_value=locator_value,
+                locator_index=element.locator_index,
+                locator_type_2=element.locator_type,
+                locator_value_2=element.locator_value,
+                locator_index_2=element.locator_index,
+                locator_type_3=element.locator_type_2,
+                locator_value_3=element.locator_value_2,
+                locator_index_3=element.locator_index_2,
+                wait_time=element.wait_time,
+                is_iframe=element.is_iframe,
+                iframe_locator=element.iframe_locator,
+                description=element.description,
+                creator=element.creator,
+            )
+            details.update(element=clone)
+            return {
+                "status": "applied",
+                "element_id": clone.id,
+                "old_locator": f"[{element.locator_type}] {element.locator_value}",
+                "new_locator": f"[{locator_type}] {locator_value}",
+                "reason": str(suggestion.get("explanation") or diagnosis.get("summary") or "AI 建议替换定位器")[:500],
+            }
+
+    return await sync_to_async(apply_repair)()
+
+
+async def _repair_generated_ui_case_after_failure(
+    *, test_case_id: int, project_id: int, ui_test_case_id: int, user, validation: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Diagnose and safely repair a failed generated case, then replay it.
+
+    This deliberately repairs locator configuration or a bounded assertion
+    wait. URL/title expectations, action values, step count, and step order are
+    immutable in this automatic path so a real product defect cannot be hidden.
+    """
+    if not user or validation.get("status") != "failed":
+        return {"validation": validation, "attempts": []}
+
+    from testcases.ai_diagnosis_service import diagnose_execution_failure
+    from testcases.models import TestCase
+
+    attempts: list[Dict[str, Any]] = []
+    current_validation = validation
+    for attempt in range(1, MAX_GENERATED_UI_REPAIR_ATTEMPTS + 1):
+        execution_record_id = current_validation.get("execution_record_id")
+        if not execution_record_id:
+            attempts.append({"attempt": attempt, "status": "skipped", "reason": "没有失败执行记录，无法分析。"})
+            break
+
+        def diagnose():
+            testcase = TestCase.objects.select_related("ui_test_case").filter(
+                id=int(test_case_id), project_id=int(project_id), ui_test_case_id=int(ui_test_case_id)
+            ).first()
+            if testcase is None:
+                raise ValueError("功能用例与生成的 UI 用例绑定关系不存在。")
+            return diagnose_execution_failure(
+                testcase, ui_record_id=int(execution_record_id), user=user
+            )
+
+        try:
+            diagnosis = await sync_to_async(diagnose)()
+        except Exception as exc:
+            logger.exception("Generated UI testcase AI repair diagnosis failed")
+            attempts.append({"attempt": attempt, "status": "failed", "reason": f"AI 分析失败：{str(exc)[:500]}"})
+            break
+
+        try:
+            repair = await _apply_safe_generated_ui_repair(
+                project_id=int(project_id),
+                ui_test_case_id=int(ui_test_case_id),
+                diagnosis=diagnosis,
+                attempt=attempt,
+            )
+        except Exception as exc:
+            logger.exception("Generated UI testcase safe repair failed")
+            repair = {"status": "failed", "reason": f"安全修复未应用：{str(exc)[:500]}"}
+
+        attempt_result = {
+            "attempt": attempt,
+            "status": repair.get("status"),
+            "reason": repair.get("reason") or diagnosis.get("summary") or "",
+            "root_cause_type": diagnosis.get("root_cause_type"),
+            "diagnosed_by": diagnosis.get("diagnosed_by"),
+        }
+        if repair.get("status") == "applied":
+            attempt_result.update({
+                "old_locator": repair.get("old_locator"),
+                "new_locator": repair.get("new_locator"),
+            })
+            attempts.append(attempt_result)
+            current_validation = await _validate_generated_ui_case(
+                user=user,
+                project_id=int(project_id),
+                ui_test_case_id=int(ui_test_case_id),
+                validation_session_id=f"ui-generation-repair-{uuid.uuid4().hex}",
+            )
+            if current_validation.get("status") == "success":
+                break
+            continue
+
+        attempts.append(attempt_result)
+        break
+
+    def persist_repair_metadata():
+        from ui_automation.models import UiTestCase
+
+        case = UiTestCase.objects.get(id=ui_test_case_id)
+        result_data = dict(case.result_data or {})
+        result_data["generation_repair"] = {
+            "status": "passed" if current_validation.get("status") == "success" else "not_repaired",
+            "max_attempts": MAX_GENERATED_UI_REPAIR_ATTEMPTS,
+            "attempts": attempts,
+        }
+        case.result_data = result_data
+        case.save(update_fields=["result_data", "updated_at"])
+
+    await sync_to_async(persist_repair_metadata)()
+    current_validation["repair_attempts"] = attempts
+    return {"validation": current_validation, "attempts": attempts}
+
+
 async def _finalize_generated_ui_case(
     *, llm, tools, messages, test_case_id, project_id, record, user=None
 ) -> Dict[str, Any]:
@@ -839,11 +1090,26 @@ async def _finalize_generated_ui_case(
             ui_test_case_id=int(ui_case_id),
             validation_session_id=f"ui-generation-validation-{uuid.uuid4().hex}",
         )
+        if validation.get("status") == "failed":
+            repair_result = await _repair_generated_ui_case_after_failure(
+                test_case_id=int(test_case_id),
+                project_id=int(project_id),
+                ui_test_case_id=int(ui_case_id),
+                user=user,
+                validation=validation,
+            )
+            validation = repair_result.get("validation") or validation
 
     if ui_case_id and validation.get("status") in {"success", "skipped"}:
         if validation.get("status") == "success":
-            generation_note = f"成功：UI 自动化用例 #{ui_case_id} 已生成、绑定并通过回放验证。"
-            result_message = f"UI 自动化用例 #{ui_case_id} 已生成、绑定并通过回放验证。"
+            repair_attempts = validation.get("repair_attempts") or []
+            repaired = any(item.get("status") == "applied" for item in repair_attempts)
+            if repaired:
+                generation_note = f"成功：UI 自动化用例 #{ui_case_id} 已生成、绑定，AI 修复后通过回放验证。"
+                result_message = f"UI 自动化用例 #{ui_case_id} 已生成，AI 修复后通过回放验证。"
+            else:
+                generation_note = f"成功：UI 自动化用例 #{ui_case_id} 已生成、绑定并通过回放验证。"
+                result_message = f"UI 自动化用例 #{ui_case_id} 已生成、绑定并通过回放验证。"
         else:
             generation_note = f"已生成：UI 自动化用例 #{ui_case_id} 已生成并绑定，但未进行回放验证。"
             result_message = f"UI 自动化用例 #{ui_case_id} 已生成并绑定，但未进行回放验证。"
@@ -857,16 +1123,25 @@ async def _finalize_generated_ui_case(
             "ui_test_case_id": ui_case_id,
             "validation_status": validation.get("validation_status", "skipped"),
             "execution_record_id": validation.get("execution_record_id"),
+            "repair_attempts": validation.get("repair_attempts", []),
             "message": result_message,
         }
 
     if record and record.status == "pass":
         validation_message = validation.get("message") or "回放验证失败。"
         if ui_case_id:
+            repair_attempts = validation.get("repair_attempts") or []
+            applied_attempts = [item for item in repair_attempts if item.get("status") == "applied"]
+            if applied_attempts:
+                repair_summary = f"AI 已尝试安全修复 {len(applied_attempts)} 次，但再次回放仍未通过。"
+            elif repair_attempts:
+                repair_summary = "AI 已完成失败分析，但未找到不会改变业务期望的安全修复方案。"
+            else:
+                repair_summary = "未执行自动修复。"
             note = (
                 "\n\n### UI 自动化用例生成\n"
                 f"已生成但需要修正：UI 自动化用例 #{ui_case_id} 已保存并绑定，但回放验证失败。"
-                f"原因：{validation_message}"
+                f"{repair_summary}原因：{validation_message}"
             )
             result_message = f"UI 自动化用例 #{ui_case_id} 已生成，但回放验证失败，需要修正。"
             result_reason = validation_message
@@ -887,6 +1162,7 @@ async def _finalize_generated_ui_case(
             "ui_test_case_id": ui_case_id,
             "validation_status": validation.get("validation_status", "failed"),
             "execution_record_id": validation.get("execution_record_id"),
+            "repair_attempts": validation.get("repair_attempts", []),
             "message": result_message,
             "reason": result_reason or None,
         }
