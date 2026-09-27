@@ -5,14 +5,70 @@ import logging
 import os
 import re
 import shutil
+from datetime import timedelta
 from typing import Any, Optional
 
+from django.db import transaction
 from django.utils import timezone
 
 from .models import TestCase, TestCaseRunRecord
 from .tasks import _extract_test_result_json
 
 logger = logging.getLogger(__name__)
+
+
+def testcase_bound_ui_timeout_seconds() -> float:
+    """Single source of truth for bound UI script execution timeout."""
+    try:
+        return max(30.0, float(os.environ.get("TESTCASE_BOUND_UI_TIMEOUT_SECONDS", "600")))
+    except (TypeError, ValueError):
+        return 600.0
+
+
+def reconcile_stale_bound_ui_run_records() -> int:
+    """Close orphaned run records left behind by a timed-out/interrupted UI script."""
+    try:
+        grace_seconds = max(
+            0.0,
+            float(os.environ.get("TESTCASE_BOUND_UI_TIMEOUT_GRACE_SECONDS", "120")),
+        )
+    except (TypeError, ValueError):
+        grace_seconds = 120.0
+
+    now = timezone.now()
+    cutoff = now - timedelta(seconds=testcase_bound_ui_timeout_seconds() + grace_seconds)
+    ui_script_paths = ("bound_ui_script", "hybrid_script_pending")
+    stale_records = TestCaseRunRecord.objects.select_for_update().filter(
+        status="running",
+        actual_execution_path__in=ui_script_paths,
+        started_at__lte=cutoff,
+    )
+
+    closed_count = 0
+    with transaction.atomic():
+        for record in stale_records:
+            # Re-check the state when writing so a concurrent successful finalizer
+            # can never be overwritten by the periodic reconciler.
+            note = (
+                "绑定 UI 自动化脚本执行超时或执行进程中断；"
+                f"超过配置时限 {testcase_bound_ui_timeout_seconds():g} 秒及收尾宽限期 "
+                f"{grace_seconds:g} 秒，系统已将遗留运行记录标记为错误。"
+            )
+            updated = TestCaseRunRecord.objects.filter(
+                pk=record.pk,
+                status="running",
+                actual_execution_path__in=ui_script_paths,
+            ).update(
+                status="error",
+                summary=note,
+                execution_log=(record.execution_log + "\n" + note).strip(),
+                completed_at=now,
+            )
+            closed_count += updated
+
+    if closed_count:
+        logger.warning("Reconciled %s stale bound UI testcase run records", closed_count)
+    return closed_count
 
 _FAIL_HINTS = (
     "result=fail",

@@ -705,6 +705,12 @@ CELERY_TASK_ROUTES = {
 
 # Celery Beat 调度器配置
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+CELERY_BEAT_SCHEDULE = {
+    "reconcile-stale-bound-ui-runs-every-minute": {
+        "task": "testcases.reconcile_stale_bound_ui_run_records",
+        "schedule": 60.0,
+    },
+}
 
 # Celery任务配置
 CELERY_TASK_TRACK_STARTED = True  # 追踪任务开始状态。

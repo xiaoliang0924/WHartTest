@@ -5,16 +5,33 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'; // 导入 onMounted 生命周期钩子，用于组件初次挂载后执行初始化逻辑。
+import { onMounted, watch } from 'vue'; // 导入应用启动与登录状态监听钩子。
 import { ConfigProvider as AConfigProvider } from '@arco-design/web-vue';
 import { useAuthStore } from '@/store/authStore'; // 导入认证状态 store 的组合式函数，用于访问登录态能力。
 import { useAppI18n } from '@/composables/useAppI18n';
 import { useLegacyDomTranslation } from '@/composables/useLegacyDomTranslation';
+import { uiWebSocket } from '@/features/ui-automation/services/websocket';
 
 const authStore = useAuthStore(); // 获取 authStore 实例，后续可调用认证状态检查方法。
 const { arcoLocale } = useAppI18n();
 
 useLegacyDomTranslation();
+
+// UI 自动化录制器也被测试用例执行流程复用；保持已登录用户的 WebSocket
+// 常驻，并在登录态切换时建立/关闭连接，避免依赖用户先访问 UI 自动化页面。
+watch(
+  () => authStore.isAuthenticated,
+  (isAuthenticated) => {
+    if (isAuthenticated) {
+      uiWebSocket.connect().catch((error) => {
+        console.warn('UI 自动化 WebSocket 尚未连接，将自动重试:', error);
+      });
+    } else {
+      uiWebSocket.disconnect();
+    }
+  },
+  { immediate: true },
+);
 
 // 在应用启动时检查认证状态
 onMounted(() => { // 在根组件挂载完成后执行一次初始化回调。

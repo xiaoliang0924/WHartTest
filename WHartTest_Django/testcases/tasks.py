@@ -24,6 +24,14 @@ from wharttest_django.notification_service import notify_test_suite_execution
 logger = logging.getLogger(__name__)
 
 
+@shared_task(name="testcases.reconcile_stale_bound_ui_run_records")
+def reconcile_stale_bound_ui_run_records():
+    """Periodically close bound UI run records orphaned by worker/process loss."""
+    from .run_record_service import reconcile_stale_bound_ui_run_records as reconcile
+
+    return {"closed_records": reconcile()}
+
+
 @shared_task(bind=True, name='testcases.execute_test_suite')
 def execute_test_suite(self, execution_id):
     """

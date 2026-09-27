@@ -3,10 +3,12 @@ from unittest.mock import patch
 
 import os
 import tempfile
+from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
 from PIL import Image
 
 from projects.models import Project
@@ -14,6 +16,7 @@ from testcases.models import (
     TestCase as TestCaseModel,
     TestCaseModule,
     TestCaseScreenshot,
+    TestCaseRunRecord,
     TestCaseStep,
 )
 from testcases.run_record_service import (
@@ -26,6 +29,7 @@ from testcases.run_record_service import (
     has_execution_result_report,
     is_filled_execution_result_report,
     list_missing_step_screenshots,
+    reconcile_stale_bound_ui_run_records,
     start_testcase_run_record,
     _extract_fail_context,
 )
@@ -365,6 +369,56 @@ class FinalizeRunRecordReportTests(TestCase):
             expected_result="出现弹窗",
             creator=self.user,
         )
+
+    def test_stale_ui_script_runs_are_closed_but_fallback_and_recent_runs_are_preserved(self):
+        stale_script = start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-stale-script-only",
+            execution_mode="script_only",
+        )
+        stale_hybrid = start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-stale-hybrid-script",
+            execution_mode="hybrid",
+            ui_test_case_id=654,
+        )
+        fallback = start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-active-agent-fallback",
+            execution_mode="hybrid",
+            ui_test_case_id=654,
+        )
+        fallback.actual_execution_path = "agent_fallback"
+        fallback.save(update_fields=["actual_execution_path"])
+        recent_script = start_testcase_run_record(
+            testcase_id=self.testcase.id,
+            user_id=self.user.id,
+            session_id="sess-recent-script-only",
+            execution_mode="script_only",
+        )
+
+        stale_time = timezone.now() - timedelta(hours=1)
+        TestCaseRunRecord.objects.filter(
+            pk__in=[stale_script.pk, stale_hybrid.pk]
+        ).update(started_at=stale_time)
+
+        self.assertEqual(reconcile_stale_bound_ui_run_records(), 2)
+
+        stale_script.refresh_from_db()
+        stale_hybrid.refresh_from_db()
+        fallback.refresh_from_db()
+        recent_script.refresh_from_db()
+        self.assertEqual(stale_script.status, "error")
+        self.assertEqual(stale_hybrid.status, "error")
+        self.assertIsNotNone(stale_script.completed_at)
+        self.assertIn("执行超时或执行进程中断", stale_script.summary)
+        self.assertEqual(fallback.status, "running")
+        self.assertIsNone(fallback.completed_at)
+        self.assertEqual(recent_script.status, "running")
+        self.assertIsNone(recent_script.completed_at)
 
     def test_finalize_injects_report_when_assistant_text_is_empty(self):
         start_testcase_run_record(

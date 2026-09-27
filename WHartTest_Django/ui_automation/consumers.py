@@ -41,8 +41,9 @@ class SocketUserManager:
         logger.info(f"Web用户连接: {user_id}, 当前连接数: {len(cls._web_users)}")
     
     @classmethod
-    def remove_web_user(cls, user_id: str):
-        if user_id in cls._web_users:
+    def remove_web_user(cls, user_id: str, consumer: Optional['UiAutomationConsumer'] = None):
+        current = cls._web_users.get(user_id)
+        if current is not None and (consumer is None or current is consumer):
             del cls._web_users[user_id]
             logger.info(f"Web用户断开: {user_id}, 当前连接数: {len(cls._web_users)}")
     
@@ -103,6 +104,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         super().__init__(*args, **kwargs)
         self.user_id: Optional[str] = None
         self.is_actuator: bool = False
+        self._web_authenticated: bool = False
         self.group_name: str = 'ui_automation'
         self.actuator_info: dict = {}  # 执行器信息
         self.language: str = 'zh-Hans'
@@ -165,13 +167,13 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             SocketUserManager.add_actuator(self.user_id, self)
         else:
             self.is_actuator = False
-            # 从用户认证获取ID
+            # 若部署时使用了 session middleware，复用已认证身份；JWT 登录场景
+            # 由前端在连接建立后发送一次认证握手，避免把 token 放在 URL 中。
             user = self.scope.get('user')
-            if user and hasattr(user, 'username'):
+            if user and getattr(user, 'is_authenticated', False) and hasattr(user, 'username'):
                 self.user_id = user.username
-            else:
-                self.user_id = f"web_{id(self)}"
-            SocketUserManager.add_web_user(self.user_id, self)
+                self._web_authenticated = True
+                SocketUserManager.add_web_user(self.user_id, self)
         
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
@@ -214,7 +216,8 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 logger.warning(f"clear leases on disconnect failed: {exc}")
             SocketUserManager.remove_actuator(self.user_id)
         else:
-            SocketUserManager.remove_web_user(self.user_id)
+            if self.user_id:
+                SocketUserManager.remove_web_user(self.user_id, self)
         
         logger.info(f"{'执行器' if self.is_actuator else 'Web'}断开: {self.user_id}, code: {close_code}")
     
@@ -226,6 +229,32 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         try:
             data = json.loads(text_data)
             socket_data = SocketDataModel(**data)
+
+            if (
+                not self.is_actuator
+                and socket_data.data
+                and socket_data.data.func_name == 'ui_authenticate'
+            ):
+                if self._web_authenticated:
+                    # Also acknowledge connections authenticated by optional
+                    # ASGI middleware, since the frontend always sends a JWT
+                    # handshake and waits for this confirmation.
+                    await self.send_json(SocketDataModel(
+                        code=ResponseCode.SUCCESS,
+                        msg='ui_authenticated',
+                        user=self.user_id,
+                    ))
+                else:
+                    await self._authenticate_web_user(socket_data.data.func_args)
+                return
+
+            if not self.is_actuator and not self._web_authenticated:
+                await self.send_json(SocketDataModel(
+                    code=ResponseCode.ERROR,
+                    msg='WebSocket 尚未完成登录认证',
+                ))
+                await self.close(code=4401)
+                return
             
             # 如果有func_name，进行路由处理
             if socket_data.data and socket_data.data.func_name:
@@ -243,6 +272,43 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 code=ResponseCode.ERROR,
                 msg=self._localize(f"处理错误: {str(e)}")
             ))
+
+    async def _authenticate_web_user(self, args: dict):
+        """通过与 HTTP API 相同的 JWT 验证方式绑定 WebSocket 登录用户。"""
+        token = str((args or {}).get('access_token') or '').strip()
+        if not token:
+            await self.send_json(SocketDataModel(
+                code=ResponseCode.ERROR,
+                msg='WebSocket 登录凭证缺失',
+            ))
+            await self.close(code=4401)
+            return
+
+        try:
+            from rest_framework_simplejwt.authentication import JWTAuthentication
+
+            jwt_auth = JWTAuthentication()
+            validated_token = await sync_to_async(jwt_auth.get_validated_token)(token)
+            user = await sync_to_async(jwt_auth.get_user)(validated_token)
+            if not getattr(user, 'is_active', False):
+                raise ValueError('用户已停用')
+        except Exception as exc:
+            logger.info('UI WebSocket JWT 认证失败: %s', type(exc).__name__)
+            await self.send_json(SocketDataModel(
+                code=ResponseCode.ERROR,
+                msg='WebSocket 登录已失效，请重新登录',
+            ))
+            await self.close(code=4401)
+            return
+
+        self.user_id = user.username
+        self._web_authenticated = True
+        SocketUserManager.add_web_user(self.user_id, self)
+        await self.send_json(SocketDataModel(
+            code=ResponseCode.SUCCESS,
+            msg='ui_authenticated',
+            user=self.user_id,
+        ))
     
     async def route_message(self, socket_data: SocketDataModel):
         """路由消息到对应处理器"""

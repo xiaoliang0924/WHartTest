@@ -140,10 +140,9 @@ def _decode_sse_payload(event: str) -> Optional[Dict[str, Any]]:
 
 def _testcase_bound_ui_timeout_seconds() -> float:
     """Total wall-clock limit for a bound UI case (individual browser calls also have limits)."""
-    try:
-        return max(30.0, float(os.environ.get("TESTCASE_BOUND_UI_TIMEOUT_SECONDS", "600")))
-    except (TypeError, ValueError):
-        return 600.0
+    from testcases.run_record_service import testcase_bound_ui_timeout_seconds
+
+    return testcase_bound_ui_timeout_seconds()
 
 
 async def _persist_helper_step_to_checkpoint(

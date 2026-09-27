@@ -75,8 +75,12 @@ type MessageHandler = (data: SocketDataModel) => void
 class UiWebSocketService {
   private ws: WebSocket | null = null
   private reconnectAttempts = 0
-  private maxReconnectAttempts = 5
   private reconnectDelay = 3000
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private connectPromise: Promise<void> | null = null
+  private rejectPendingConnect: ((error: Error) => void) | null = null
+  private manuallyDisconnected = false
+  private authenticationRejected = false
   private handlers: Map<string, MessageHandler[]> = new Map()
   
   public connected = ref(false)
@@ -93,41 +97,116 @@ class UiWebSocketService {
   
   /** 连接 WebSocket */
   connect(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        resolve()
+    if (this.ws?.readyState === WebSocket.OPEN && this.connected.value) {
+      return Promise.resolve()
+    }
+    if (this.connectPromise) {
+      return this.connectPromise
+    }
+
+    this.manuallyDisconnected = false
+    this.authenticationRejected = false
+    this.connectPromise = new Promise<void>((resolve, reject) => {
+      let settled = false
+      let connectTimeout: ReturnType<typeof setTimeout> | null = null
+      const settle = (error?: Error) => {
+        if (settled) return
+        settled = true
+        if (connectTimeout) {
+          clearTimeout(connectTimeout)
+          connectTimeout = null
+        }
+        this.rejectPendingConnect = null
+        if (error) reject(error)
+        else resolve()
+      }
+      this.rejectPendingConnect = (error) => settle(error)
+
+      if (this.ws?.readyState === WebSocket.CONNECTING) {
+        // 同一连接的并发调用共用 connectPromise，不重复创建 socket。
         return
       }
-      
+
       const url = this.getWsUrl()
       console.log('[WebSocket] Connecting to:', url)
-      
-      this.ws = new WebSocket(url)
-      
-      this.ws.onopen = () => {
-        console.log('[WebSocket] Connected')
-        this.connected.value = true
-        this.error.value = null
-        this.reconnectAttempts = 0
-        resolve()
+
+      const socket = new WebSocket(url)
+      this.ws = socket
+      connectTimeout = setTimeout(() => {
+        const error = new Error('UI 自动化连接认证超时，正在重连')
+        this.error.value = error
+        settle(error)
+        socket.close()
+      }, 15000)
+
+      socket.onopen = () => {
+        const authStore = useAuthStore()
+        const accessToken = authStore.accessToken || localStorage.getItem('auth-accessToken')
+        if (!accessToken) {
+          this.authenticationRejected = true
+          const error = new Error('登录状态已失效，请重新登录后再试')
+          this.error.value = error
+          settle(error)
+          socket.close(4401, 'missing authentication token')
+          return
+        }
+        socket.send(JSON.stringify({
+          code: 200,
+          msg: 'authenticate',
+          is_notice: 1,
+          data: {
+            func_name: 'ui_authenticate',
+            func_args: { access_token: accessToken },
+          },
+        }))
       }
-      
-      this.ws.onclose = (event) => {
+
+      socket.onclose = (event) => {
         console.log('[WebSocket] Disconnected:', event.code, event.reason)
         this.connected.value = false
-        this.attemptReconnect()
+        if (!settled) {
+          settle(new Error('UI 自动化连接认证失败，请重新登录后重试'))
+        }
+        if (!this.manuallyDisconnected && !this.authenticationRejected) {
+          this.attemptReconnect()
+        }
       }
-      
-      this.ws.onerror = (event) => {
+
+      socket.onerror = (event) => {
         console.error('[WebSocket] Error:', event)
-        this.error.value = new Error('WebSocket connection error')
-        reject(this.error.value)
+        const error = new Error('WebSocket connection error')
+        this.error.value = error
+        settle(error)
       }
-      
-      this.ws.onmessage = (event) => {
+
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data) as SocketDataModel
+          if (payload.msg === 'ui_authenticated') {
+            this.connected.value = true
+            this.error.value = null
+            this.reconnectAttempts = 0
+            settle()
+            return
+          }
+          if (!settled && payload.code >= 400) {
+            const error = new Error(payload.msg || 'UI 自动化连接认证失败')
+            this.error.value = error
+            this.authenticationRejected = true
+            settle(error)
+            socket.close(4401, 'authentication rejected')
+            return
+          }
+        } catch {
+          // 普通消息统一交给下面的协议处理器解析。
+        }
         this.handleMessage(event.data)
       }
+    }).finally(() => {
+      this.connectPromise = null
     })
+
+    return this.connectPromise
   }
   
   /** 处理收到的消息 */
@@ -154,17 +233,18 @@ class UiWebSocketService {
   
   /** 重连逻辑 */
   private attemptReconnect() {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('[WebSocket] Max reconnect attempts reached')
+    if (this.reconnectTimer || this.manuallyDisconnected || this.authenticationRejected) {
       return
     }
     
     this.reconnectAttempts++
-    console.log(`[WebSocket] Reconnecting... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`)
+    const delay = Math.min(this.reconnectDelay * (2 ** Math.min(this.reconnectAttempts - 1, 4)), 30000)
+    console.log(`[WebSocket] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`)
     
-    setTimeout(() => {
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
       this.connect().catch(console.error)
-    }, this.reconnectDelay)
+    }, delay)
   }
   
   /** 发送消息 */
@@ -209,7 +289,14 @@ class UiWebSocketService {
   
   /** 断开连接 */
   disconnect() {
+    this.manuallyDisconnected = true
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    this.rejectPendingConnect?.(new Error('WebSocket connection closed'))
     if (this.ws) {
+      this.ws.onclose = null
       this.ws.close()
       this.ws = null
     }
