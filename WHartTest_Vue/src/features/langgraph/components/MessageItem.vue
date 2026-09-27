@@ -757,6 +757,10 @@ const formattedContent = computed(() => {
       processedContent = formattedToolMessageContent.value;
     }
 
+    // 原始执行日志常用纯等号行作分隔符。Markdown 会把这类行识别成
+    // Setext 标题下划线，导致前一行被渲染成超大标题；改为水平分隔线。
+    processedContent = processedContent.replace(/^[ \t]*={3,}[ \t]*$/gm, '***');
+
     // 对于AI消息，处理Markdown渲染
     if (props.message.messageType === 'ai') {
       // 如果是流式输出或者已完成的AI消息，都需要处理代码块
