@@ -740,6 +740,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 'duration': duration,
                 'element_found': (entry.get('status') == 'success'),
                 'screenshot': entry.get('screenshot'),
+                'page_url': entry.get('page_url') or '',
+                'page_title': entry.get('page_title') or '',
+                'ready_state': entry.get('ready_state') or '',
+                'expected': entry.get('expected') or '',
             })
         return out
 
@@ -1109,6 +1113,11 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                                 session.request, 'inspect_page', {}, 30,
                             )
                             inspect_state = inspect_resp.get('state') or {}
+                            failed_entry = next(
+                                (entry for entry in reversed(all_step_results)
+                                 if entry.get('status') in ('failed', 'fail', 3, False)),
+                                all_step_results[-1] if all_step_results else {},
+                            )
                             exploration_evidence = {
                                 'status': 'captured',
                                 'failed_group': group_index,
@@ -1119,6 +1128,12 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                                 'interactive_elements': inspect_state.get('interactive_elements') or [],
                                 'screenshot': inspect_state.get('screenshot') or '',
                                 'captured_at': inspect_state.get('captured_at') or '',
+                                'failed_step': {
+                                    'ope_key': failed_entry.get('ope_key') or '',
+                                    'expected': failed_entry.get('expected') or '',
+                                    'page_url': failed_entry.get('page_url') or '',
+                                    'page_title': failed_entry.get('page_title') or '',
+                                },
                             }
                             logger.info(
                                 '[recorder-exec] 失败现场探索完成 group=%s url=%s elements=%s',
@@ -1189,6 +1204,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                         'duration': step_duration,
                         'element_found': (entry.get('status') == 'success'),
                         'screenshot': entry.get('screenshot'),
+                        'page_url': entry.get('page_url') or '',
+                        'page_title': entry.get('page_title') or '',
+                        'ready_state': entry.get('ready_state') or '',
+                        'expected': entry.get('expected') or '',
                     })
             if kind == 'page_steps':
                 result_args = {

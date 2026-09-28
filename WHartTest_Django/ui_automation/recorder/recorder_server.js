@@ -1597,6 +1597,30 @@ function _applyLocatorIndex(loc, index) {
   return loc;
 }
 
+/**
+ * 同一个语义定位器可能命中多个节点（例如折叠菜单中的隐藏副本）。
+ * Playwright 对多节点 locator 的 wait/click 默认可能一直盯住第一个隐藏节点，
+ * 因此在不改变定位表达式的前提下，先选择当前可见候选。
+ */
+async function _pickVisibleCandidate(locator, timeout = 5000) {
+  if (!locator) return locator;
+  let count = 0;
+  try { count = await locator.count(); } catch (_) { return locator; }
+  if (count <= 1) return locator;
+  const deadline = Date.now() + Math.max(500, Number(timeout) || 5000);
+  do {
+    for (let index = 0; index < count; index++) {
+      const candidate = locator.nth(index);
+      try {
+        if (await candidate.isVisible()) return candidate;
+      } catch (_) {}
+    }
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } while (true);
+  return locator;
+}
+
 function buildLocator(page, selector) {
   if (!selector) return null;
   // iframe 元素：按 ' >> ' 链逐层 frameLocator 下钻（与执行器一致）
@@ -1650,6 +1674,7 @@ async function resolveLocatorWithFallback(page, selector, log) {
     let cand = _applyLocatorIndex(_locatorFromParts(container, t, v), idx);
     try {
       // 首选等待元素可见，备用定位器用更短超时快速切换（同执行器 5s/2s）
+      cand = await _pickVisibleCandidate(cand, i === 0 ? 5000 : 2000);
       await cand.waitFor({ state: 'visible', timeout: i === 0 ? 5000 : 2000 });
       locator = cand;
       usedIndex = i;
@@ -1691,6 +1716,95 @@ async function gotoWithRetry(page, url, attempts = 2) {
   throw lastErr;
 }
 
+function _normalizePageUrl(value, mode = 'exact') {
+  const url = new URL(String(value || ''));
+  url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+  if (mode === 'path') {
+    return `${url.origin}${url.pathname}`;
+  }
+  return url.href;
+}
+
+async function _pageState(page) {
+  let url = '';
+  let title = '';
+  let readyState = '';
+  try { url = page.url(); } catch (_) {}
+  try { title = String(await page.title() || '').slice(0, 300); } catch (_) {}
+  try {
+    readyState = await page.evaluate(() => document.readyState);
+  } catch (_) {}
+  return { url, title, readyState };
+}
+
+/**
+ * 页面级等待统一入口。
+ *
+ * 旧实现把所有页面等待都暴露成裸 page.waitForFunction 超时，诊断端无法
+ * 区分“仍在加载”“已跳到登录页”以及“URL 查询参数不同”。这里保留 SPA
+ * 轮询能力，但把等待模式和实际页面状态一起返回，供报告和 AI 修复使用。
+ */
+async function waitForPageCondition(page, condition, expected, options = {}) {
+  const timeout = Math.max(1000, Math.min(60000, Number(options.timeout || 10) * 1000));
+  const mode = String(options.mode || 'exact');
+  try {
+    if (condition === 'url') {
+      const target = _normalizePageUrl(expected, mode);
+      await page.waitForFunction(
+        ({ targetUrl, targetMode }) => {
+          try {
+            const current = new URL(window.location.href);
+            current.pathname = current.pathname.replace(/\/+$/, '') || '/';
+            const currentValue = targetMode === 'path'
+              ? `${current.origin}${current.pathname}`
+              : current.href;
+            return currentValue === targetUrl;
+          } catch (_) {
+            return false;
+          }
+        },
+        { targetUrl: target, targetMode: mode },
+        { timeout },
+      );
+      return;
+    }
+    if (condition === 'title') {
+      const titleMode = mode === 'contains' ? 'contains' : 'exact';
+      await page.waitForFunction(
+        ({ targetTitle, targetMode }) => targetMode === 'contains'
+          ? document.title.includes(targetTitle)
+          : document.title === targetTitle,
+        { targetTitle: String(expected || ''), targetMode: titleMode },
+        { timeout },
+      );
+      return;
+    }
+    throw new Error(`不支持的页面等待条件: ${condition}`);
+  } catch (error) {
+    const actual = await _pageState(page);
+    const detail = condition === 'url'
+      ? `预期URL=${String(expected || '')}（${mode}），实际URL=${actual.url || '未知'}`
+      : `预期标题=${String(expected || '')}（${mode}），实际标题=${actual.title || '未知'}`;
+    const wrapped = new Error(`页面条件等待超时：${detail}；readyState=${actual.readyState || '未知'}；${error.message || error}`);
+    wrapped.code = 'PAGE_CONDITION_TIMEOUT';
+    wrapped.condition = condition;
+    wrapped.expected = String(expected || '');
+    wrapped.match = mode;
+    wrapped.actual = actual;
+    throw wrapped;
+  }
+}
+
+async function waitForVisibleElement(page, selector, timeoutSeconds = 10) {
+  const resolved = await resolveLocatorWithFallback(page, selector, (message) => {
+    console.log('[run_steps] ' + message);
+  });
+  const locator = resolved ? resolved.locator : null;
+  if (!locator) throw new Error('等待可见元素缺少定位器');
+  const timeout = Math.max(1000, Math.min(60000, Number(timeoutSeconds || 10) * 1000));
+  await locator.waitFor({ state: 'visible', timeout });
+}
+
 /** 执行一步平台步骤（ope_key 词汇表与执行器对齐），返回错误信息或 null */
 async function runOneStep(page, step) {
   const opeKey = String(step.ope_key || '');
@@ -1714,39 +1828,37 @@ async function runOneStep(page, step) {
     return null;
   }
 
+  if (opeKey === 'wait_for_ready') {
+    const timeout = Math.max(1000, Math.min(60000, Number(opeValue.timeout || 10) * 1000));
+    await page.waitForLoadState('domcontentloaded', { timeout });
+    await page.waitForFunction(() => document.readyState !== 'loading', { timeout });
+    return null;
+  }
+
+  if (opeKey === 'wait_for_visible') {
+    await waitForVisibleElement(page, step.element || step.selector, opeValue.timeout || 10);
+    return null;
+  }
+
   // 页面级断言没有元素选择器，必须在解析 locator 之前执行。
   // 旧逻辑会对 null locator 调 waitFor，导致 assert_url/title 抛异常。
   if (opeKey === 'assert_url') {
     const expectedUrl = String(opeValue.expected || opeValue.value || inputValue || '');
     if (!expectedUrl) return 'URL 断言缺少期望值';
-    const assertionTimeout = Math.max(1000, Math.min(60000, Number(opeValue.timeout || 10) * 1000));
-    // SPA 的 history.pushState 路由切换不会触发完整页面 load；waitForURL
-    // 默认还等待 load，因此即便地址栏已到目标路由也会误报超时。直接轮询
-    // location.href，只验证 URL，不依赖网络导航或 load 事件。
     const targetUrl = new URL(expectedUrl, page.url()).href;
-    await page.waitForFunction(
-      (target) => {
-        const normalize = (value) => {
-          const url = new URL(value);
-          url.pathname = url.pathname.replace(/\/+$/, '') || '/';
-          return url.href;
-        };
-        return normalize(window.location.href) === normalize(target);
-      },
-      targetUrl,
-      { timeout: assertionTimeout },
-    );
+    await waitForPageCondition(page, 'url', targetUrl, {
+      timeout: opeValue.timeout || 10,
+      mode: opeValue.match || 'exact',
+    });
     return null;
   }
   if (opeKey === 'assert_title') {
     const expectedTitle = String(opeValue.expected || opeValue.value || inputValue || '');
     if (!expectedTitle) return '标题断言缺少期望值';
-    const assertionTimeout = Math.max(1000, Math.min(60000, Number(opeValue.timeout || 10) * 1000));
-    await page.waitForFunction(
-      (title) => document.title === title,
-      expectedTitle,
-      { timeout: assertionTimeout },
-    );
+    await waitForPageCondition(page, 'title', expectedTitle, {
+      timeout: opeValue.timeout || 10,
+      mode: opeValue.match || 'exact',
+    });
     return null;
   }
 
@@ -1955,6 +2067,13 @@ async function cmdRunSteps(params) {
           errorMsg = err;
           resultEntry.status = 'failed';
           resultEntry.message = String(err).slice(0, 300);
+          const pageState = await _pageState(state.page);
+          resultEntry.page_url = pageState.url;
+          resultEntry.page_title = pageState.title;
+          resultEntry.ready_state = pageState.readyState;
+          resultEntry.expected = stepInfo.ope_value && (
+            stepInfo.ope_value.expected || stepInfo.ope_value.value || stepInfo.ope_value.url || ''
+          );
           stepResults.push(resultEntry);
           break;
         }
@@ -1968,6 +2087,13 @@ async function cmdRunSteps(params) {
         errorMsg = '第 ' + (i + 1) + ' 步执行失败: ' + (e && e.message ? e.message : String(e));
         resultEntry.status = 'failed';
         resultEntry.message = errorMsg.slice(0, 300);
+        const pageState = await _pageState(state.page);
+        resultEntry.page_url = pageState.url;
+        resultEntry.page_title = pageState.title;
+        resultEntry.ready_state = pageState.readyState;
+        resultEntry.expected = stepInfo.ope_value && (
+          stepInfo.ope_value.expected || stepInfo.ope_value.value || stepInfo.ope_value.url || ''
+        );
         resultEntry.duration = (Date.now() - stepStart) / 1000;
         stepResults.push(resultEntry);
         break;

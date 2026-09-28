@@ -4,6 +4,8 @@
     {'type': 'click'|'fill'|'check'|'uncheck'|'press', 'selector': {...}}
     {'type': 'goto', 'url': '...'}
     {'type': 'assert', 'mode': 'visible'|'contain_text'|'enabled'|'url', 'selector'?, 'value'?}
+    {'type': 'wait_for_visible', 'selector': {...}, 'timeout'?: 10}
+    {'type': 'wait_for_ready', 'timeout'?: 10}
 
 元素按 (page, locator_type, locator_value) 复用（页面内同一选择器不重复建元素）；
 步骤明细追加到目标页面步骤末尾（step_sort 续排），操作类型与执行器
@@ -249,6 +251,47 @@ def apply_recorded_actions(
             steps_created += 1
             continue
 
+        if action_type == 'wait_for_ready':
+            try:
+                timeout = max(1, min(60, int(float(action.get('timeout') or 10))))
+            except (TypeError, ValueError):
+                timeout = 10
+            UiPageStepsDetailed.objects.create(
+                page_step=page_step,
+                step_type=STEP_TYPE_ELEMENT,
+                ope_key='wait_for_ready',
+                ope_value={'timeout': timeout},
+                step_sort=next_sort,
+            )
+            next_sort += 1
+            steps_created += 1
+            continue
+
+        if action_type == 'wait_for_visible':
+            selector = action.get('selector') or {}
+            element, created = _get_or_create_element(
+                page=page, user=user, action_type='wait_for_visible', selector=selector,
+            )
+            if created:
+                elements_created += 1
+            elif element is not None:
+                elements_updated += 1
+            try:
+                timeout = max(1, min(60, int(float(action.get('timeout') or 10))))
+            except (TypeError, ValueError):
+                timeout = 10
+            UiPageStepsDetailed.objects.create(
+                page_step=page_step,
+                step_type=STEP_TYPE_ELEMENT,
+                element=element,
+                ope_key='wait_for_visible',
+                ope_value={'timeout': timeout},
+                step_sort=next_sort,
+            )
+            next_sort += 1
+            steps_created += 1
+            continue
+
         if action_type == 'upload':
             selector = action.get('selector') or {}
             element, created = _get_or_create_element(
@@ -296,6 +339,15 @@ def apply_recorded_actions(
             mode = str(action.get('mode') or 'visible')
             ope_key = _ASSERT_KEY.get(mode, 'assert_visible')
             ope_value = {'expected': str(action.get('value') or '')} if action.get('value') else {}
+            if mode in {'url', 'title'}:
+                match = str(action.get('match') or '').strip()
+                if match in {'exact', 'path', 'contains'}:
+                    ope_value['match'] = match
+                if action.get('timeout') is not None:
+                    try:
+                        ope_value['timeout'] = max(1, min(60, int(float(action.get('timeout')))))
+                    except (TypeError, ValueError):
+                        pass
             selector = action.get('selector') or {}
             element, created = _get_or_create_element(
                 page=page, user=user, action_type='assert', selector=selector,
@@ -353,4 +405,3 @@ def apply_recorded_actions(
         'steps_created': steps_created,
         'actions_count': actions_count,
     }
-

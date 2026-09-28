@@ -35,12 +35,14 @@ DIAGNOSIS_SYSTEM_PROMPT = """你是一名资深自动化测试架构师与 AI �
   },
   "healing_suggestion": {
     "can_self_heal": true,
+    "repair_type": "locator" | "url_path" | "wait_for_visible" | "none",
     "element_id": null,
     "element_name": "",
     "current_locator_type": "",
     "current_locator_value": "",
     "suggested_locator_type": "xpath" | "css" | "text" | "role" | "test_id" | "id",
     "suggested_locator_value": "推荐的新定位表达式",
+    "wait_match": "exact" | "path" | "contains" | "none",
     "explanation": "自愈定位推荐理由及替换建议"
   },
   "defect_report": {
@@ -91,12 +93,64 @@ def _fallback_rule_diagnosis(
     root_cause_label = "执行异常"
     summary = "UI 自动化执行未达到预期"
     can_self_heal = False
+    repair_type = "none"
+    wait_match = "none"
+    operation_value = {}
+    try:
+        operation_value = json.loads(step_info.get("operation_value") or "{}")
+    except (TypeError, ValueError):
+        operation_value = {}
 
-    if any(k in error_msg.lower() for k in ["timeout", "waiting for locator", "element not found", "no element", "locator.click"]):
+    error_lower = error_msg.lower()
+    exploration = failure_info.get("exploration") or {}
+    actual_url = str(
+        (failure_info.get("failure_step") or {}).get("actual_url")
+        or exploration.get("page_url")
+        or ""
+    )
+    expected_value = str(
+        operation_value.get("expected")
+        or operation_value.get("value")
+        or (failure_info.get("failure_step") or {}).get("expected")
+        or ""
+    )
+
+    if "waitforfunction" in error_lower or "页面条件等待超时" in error_msg:
+        # Only auto-relax a URL assertion when the observed page is the same
+        # route and differs solely by query/hash. A redirect to login or an
+        # unrelated route must remain a failure, not be hidden by a looser wait.
+        try:
+            expected_url = __import__("urllib.parse", fromlist=["urlsplit"]).urlsplit(expected_value)
+            actual_url_parts = __import__("urllib.parse", fromlist=["urlsplit"]).urlsplit(actual_url)
+            same_route = (
+                expected_url.scheme.lower() == actual_url_parts.scheme.lower()
+                and expected_url.netloc.lower() == actual_url_parts.netloc.lower()
+                and (expected_url.path.rstrip("/") or "/") == (actual_url_parts.path.rstrip("/") or "/")
+                and bool(expected_url.path)
+            )
+        except Exception:
+            same_route = False
+        if same_route and step_info.get("operation_type") == "assert_url":
+            root_cause_type = "SCRIPT_DEFECT"
+            root_cause_label = "URL等待条件过严"
+            summary = "实际页面已到达相同路由，但动态查询参数或片段导致精确URL等待未满足"
+            can_self_heal = True
+            repair_type = "url_path"
+            wait_match = "path"
+        elif "/login" in actual_url.lower() and "/login" not in expected_value.lower():
+            root_cause_type = "ENV_ISSUE"
+            root_cause_label = "登录态或会话未恢复"
+            summary = "失败时页面仍处于登录页，不能通过放宽等待条件掩盖登录态问题"
+        else:
+            root_cause_type = "UNKNOWN"
+            root_cause_label = "页面状态未达到预期"
+            summary = "页面级等待条件未满足，但当前证据不足以安全修改业务期望"
+    elif any(k in error_lower for k in ["timeout", "waiting for locator", "element not found", "no element", "locator.click"]):
         root_cause_type = "SCRIPT_DEFECT"
         root_cause_label = "元素定位失效/超时"
         summary = f"步骤「{step_info.get('element_name', '目标元素')}」定位超时，页面结构或元素定位表达式可能已发生变更"
         can_self_heal = True
+        repair_type = "locator"
     elif any(k in error_msg.lower() for k in ["assertion", "expect", "assert", "not equal", "mismatch"]):
         root_cause_type = "BUG"
         root_cause_label = "业务断言不符 (疑似Bug)"
@@ -121,12 +175,14 @@ def _fallback_rule_diagnosis(
         },
         "healing_suggestion": {
             "can_self_heal": can_self_heal,
+            "repair_type": repair_type,
             "element_id": step_info.get("element_id"),
             "element_name": step_info.get("element_name", ""),
             "current_locator_type": step_info.get("locator_type", "xpath"),
             "current_locator_value": step_info.get("locator_value", ""),
             "suggested_locator_type": "xpath",
             "suggested_locator_value": step_info.get("locator_value", ""),
+            "wait_match": wait_match,
             "explanation": "建议检查页面对应元素的 XPath/CSS 定位或使用文本/role 定位替代。",
         },
         "defect_report": {
@@ -240,6 +296,7 @@ def extract_failure_context(
 
     operation_hints = {
         "goto", "wait", "click", "fill", "check", "uncheck", "press",
+        "wait_for_visible", "wait_for_ready",
         "assert_visible", "assert_hidden", "assert_enabled", "assert_disabled",
         "assert_checked", "assert_text", "assert_contain_text", "assert_value",
         "assert_count", "assert_url", "assert_title", "upload",
@@ -338,6 +395,10 @@ def extract_failure_context(
             "locator_value": locator_value,
             "operation_type": operation_type,
             "operation_value": json.dumps(ope_value, ensure_ascii=False) if ope_value else "",
+            "actual_url": str(failed_step_data.get("page_url") or "") if failed_step_data else "",
+            "actual_title": str(failed_step_data.get("page_title") or "") if failed_step_data else "",
+            "ready_state": str(failed_step_data.get("ready_state") or "") if failed_step_data else "",
+            "expected": str(failed_step_data.get("expected") or "") if failed_step_data else "",
         },
     }
 
@@ -400,6 +461,10 @@ UI用例名称: {testcase.ui_test_case.name if testcase.ui_test_case else '无'}
 失败页面/元素: {failure_info['failure_step']['page_name'] or '未知页面'} -> {failure_info['failure_step']['element_name'] or '未知元素'} (元素ID: {failure_info['failure_step']['element_id'] or '空'})
 当前定位配置: [{failure_info['failure_step']['locator_type'] or '无'}] {failure_info['failure_step']['locator_value'] or '无'}
 操作方法及参数: {failure_info['failure_step']['operation_type']} {failure_info['failure_step']['operation_value']}
+失败时实际 URL: {failure_info['failure_step'].get('actual_url') or exploration.get('page_url') or '未知'}
+失败时实际标题: {failure_info['failure_step'].get('actual_title') or exploration.get('title') or '未知'}
+页面 readyState: {failure_info['failure_step'].get('ready_state') or '未知'}
+步骤预期值: {failure_info['failure_step'].get('expected') or '未知'}
 
 【真实错误堆栈 / Playwright 报错信息】
 {failure_info['error_message'] or '无详细报错'}
@@ -431,6 +496,10 @@ UI用例名称: {testcase.ui_test_case.name if testcase.ui_test_case else '无'}
 
 请针对上述失败现场、错误堆栈和页面 DOM 快照，给出准确的失败归因（是元素定位失效/资产配置错位、真实业务Bug还是环境网络异常），并给出定位自愈建议和缺陷报告建议。
 特别提示：如果错误是因为在非输入框元素上执行了输入操作（例如对按钮进行了 fill），或者定位表达式失效，请结合页面快照给出正确的输入框定位自愈建议。
+如果错误是 page.waitForFunction 或“页面条件等待超时”，必须先比较预期 URL/标题与失败时实际 URL/标题：
+只有在 URL 的 origin+pathname 完全一致、差异仅为 query/hash 时，才允许 repair_type=url_path、wait_match=path；
+如果实际页面是登录页、错误页或其他业务路由，必须返回 can_self_heal=false，不能通过放宽等待条件掩盖问题。
+如果页面上已有明确可见目标元素，优先返回 repair_type=wait_for_visible，并提供该元素的 element_id 或可靠定位器。
 """
 
     diagnosis_result = None
@@ -460,6 +529,18 @@ UI用例名称: {testcase.ui_test_case.name if testcase.ui_test_case else '无'}
 
     diagnosis_result["diagnosed_at"] = timezone.now().isoformat()
     diagnosis_result["ui_execution_record_id"] = ui_record.id if ui_record else None
+    # Keep the machine-collected evidence outside the LLM schema so the safe
+    # repair layer can make decisions from facts, even if the model omits them.
+    diagnosis_result["evidence"] = {
+        "actual_url": (failure_info.get("failure_step") or {}).get("actual_url")
+        or (failure_info.get("exploration") or {}).get("page_url")
+        or "",
+        "actual_title": (failure_info.get("failure_step") or {}).get("actual_title")
+        or (failure_info.get("exploration") or {}).get("title")
+        or "",
+        "expected": (failure_info.get("failure_step") or {}).get("expected") or "",
+        "operation_type": (failure_info.get("failure_step") or {}).get("operation_type") or "",
+    }
 
     return diagnosis_result
 

@@ -24,9 +24,10 @@ MAX_PAYLOAD_BYTES = 200_000
 MAX_STEPS = 80
 MAX_ACTIONS = 500
 SUPPORTED_ACTIONS = {
-    "click", "fill", "check", "uncheck", "press", "goto", "wait", "assert"
+    "click", "fill", "check", "uncheck", "press", "goto", "wait",
+    "wait_for_visible", "wait_for_ready", "assert",
 }
-LOCATOR_ACTIONS = {"click", "fill", "check", "uncheck", "press"}
+LOCATOR_ACTIONS = {"click", "fill", "check", "uncheck", "press", "wait_for_visible"}
 VALID_ASSERTIONS = {
     "visible", "hidden", "enabled", "disabled", "checked", "text",
     "contain_text", "value", "count", "url", "title",
@@ -192,8 +193,26 @@ def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
                 selector = action.get("selector")
                 if not isinstance(selector, dict) or not str(selector.get("locator_value") or "").strip():
                     raise ValueError(f"第 {index} 步的元素断言缺少真实定位器。")
+            if action_type == "assert" and action.get("mode", "visible") in {"url", "title"}:
+                match = str(action.get("match") or "exact")
+                if match not in {"exact", "path", "contains"}:
+                    raise ValueError(f"第 {index} 步的页面断言匹配方式无效。")
             if action_type == "goto" and not str(action.get("url") or "").strip():
                 raise ValueError(f"第 {index} 步的页面跳转缺少观察到的 URL。")
+            if action_type == "wait_for_visible":
+                timeout = action.get("timeout", 10)
+                try:
+                    if not 1 <= int(float(timeout)) <= 60:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    raise ValueError(f"第 {index} 步的可见性等待超时时间无效。")
+            if action_type == "wait_for_ready":
+                timeout = action.get("timeout", 10)
+                try:
+                    if not 1 <= int(float(timeout)) <= 60:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    raise ValueError(f"第 {index} 步的页面就绪等待超时时间无效。")
     if count > MAX_ACTIONS:
         raise ValueError(f"操作过多，最多支持 {MAX_ACTIONS} 个。")
     return payload

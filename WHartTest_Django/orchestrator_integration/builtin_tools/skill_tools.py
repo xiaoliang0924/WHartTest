@@ -2053,8 +2053,16 @@ def get_skill_tools(
              "locator_value":"实际观察到的定位表达式"}},
              {"type":"goto","url":"实际观察到的 URL"},
              {"type":"wait","seconds":1},
+             {"type":"wait_for_ready","timeout":10},
+             {"type":"wait_for_visible","timeout":10,"selector":
+             {"name":"语义名称","locator_type":"role|text|label|placeholder|test_id|id|name|css|xpath",
+             "locator_value":"实际观察到的可见元素定位表达式"}},
              {"type":"assert","mode":"visible|hidden|enabled|disabled|checked|text|contain_text|value|count|url|title",
-             "selector":{"name":"语义名称","locator_type":"text","locator_value":"实际定位"},"value":"期望值"}]}]}。
+             "selector":{"name":"语义名称","locator_type":"text","locator_value":"实际定位"},
+             "value":"期望值","match":"exact|path|contains","timeout":10}]}]}。
+
+             页面 URL 断言默认使用 exact；只有观察到同一路由仅 query/hash 动态变化时才使用 match=path。
+             页面加载完成后优先使用 wait_for_ready 或 wait_for_visible，不要用固定 wait 代替页面状态等待。
 
             所有动作和定位器必须来自本次执行观察，不得编造；不要包含密码、令牌或其他秘密。
             只有本工具明确返回“已保存并绑定”及 UI 用例 ID，才可以报告生成成功。

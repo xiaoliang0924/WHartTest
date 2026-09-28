@@ -21,7 +21,7 @@ import os
 import re
 import uuid
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import httpx
 from django.http import StreamingHttpResponse, JsonResponse
@@ -821,10 +821,74 @@ async def _apply_safe_generated_ui_repair(
     unrelated tests.
     """
     suggestion = diagnosis.get("healing_suggestion") or {}
+    repair_type = str(suggestion.get("repair_type") or "locator").strip()
     if diagnosis.get("root_cause_type") != "SCRIPT_DEFECT":
         return {"status": "skipped", "reason": "AI 判断为业务或环境问题，未自动修改用例。"}
     if suggestion.get("can_self_heal") is not True:
         return {"status": "skipped", "reason": "AI 未确认存在安全的自动修复方案。"}
+
+    if repair_type == "url_path":
+        # A URL-path repair is safe only when machine evidence proves that the
+        # route is identical and only query/hash parameters changed. It never
+        # turns a redirect to login or another route into a pass.
+        from ui_automation.models import UiCaseStepsDetailed, UiPageStepsDetailed
+
+        evidence = diagnosis.get("evidence") or {}
+        actual_url = str(evidence.get("actual_url") or "").strip()
+
+        def apply_url_path_repair():
+            from django.db import transaction
+
+            try:
+                actual = urlsplit(actual_url)
+            except Exception:
+                return {"status": "skipped", "reason": "失败现场没有有效的实际 URL，未放宽 URL 断言。"}
+            if not actual.netloc or not actual.path:
+                return {"status": "skipped", "reason": "失败现场 URL 不完整，未放宽 URL 断言。"}
+
+            details = list(UiPageStepsDetailed.objects.filter(
+                page_step__case_usages__test_case_id=ui_test_case_id,
+                ope_key="assert_url",
+            ).distinct().order_by("page_step_id", "step_sort"))
+            if len(details) != 1:
+                return {"status": "skipped", "reason": "无法唯一定位 URL 断言，未自动修改。"}
+            detail = details[0]
+            value = dict(detail.ope_value or {})
+            expected_raw = str(value.get("expected") or value.get("value") or "").strip()
+            if not expected_raw:
+                return {"status": "skipped", "reason": "URL 断言缺少期望值，未自动修改。"}
+            try:
+                expected = urlsplit(expected_raw)
+            except Exception:
+                return {"status": "skipped", "reason": "URL 断言期望值无效，未自动修改。"}
+            expected_path = expected.path.rstrip("/") or "/"
+            actual_path = actual.path.rstrip("/") or "/"
+            if (
+                expected.scheme.lower() != actual.scheme.lower()
+                or expected.netloc.lower() != actual.netloc.lower()
+                or expected_path != actual_path
+            ):
+                return {"status": "skipped", "reason": "实际页面不是同一路由，未通过放宽 URL 条件掩盖页面跳转问题。"}
+            if value.get("match") == "path":
+                return {"status": "skipped", "reason": "URL 已按路由匹配，无需重复修改。"}
+            if UiCaseStepsDetailed.objects.filter(
+                page_step_id=detail.page_step_id,
+            ).exclude(test_case_id=ui_test_case_id).exists():
+                return {"status": "skipped", "reason": "URL 断言所在页面步骤被其他用例复用，未自动修改。"}
+
+            with transaction.atomic():
+                value["match"] = "path"
+                detail.ope_value = value
+                detail.save(update_fields=["ope_value", "updated_at"])
+            return {
+                "status": "applied",
+                "repair_type": "url_path",
+                "old_wait_mode": "exact",
+                "new_wait_mode": "path",
+                "reason": "实际 URL 与期望 URL 的 origin 和 pathname 一致，仅忽略动态 query/hash。",
+            }
+
+        return await sync_to_async(apply_url_path_repair)()
 
     # URL/title assertions keep their expected value immutable.  For a real
     # page transition that is merely slower than the default, allow one small,
@@ -834,12 +898,10 @@ async def _apply_safe_generated_ui_repair(
     operation_type = str(failure_info.get("operation_type") or "").strip()
     error_text = str(failure_info.get("error_message") or "")
     if (
-        suggestion.get("can_self_heal") is True
+        repair_type == "wait_condition"
+        and suggestion.get("can_self_heal") is True
         and "timeout" in error_text.lower()
-        and (
-            operation_type in {"assert_url", "assert_title"}
-            or "waitforfunction" in error_text.lower()
-        )
+        and operation_type in {"assert_url", "assert_title"}
     ):
         from ui_automation.models import UiCaseStepsDetailed, UiPageStepsDetailed
 
@@ -1020,11 +1082,13 @@ async def _repair_generated_ui_case_after_failure(
             "reason": repair.get("reason") or diagnosis.get("summary") or "",
             "root_cause_type": diagnosis.get("root_cause_type"),
             "diagnosed_by": diagnosis.get("diagnosed_by"),
+            "evidence": diagnosis.get("evidence") or {},
         }
         if repair.get("status") == "applied":
             attempt_result.update({
                 "old_locator": repair.get("old_locator"),
                 "new_locator": repair.get("new_locator"),
+                "repair_type": repair.get("repair_type") or (diagnosis.get("healing_suggestion") or {}).get("repair_type"),
             })
             attempts.append(attempt_result)
             current_validation = await _validate_generated_ui_case(
@@ -1180,6 +1244,14 @@ async def _finalize_generated_ui_case(
                 repair_summary = "AI 已完成失败分析，但未找到不会改变业务期望的安全修复方案。"
             else:
                 repair_summary = "未执行自动修复。"
+            if repair_attempts:
+                evidence = repair_attempts[-1].get("evidence") or {}
+                actual_url = str(evidence.get("actual_url") or "").strip()
+                expected = str(evidence.get("expected") or "").strip()
+                if actual_url or expected:
+                    repair_summary += (
+                        f"现场对比：预期={expected or '未记录'}，实际URL={actual_url or '未记录'}。"
+                    )
             note = (
                 "\n\n### UI 自动化用例生成\n"
                 f"已生成但需要修正：UI 自动化用例 #{ui_case_id} 已保存并绑定，但回放验证失败。"
