@@ -592,6 +592,46 @@ class PlaywrightExecutor:
         return locator_map.get(locator_type, lambda: container.locator(locator_value))()
 
     @staticmethod
+    async def _pick_visible_candidate(locator: Any, preferred_index: Optional[int] = None):
+        """Choose a visible match before acting, instead of getting stuck on a hidden duplicate.
+
+        An explicit locator index remains the preference, but it is not allowed
+        to force a click on a hidden duplicate when another matching element is
+        visible. If no candidate becomes visible, return the original preferred
+        candidate so Playwright still produces its normal actionable timeout.
+        """
+        try:
+            count = await locator.count()
+        except Exception:
+            return locator
+        if count <= 1:
+            return locator
+
+        if preferred_index is None:
+            preferred = 0
+        elif isinstance(preferred_index, int) and 0 <= preferred_index < count:
+            preferred = preferred_index
+        else:
+            # Keep an invalid explicit index invalid; do not silently click a
+            # different element than the test author selected.
+            return locator.nth(preferred_index)
+        candidate_order = [preferred] + [index for index in range(count) if index != preferred]
+        for index in candidate_order:
+            candidate = locator.nth(index)
+            try:
+                if await candidate.is_visible():
+                    if index != preferred:
+                        logger.info(
+                            "首选定位项 index=%s 不可见，改用可见的同匹配项 index=%s",
+                            preferred,
+                            index,
+                        )
+                    return candidate
+            except Exception:
+                continue
+        return locator.nth(preferred)
+
+    @staticmethod
     def _first_sql_keyword(sql: str) -> str:
         sql = sql.strip()
         while sql.startswith('--'):
@@ -1061,7 +1101,17 @@ class PlaywrightExecutor:
         if operation in {'assert_url', 'assert_title'}:
             expected = step.input_value or ''
             if operation == 'assert_url':
-                await expect(page).to_have_url(expected)
+                try:
+                    await expect(page).to_have_url(expected)
+                except Exception as exc:
+                    actual_url = ''
+                    try:
+                        actual_url = page.url or ''
+                    except Exception:
+                        pass
+                    raise AssertionError(
+                        f"URL断言失败：期望={expected}，实际={actual_url or '未知'}；详情={exc}"
+                    ) from exc
                 assertion = 'url'
             else:
                 await expect(page).to_have_title(expected)
@@ -1115,12 +1165,13 @@ class PlaywrightExecutor:
             else:
                 locator_cand = self._get_locator(page, l_type, l_value)
                 
-            if l_index is not None:
-                locator_cand = locator_cand.nth(l_index)
-                
             try:
                 # 给备用定位器更短的等待时间，以便快速进行尝试切换
                 wait_timeout = 5000 if idx == 1 else 2000
+                locator_cand = await self._pick_visible_candidate(
+                    locator_cand,
+                    preferred_index=l_index,
+                )
                 await locator_cand.wait_for(state="visible", timeout=wait_timeout)
                 # 成功找到并可见！使用该定位器并跳出循环
                 locator = locator_cand

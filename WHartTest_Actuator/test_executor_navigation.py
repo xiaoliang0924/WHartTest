@@ -102,6 +102,31 @@ class NavigationOptionsTests(unittest.TestCase):
         expect.return_value.to_have_url.assert_awaited_once_with(expected)
         page.locator.assert_not_called()
 
+    def test_page_url_assertion_error_reports_actual_route(self):
+        page = MagicMock()
+        page.locator = MagicMock(side_effect=AssertionError('page assertion must not resolve a locator'))
+        page.url = 'https://example.com/work-order/my-tickets'
+        expected = 'https://example.com/work-order/dashboard'
+
+        from executor import expect
+        expect.return_value.to_have_url = AsyncMock(side_effect=TimeoutError('URL did not match'))
+        step = StepConfig(
+            step_id=4,
+            operation_type='assert_url',
+            locator_type='',
+            locator_value='',
+            input_value=expected,
+        )
+
+        success, message, screenshot = asyncio.run(
+            self.executor._execute_step_with_retry(page, step)
+        )
+
+        self.assertFalse(success)
+        self.assertIn(expected, message)
+        self.assertIn(page.url, message)
+        self.assertIsNone(screenshot)
+
     def test_page_title_assertion_does_not_require_locator(self):
         page = MagicMock()
         page.locator = MagicMock(side_effect=AssertionError('page assertion must not resolve a locator'))
@@ -122,6 +147,36 @@ class NavigationOptionsTests(unittest.TestCase):
         self.assertTrue(success)
         expect.return_value.to_have_title.assert_awaited_once_with(expected)
         page.locator.assert_not_called()
+
+    def test_visible_candidate_skips_hidden_duplicate_even_when_first_is_preferred(self):
+        hidden = MagicMock()
+        hidden.is_visible = AsyncMock(return_value=False)
+        visible = MagicMock()
+        visible.is_visible = AsyncMock(return_value=True)
+        locator = MagicMock()
+        locator.count = AsyncMock(return_value=2)
+        locator.nth = MagicMock(side_effect=[hidden, visible])
+
+        selected = asyncio.run(
+            self.executor._pick_visible_candidate(locator, preferred_index=0)
+        )
+
+        self.assertIs(selected, visible)
+
+    def test_visible_candidate_keeps_preferred_match_when_it_is_visible(self):
+        hidden = MagicMock()
+        hidden.is_visible = AsyncMock(return_value=False)
+        preferred = MagicMock()
+        preferred.is_visible = AsyncMock(return_value=True)
+        locator = MagicMock()
+        locator.count = AsyncMock(return_value=2)
+        locator.nth = MagicMock(side_effect=[preferred])
+
+        selected = asyncio.run(
+            self.executor._pick_visible_candidate(locator, preferred_index=1)
+        )
+
+        self.assertIs(selected, preferred)
 
 
 if __name__ == '__main__':
