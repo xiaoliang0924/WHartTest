@@ -258,6 +258,8 @@ class UserSerializer(serializers.ModelSerializer):
             "username",
             "email",
             "password",
+            "first_name",
+            "last_name",
             "is_staff",
             "is_active",
         )  # 添加管理员相关字段
@@ -269,6 +271,8 @@ class UserSerializer(serializers.ModelSerializer):
             username=validated_data["username"],
             email=validated_data["email"],
             password=validated_data["password"],
+            first_name=validated_data.get("first_name", ""),
+            last_name=validated_data.get("last_name", ""),
             is_staff=validated_data.get("is_staff", False),
             is_active=validated_data.get("is_active", True),
         )
