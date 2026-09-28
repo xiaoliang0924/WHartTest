@@ -34,6 +34,7 @@ const path = require('path');
 const readline = require('readline');
 const Module = require('module');
 const { execSync } = require('child_process');
+const { assertLocatorCount } = require('./step_assertions');
 
 // ---------------------------------------------------------------------------
 // 基础
@@ -1646,7 +1647,7 @@ function buildLocator(page, selector) {
  * 返回最后一个定位器（保持与执行器相同的报错语义）。
  * 返回 { locator, usedIndex }；无任何候选返回 null。
  */
-async function resolveLocatorWithFallback(page, selector, log) {
+async function resolveLocatorWithFallback(page, selector, log, options = {}) {
   if (!selector) return null;
   let container = page;
   if (selector.is_iframe && selector.iframe_locator) {
@@ -1671,8 +1672,20 @@ async function resolveLocatorWithFallback(page, selector, log) {
   let usedIndex = 0;
   for (let i = 0; i < candidates.length; i++) {
     const [t, v, idx] = candidates[i];
-    let cand = _applyLocatorIndex(_locatorFromParts(container, t, v), idx);
+    // Count assertions must target the whole matching collection and allow
+    // zero matches. Applying locator_index or requiring visibility here makes
+    // assert_count(expected=0) impossible and turns it into a visibility wait.
+    let cand = options.countMode
+      ? _locatorFromParts(container, t, v)
+      : _applyLocatorIndex(_locatorFromParts(container, t, v), idx);
     try {
+      if (options.countMode) {
+        await cand.count();
+        locator = cand;
+        usedIndex = i;
+        if (log) log(`数量断言定位器 ${i + 1} [${t}=${v}] 可用`);
+        break;
+      }
       // 首选等待元素可见，备用定位器用更短超时快速切换（同执行器 5s/2s）
       cand = await _pickVisibleCandidate(cand, i === 0 ? 5000 : 2000);
       await cand.waitFor({ state: 'visible', timeout: i === 0 ? 5000 : 2000 });
@@ -1958,16 +1971,21 @@ async function runOneStep(page, step) {
 
   // 定位器降级链（与执行器一致）：主定位严格冲突/失效自动切备用
   const sel = step.element || step.selector;
+  const isCountAssertion = opeKey === 'assert_count';
   const resolved = await resolveLocatorWithFallback(page, sel, (m) => {
     console.log('[run_steps] ' + m);
-  });
+  }, { countMode: isCountAssertion });
   const locator = resolved ? resolved.locator : null;
 
   if (opeKey.startsWith('assert_')) {
     const assertType = opeKey.replace('assert_', '');
     const options = { timeout: 10000 };
     if (!locator) return '断言步骤缺少元素定位（' + opeKey + '）';
-    if (assertType === 'visible') await locator.waitFor({ state: 'visible', ...options });
+    if (assertType === 'count') {
+      const expectedCount = opeValue.expected !== undefined ? opeValue.expected : opeValue.value;
+      await assertLocatorCount(locator, expectedCount, { timeoutMs: options.timeout });
+    }
+    else if (assertType === 'visible') await locator.waitFor({ state: 'visible', ...options });
     else if (assertType === 'hidden') await locator.waitFor({ state: 'hidden', ...options });
     else if (assertType === 'enabled') await locator.waitFor({ state: 'attached', ...options });
     else if (assertType === 'text' || assertType === 'contain_text') {
