@@ -1089,7 +1089,15 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     }] + steps
                 total_steps += group_step_count
                 resp = await asyncio.to_thread(
-                    session.request, 'run_steps', {'steps': steps}, 180,
+                    session.request,
+                    'run_steps',
+                    {
+                        'steps': steps,
+                        # Only auto-select the application's automatic-login
+                        # path when this group has an explicitly bound state.
+                        'auto_login_if_prompted': bool(pending_auth),
+                    },
+                    180,
                 )
                 resp_state = resp.get('state', {}) if isinstance(resp, dict) else {}
                 # 收集本组逐步结果（标注组序号，供执行记录展示）

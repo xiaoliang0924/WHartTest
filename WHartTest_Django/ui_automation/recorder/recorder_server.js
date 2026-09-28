@@ -1805,6 +1805,100 @@ async function waitForVisibleElement(page, selector, timeoutSeconds = 10) {
   await locator.waitFor({ state: 'visible', timeout });
 }
 
+/**
+ * If a bound storage state lands on the application's login-choice screen,
+ * choose its explicit automatic-login path and wait until the gate is gone.
+ * Never choose the manual-login/account-switch path during unattended replay.
+ */
+async function autoLoginIfPrompted(page, timeoutMs = 20000) {
+  const loginChoice = await page.evaluate(() => {
+    const visible = (el) => {
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && Number(style.opacity || 1) > 0
+        && rect.width > 0
+        && rect.height > 0;
+    };
+    const controls = Array.from(document.querySelectorAll('button,[role="button"],a'))
+      .filter(visible)
+      .map((el) => String(el.innerText || el.textContent || el.getAttribute('aria-label') || '')
+        .replace(/\s+/g, ' ').trim());
+    const hasAuto = controls.some((text) => /自动登录|auto\s*login/i.test(text));
+    const hasManual = controls.some((text) => /手动登录|manual\s*login/i.test(text));
+    const passwordVisible = Array.from(document.querySelectorAll('input[type="password"]')).some(visible);
+    return {
+      hasAuto,
+      hasManual,
+      passwordVisible,
+      url: window.location.href,
+      title: document.title || '',
+    };
+  });
+
+  if (!loginChoice.hasAuto && !loginChoice.hasManual) {
+    const loginRoute = (() => {
+      try { return /\/(login|signin|sign-in|auth)(\/|$)/i.test(new URL(loginChoice.url).pathname); }
+      catch (_) { return false; }
+    })();
+    if (loginRoute && loginChoice.passwordVisible) {
+      throw new Error(
+        `已注入登录态，但仍停留在账号密码登录页，未发现“自动登录”入口；` +
+        `实际URL=${loginChoice.url}，请检查登录态是否过期或环境是否匹配。`
+      );
+    }
+    return { attempted: false, page_url: loginChoice.url };
+  }
+
+  if (!loginChoice.hasAuto) {
+    throw new Error(
+      `已注入登录态，但登录选择页没有可用的“自动登录”按钮；` +
+      `检测到手动登录入口，自动化不会代替用户切换账号。实际URL=${loginChoice.url}`
+    );
+  }
+
+  const autoButton = page.locator('button,[role="button"],a').filter({
+    hasText: /自动登录|auto\s*login/i,
+  });
+  const visibleButton = await _pickVisibleCandidate(autoButton, 3000);
+  await visibleButton.click({ timeout: 5000 });
+
+  try {
+    await page.waitForFunction(() => {
+      const visible = (el) => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && Number(style.opacity || 1) > 0
+          && rect.width > 0
+          && rect.height > 0;
+      };
+      const choices = Array.from(document.querySelectorAll('button,[role="button"],a'))
+        .filter(visible)
+        .map((el) => String(el.innerText || el.textContent || el.getAttribute('aria-label') || ''));
+      const choiceStillVisible = choices.some((text) => /自动登录|auto\s*login|手动登录|manual\s*login/i.test(text));
+      const passwordStillVisible = Array.from(document.querySelectorAll('input[type="password"]')).some(visible);
+      const path = new URL(window.location.href).pathname;
+      const isLoginRoute = /\/(login|signin|sign-in|auth)(\/|$)/i.test(path);
+      const authenticatedShellVisible = Array.from(
+        document.querySelectorAll('nav,[role="navigation"],aside')
+      ).some(visible);
+      return !choiceStillVisible && !passwordStillVisible
+        && (!isLoginRoute || authenticatedShellVisible);
+    }, { timeout: timeoutMs });
+  } catch (error) {
+    const actual = await _pageState(page);
+    throw new Error(
+      `点击“自动登录”后仍未确认进入业务页面；实际URL=${actual.url || '未知'}，` +
+      `标题=${actual.title || '未知'}；${error.message || error}`
+    );
+  }
+
+  return { attempted: true, page_url: page.url() };
+}
+
 /** 执行一步平台步骤（ope_key 词汇表与执行器对齐），返回错误信息或 null */
 async function runOneStep(page, step) {
   const opeKey = String(step.ope_key || '');
@@ -2037,6 +2131,7 @@ async function cmdRunSteps(params) {
   let executed = 0;
   let failedStep = -1;
   let errorMsg = '';
+  let authPromptChecked = !params.auto_login_if_prompted;
   // 逐步骤结果（含失败截图 base64）：供平台执行记录展示，与执行器路径对齐
   const stepResults = [];
   try {
@@ -2060,6 +2155,26 @@ async function cmdRunSteps(params) {
       };
       const stepStart = Date.now();
       try {
+        // A bound auth state can restore cookies/localStorage yet the target app
+        // may still require an explicit "自动登录" choice. Do this once after
+        // the group navigates and before the first business action.
+        if (!authPromptChecked && String(stepInfo.ope_key || '') !== 'goto') {
+          resultEntry.description = '恢复已绑定登录态';
+          resultEntry.ope_key = 'auto_login';
+          const authResult = await autoLoginIfPrompted(state.page);
+          authPromptChecked = true;
+          if (authResult.attempted) {
+            console.log(`[run_steps] 已点击自动登录并进入 ${authResult.page_url}`);
+          }
+          resultEntry.description = String(
+            stepInfo.element_name
+            || (stepInfo.ope_value && stepInfo.ope_value.description)
+            || stepInfo.description
+            || stepInfo.ope_key
+            || ''
+          ).slice(0, 100);
+          resultEntry.ope_key = String(stepInfo.ope_key || '');
+        }
         const err = await runOneStep(state.page, steps[i]);
         resultEntry.duration = (Date.now() - stepStart) / 1000;
         if (err) {
@@ -2086,6 +2201,10 @@ async function cmdRunSteps(params) {
         failedStep = i;
         errorMsg = '第 ' + (i + 1) + ' 步执行失败: ' + (e && e.message ? e.message : String(e));
         resultEntry.status = 'failed';
+        if (String(e && e.message || e).includes('登录态') || String(e && e.message || e).includes('自动登录')) {
+          resultEntry.description = '恢复已绑定登录态';
+          resultEntry.ope_key = 'auto_login';
+        }
         resultEntry.message = errorMsg.slice(0, 300);
         const pageState = await _pageState(state.page);
         resultEntry.page_url = pageState.url;
