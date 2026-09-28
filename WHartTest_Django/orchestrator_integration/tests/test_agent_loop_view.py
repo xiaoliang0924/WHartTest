@@ -33,6 +33,7 @@ from ..agent_loop_view import (
     _extract_testcase_step_from_tool_call,
     _map_ui_script_results_to_testcase_steps,
     _testcase_bound_ui_timeout_seconds,
+    _mcp_tool_load_timeout_seconds,
 )
 
 
@@ -60,6 +61,25 @@ class BoundUiTimeoutConfigTests(SimpleTestCase):
     def test_invalid_timeout_falls_back_to_default(self):
         with patch.dict(os.environ, {"TESTCASE_BOUND_UI_TIMEOUT_SECONDS": "invalid"}):
             self.assertEqual(_testcase_bound_ui_timeout_seconds(), 600.0)
+
+
+class McpToolLoadTimeoutConfigTests(SimpleTestCase):
+    def test_uses_safe_default_timeout(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MCP_TOOL_LOAD_TIMEOUT_SECONDS", None)
+            self.assertEqual(_mcp_tool_load_timeout_seconds(), 30.0)
+
+    def test_accepts_configured_timeout_and_enforces_bounds(self):
+        with patch.dict(os.environ, {"MCP_TOOL_LOAD_TIMEOUT_SECONDS": "90"}):
+            self.assertEqual(_mcp_tool_load_timeout_seconds(), 90.0)
+        with patch.dict(os.environ, {"MCP_TOOL_LOAD_TIMEOUT_SECONDS": "1"}):
+            self.assertEqual(_mcp_tool_load_timeout_seconds(), 5.0)
+        with patch.dict(os.environ, {"MCP_TOOL_LOAD_TIMEOUT_SECONDS": "999"}):
+            self.assertEqual(_mcp_tool_load_timeout_seconds(), 300.0)
+
+    def test_invalid_timeout_falls_back_to_default(self):
+        with patch.dict(os.environ, {"MCP_TOOL_LOAD_TIMEOUT_SECONDS": "invalid"}):
+            self.assertEqual(_mcp_tool_load_timeout_seconds(), 30.0)
 
 
 class GeneratedUiCaseFollowupTests(SimpleTestCase):

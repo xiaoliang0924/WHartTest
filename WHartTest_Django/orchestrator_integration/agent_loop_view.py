@@ -145,6 +145,16 @@ def _testcase_bound_ui_timeout_seconds() -> float:
     return testcase_bound_ui_timeout_seconds()
 
 
+def _mcp_tool_load_timeout_seconds() -> float:
+    """Maximum time to wait for remote MCP tool discovery before continuing without it."""
+    raw_value = os.getenv("MCP_TOOL_LOAD_TIMEOUT_SECONDS", "30")
+    try:
+        configured_value = float(raw_value)
+    except (TypeError, ValueError):
+        configured_value = 30.0
+    return max(5.0, min(configured_value, 300.0))
+
+
 async def _persist_helper_step_to_checkpoint(
     *,
     agent,
@@ -2490,6 +2500,7 @@ class AgentLoopStreamAPIView(View):
         """
         thread_id = f"{request.user.id}_{project_id}_{session_id}"
         file_ids = file_ids or []
+        start_event_emitted = False
         if test_case_id:
             # 用例执行可能在 MCP/LLM 初始化与造数阶段阻塞较久；尽早下发 session_id，
             # 便于前端在造数完成前打开 LangGraph 窗口查看进度。
@@ -2500,6 +2511,22 @@ class AgentLoopStreamAPIView(View):
                     "session_id": session_id,
                 }
             )
+        else:
+            # Establish the stream before attachment validation, MCP discovery,
+            # or model initialization so the UI can render an active task and
+            # the Stop action has a stable session id immediately.
+            yield create_flushed_sse(
+                {
+                    "type": "start",
+                    "session_id": session_id,
+                    "thread_id": thread_id,
+                    "project_id": project_id,
+                    "display_message": user_message,
+                    "mode": "agent_loop",
+                    "created_at": None,
+                }
+            )
+            start_event_emitted = True
         llm_attachment_context = ""
         if not (test_case_id and execution_mode == "script_only"):
             try:
@@ -2876,22 +2903,52 @@ class AgentLoopStreamAPIView(View):
                             client_config[key]["headers"] = cfg.headers
 
                     if client_config:
-                        mcp_tools = await mcp_session_manager.get_tools_for_config(
-                            client_config,
-                            user_id=str(request.user.id),
-                            project_id=str(project_id),
-                            session_id=session_id,
-                        )
-                        tools.extend(mcp_tools)
-                        logger.info(
-                            f"AgentLoopStreamAPI: Loaded {len(mcp_tools)} MCP tools"
-                        )
-                        yield create_sse_data(
-                            {
-                                "type": "info",
-                                "message": f"已加载 {len(mcp_tools)} 个工具",
-                            }
-                        )
+                        mcp_timeout = _mcp_tool_load_timeout_seconds()
+                        try:
+                            mcp_tools = await asyncio.wait_for(
+                                mcp_session_manager.get_tools_for_config(
+                                    client_config,
+                                    user_id=str(request.user.id),
+                                    project_id=str(project_id),
+                                    session_id=session_id,
+                                ),
+                                timeout=mcp_timeout,
+                            )
+                            tools.extend(mcp_tools)
+                            logger.info(
+                                f"AgentLoopStreamAPI: Loaded {len(mcp_tools)} MCP tools"
+                            )
+                            yield create_sse_data(
+                                {
+                                    "type": "info",
+                                    "message": f"已加载 {len(mcp_tools)} 个工具",
+                                }
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "AgentLoopStreamAPI: MCP tool loading timed out after %ss; continuing without remote tools",
+                                mcp_timeout,
+                            )
+                            try:
+                                await asyncio.wait_for(
+                                    mcp_session_manager.cleanup_user_session(
+                                        str(request.user.id),
+                                        str(project_id),
+                                        session_id,
+                                    ),
+                                    timeout=5,
+                                )
+                            except Exception as cleanup_error:
+                                logger.warning(
+                                    "AgentLoopStreamAPI: MCP cleanup after timeout failed: %s",
+                                    cleanup_error,
+                                )
+                            yield create_sse_data(
+                                {
+                                    "type": "warning",
+                                    "message": f"MCP 工具加载超时（{mcp_timeout:g}秒），已跳过远程工具",
+                                }
+                            )
             except Exception as e:
                 logger.error(
                     f"AgentLoopStreamAPI: MCP tools loading failed: {e}", exc_info=True
@@ -3270,7 +3327,10 @@ class AgentLoopStreamAPIView(View):
             tool_names = [t.name for t in tools] if tools else None
 
             # 11. 发送开始信号
-            if not locals().get("hybrid_start_emitted", False):
+            if (
+                not locals().get("hybrid_start_emitted", False)
+                and not start_event_emitted
+            ):
                 yield create_sse_data(
                     {
                         "type": "start",

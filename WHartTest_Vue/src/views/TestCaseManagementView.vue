@@ -986,6 +986,7 @@ ${formData.selectedModules.length > 0 ? formData.selectedModules.map((mod, idx) 
 
   const requestData: ChatRequest = {
     message,
+    session_id: createExecCaseSessionId(),
     project_id: String(currentProjectId.value),
     prompt_id: formData.promptId,
     use_knowledge_base: ['full', 'title_only'].includes(formData.generateMode)
