@@ -500,6 +500,7 @@ from ..builtin_tools.skill_tools import (
     _SKILL_DIR_STALE_SECONDS,
     _sanitize_runtime_path_segment,
     _with_failure_reminder,
+    _get_skill_content_timeout_seconds,
     infer_fixed_helper_call_template,
 )
 from ..builtin_tools.output_sanitizer import strip_terminal_control_sequences
@@ -528,6 +529,20 @@ class SkillRuntimeEnvTests(SimpleTestCase):
         self.assertEqual(
             env["WHARTTEST_BACKEND_URL"], "http://runtime-backend:8000"
         )
+
+
+class SkillContentTimeoutTests(SimpleTestCase):
+    @override_settings(SKILL_CONTENT_TIMEOUT_SECONDS=12)
+    def test_uses_configured_timeout(self):
+        self.assertEqual(_get_skill_content_timeout_seconds(), 12.0)
+
+    @override_settings(SKILL_CONTENT_TIMEOUT_SECONDS=0)
+    def test_enforces_safe_timeout_bounds(self):
+        self.assertEqual(_get_skill_content_timeout_seconds(), 1.0)
+
+    @override_settings(SKILL_CONTENT_TIMEOUT_SECONDS=999)
+    def test_caps_excessive_timeout(self):
+        self.assertEqual(_get_skill_content_timeout_seconds(), 60.0)
 
 
 class ToolCallHistorySanitizerTests(SimpleTestCase):

@@ -6,6 +6,7 @@ Skill 工具
 - execute_skill_script: 执行 Skill 的 shell 命令（支持持久化浏览器会话）
 """
 
+import asyncio
 import logging
 import subprocess
 import os
@@ -20,6 +21,7 @@ import signal
 import shlex
 from typing import Optional, Tuple, Dict, Union
 
+from asgiref.sync import sync_to_async
 from langchain_core.tools import tool as langchain_tool
 from django.conf import settings
 
@@ -67,6 +69,7 @@ _ARTIFACT_EXTENSIONS = {
 }
 _MAX_ARTIFACT_SIZE_BYTES = 50 * 1024 * 1024
 _DEFAULT_SKILL_COMMAND_TIMEOUT_SECONDS = 120
+_DEFAULT_SKILL_CONTENT_TIMEOUT_SECONDS = 10.0
 _DEFAULT_SKILL_OUTPUT_MAX_CHARS = 200_000
 _DEFAULT_WHARTTEST_BACKEND_URL = "http://localhost:8000"
 _DEFAULT_WHARTTEST_API_KEY = "wharttest-default-mcp-key-2025"
@@ -108,6 +111,23 @@ def _get_skill_output_max_chars() -> int:
             _DEFAULT_SKILL_OUTPUT_MAX_CHARS,
         )
     )
+
+
+def _get_skill_content_timeout_seconds() -> float:
+    """Bound Skill markdown reads so one tool call cannot stall an Agent stream."""
+    configured = getattr(
+        settings,
+        "SKILL_CONTENT_TIMEOUT_SECONDS",
+        os.environ.get(
+            "SKILL_CONTENT_TIMEOUT_SECONDS",
+            _DEFAULT_SKILL_CONTENT_TIMEOUT_SECONDS,
+        ),
+    )
+    try:
+        timeout = float(configured)
+    except (TypeError, ValueError):
+        timeout = _DEFAULT_SKILL_CONTENT_TIMEOUT_SECONDS
+    return max(1.0, min(timeout, 60.0))
 
 
 _JS_START_RE = re.compile(
@@ -1337,8 +1357,26 @@ def get_skill_tools(
     current_chat_session_id = chat_session_id
     current_generate_ui_case = bool(generate_playwright_script and test_case_id)
 
+    def _read_skill_content_sync(skill_name: str) -> str:
+        """Read Skill content in a Django-safe synchronous worker."""
+        from skills.models import Skill
+
+        skill = Skill.objects.filter(name=skill_name, is_active=True).first()
+
+        if not skill:
+            available = Skill.objects.filter(is_active=True).values_list(
+                "name", flat=True
+            )
+            available_list = list(available)
+            return f"错误: 未找到名为 '{skill_name}' 的 Skill。可用的 Skills: {available_list}"
+
+        if not skill.skill_content:
+            return f"错误: Skill '{skill_name}' 没有 SKILL.md 内容"
+
+        return skill.skill_content
+
     @langchain_tool
-    def read_skill_content(skill_name: str) -> str:
+    async def read_skill_content(skill_name: str) -> str:
         """
         读取指定 Skill 的完整 SKILL.md 内容。
 
@@ -1351,24 +1389,27 @@ def get_skill_tools(
         Returns:
             SKILL.md 的完整内容，包含详细的使用说明和示例
         """
-        from skills.models import Skill
-
         logger.info(f"[read_skill_content] skill_name={skill_name}")
 
         try:
-            skill = Skill.objects.filter(name=skill_name, is_active=True).first()
-
-            if not skill:
-                available = Skill.objects.filter(is_active=True).values_list(
-                    "name", flat=True
-                )
-                available_list = list(available)
-                return f"错误: 未找到名为 '{skill_name}' 的 Skill。可用的 Skills: {available_list}"
-
-            if not skill.skill_content:
-                return f"错误: Skill '{skill_name}' 没有 SKILL.md 内容"
-
-            return skill.skill_content
+            timeout = _get_skill_content_timeout_seconds()
+            return await asyncio.wait_for(
+                sync_to_async(_read_skill_content_sync, thread_sensitive=True)(
+                    skill_name
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            timeout = _get_skill_content_timeout_seconds()
+            logger.error(
+                "[read_skill_content] timed out after %ss: skill_name=%s",
+                timeout,
+                skill_name,
+            )
+            return (
+                f"错误: 读取 Skill '{skill_name}' 超时（{timeout:g}秒）。"
+                "请跳过该 Skill，继续使用已有信息完成任务。"
+            )
 
         except Exception as e:
             logger.error(f"[read_skill_content] 读取失败: {e}", exc_info=True)
