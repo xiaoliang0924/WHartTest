@@ -992,6 +992,9 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         passed_steps = 0
         failed_steps = 0
         all_step_results: list[dict] = []
+        # 生成用例验证失败时，保留一次无副作用的页面定向探索现场，供 AI
+        # 诊断使用。普通手动执行不采集，避免改变既有执行记录体积和语义。
+        exploration_evidence: Optional[dict] = None
         trace_local_path: Optional[str] = None
         # 执行任务引用已在入口赋值（生成时），前端关闭执行画布时据此中断
         try:
@@ -1098,6 +1101,42 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     # 失败信息在 state.error（cmdRunSteps 失败时返回 ok:true + failed 标记，
                     # 保证 state.step_results 能随响应带回）
                     message = resp_state.get('error') or f'第 {group_index} 组步骤执行失败'
+                    if kind != 'page_steps' and args.get('explore_failure'):
+                        # 浏览器已经重新启动并执行到失败步骤，此时读取真实页面状态：
+                        # 不点击、不输入、不改写页面，只收集 URL/DOM 摘要/截图。
+                        try:
+                            inspect_resp = await asyncio.to_thread(
+                                session.request, 'inspect_page', {}, 30,
+                            )
+                            inspect_state = inspect_resp.get('state') or {}
+                            exploration_evidence = {
+                                'status': 'captured',
+                                'failed_group': group_index,
+                                'failed_message': message,
+                                'page_url': inspect_state.get('page_url') or '',
+                                'title': inspect_state.get('title') or '',
+                                'body_text': inspect_state.get('body_text') or '',
+                                'interactive_elements': inspect_state.get('interactive_elements') or [],
+                                'screenshot': inspect_state.get('screenshot') or '',
+                                'captured_at': inspect_state.get('captured_at') or '',
+                            }
+                            logger.info(
+                                '[recorder-exec] 失败现场探索完成 group=%s url=%s elements=%s',
+                                group_index,
+                                exploration_evidence['page_url'],
+                                len(exploration_evidence['interactive_elements']),
+                            )
+                        except Exception as inspect_exc:
+                            # 探索失败不能覆盖原始执行失败；保留可诊断的失败原因。
+                            exploration_evidence = {
+                                'status': 'failed',
+                                'failed_group': group_index,
+                                'failed_message': message,
+                                'error': str(inspect_exc)[:500],
+                            }
+                            logger.warning(
+                                '[recorder-exec] 失败现场探索失败: %s', inspect_exc,
+                            )
                     break
                 passed_steps += group_step_count
                 await asyncio.sleep(0.1)
@@ -1194,6 +1233,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     # Playwright trace.zip 的平台存储相对路径（与执行器路径一致）
                     'trace_path': trace_local_path,
                 }
+                if exploration_evidence is not None:
+                    # 仅验证回放携带探索证据；save_execution_result 会将其同步到
+                    # UiTestCase.result_data，诊断服务随后从失败记录关联用例读取。
+                    result_args['exploration'] = exploration_evidence
                 await self.save_execution_result(result_args)
                 await self.channel_layer.group_send(
                     self.group_name,
@@ -1706,6 +1749,9 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         for step in steps:
             if step.get('screenshot'):
                 screenshots.append(step['screenshot'])
+        exploration = args.get('exploration')
+        if isinstance(exploration, dict) and exploration.get('screenshot'):
+            screenshots.append(exploration['screenshot'])
 
         # 提取 trace 路径
         trace_path = args.get('trace_path')
@@ -1750,9 +1796,12 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
             # 同时更新测试用例的状态
             if case_id:
+                case_result_data = {'last_execution': record.id, 'steps': steps}
+                if isinstance(exploration, dict):
+                    case_result_data['exploration'] = exploration
                 UiTestCase.objects.filter(id=case_id).update(
                     status=status,
-                    result_data={'last_execution': record.id, 'steps': steps},
+                    result_data=case_result_data,
                     error_message=args.get('message') if status == 3 else None
                 )
                 logger.info(f"测试用例状态已更新: case_id={case_id}, status={status}")

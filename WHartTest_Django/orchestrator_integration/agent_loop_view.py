@@ -378,6 +378,9 @@ async def _run_testcase_with_bound_ui_script(
                 "actuator_id": "recorder-browser",
                 "executor_id": int(user.id),
                 "executor_name": user.username,
+                # 失败时在同一个新浏览器上下文中采集真实页面现场，供
+                # AI 诊断定位器/等待问题；该采集不执行额外业务动作。
+                "explore_failure": True,
             },
             user.username,
         )
@@ -684,6 +687,9 @@ async def _validate_generated_ui_case(
                 "actuator_id": "recorder-browser",
                 "executor_id": int(user.id),
                 "executor_name": user.username,
+                # 失败时在同一个新浏览器上下文中采集真实页面现场，供
+                # AI 诊断定位器/等待问题；该采集不执行额外业务动作。
+                "explore_failure": True,
             },
             user.username,
         )
@@ -754,6 +760,14 @@ async def _validate_generated_ui_case(
             "execution_record_id": execution_record.id,
             "message": message,
         }
+        exploration = (result_data.get("exploration") or {}) if not passed else {}
+        if exploration:
+            result_data["generation_validation"]["exploration"] = {
+                "status": exploration.get("status"),
+                "page_url": exploration.get("page_url", ""),
+                "title": exploration.get("title", ""),
+                "captured_at": exploration.get("captured_at", ""),
+            }
         case.status = 2 if passed else 3
         case.error_message = None if passed else message
         case.result_data = result_data

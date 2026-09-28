@@ -154,6 +154,18 @@ def extract_failure_context(
     step_sort = 1
     steps_history = []
     dom_snapshot = ""
+    exploration = {}
+
+    # 生成用例验证失败时，录制器会在失败步骤停留的同一浏览器上下文中
+    # 保存一次无副作用现场探查。执行记录模型保留步骤/截图，探索摘要随
+    # 关联 UI 用例 result_data 保存，这里将两者合并给诊断模型。
+    if ui_record:
+        try:
+            case_result_data = ui_record.test_case.result_data or {}
+            if isinstance(case_result_data, dict):
+                exploration = case_result_data.get("exploration") or {}
+        except Exception:
+            exploration = {}
 
     if step_results and isinstance(step_results, list):
         for idx, res in enumerate(step_results):
@@ -311,6 +323,7 @@ def extract_failure_context(
         "ui_record_id": ui_record.id if ui_record else None,
         "error_message": error_msg,
         "screenshots": screenshots,
+        "exploration": exploration,
         "log": ui_record.log if ui_record else "",
         "steps_history": steps_history,
         "dom_snapshot": dom_snapshot,
@@ -362,6 +375,11 @@ def diagnose_execution_failure(
     steps_history_str = "\n".join(failure_info.get("steps_history", [])) or "无"
     elements_str = "\n".join(failure_info.get("available_elements", [])) or "无候选元素"
     dom_snapshot_str = failure_info.get("dom_snapshot", "")
+    exploration = failure_info.get("exploration") or {}
+    exploration_elements = exploration.get("interactive_elements") or []
+    exploration_elements_str = json.dumps(
+        exploration_elements[:160], ensure_ascii=False
+    ) if isinstance(exploration_elements, list) else str(exploration_elements)
 
     user_prompt = f"""【待诊断的功能测试用例】
 用例ID: {testcase.id}
@@ -391,6 +409,20 @@ UI用例名称: {testcase.ui_test_case.name if testcase.ui_test_case else '无'}
         user_prompt += f"""
 【失败现场页面结构快照 (Accessibility Tree / DOM)】
 {dom_snapshot_str}
+"""
+
+    if exploration:
+        user_prompt += f"""
+【失败后重新打开/回放得到的定向探索现场】
+探索状态: {exploration.get('status') or 'unknown'}
+失败后实际 URL: {exploration.get('page_url') or '未知'}
+失败后页面标题: {exploration.get('title') or '未知'}
+失败后页面可见文本:
+{str(exploration.get('body_text') or '无')[:12000]}
+失败后可交互元素摘要(JSON，不含输入值):
+{exploration_elements_str[:20000]}
+失败现场截图: {'已采集，可与执行记录中的失败截图对照' if exploration.get('screenshot') else '未采集'}
+请优先使用这份失败后现场判断：当前页面是否已经到达预期页面、定位器是否与真实元素不匹配、还是页面/网络/登录态未完成。不得因为“想让测试通过”而修改业务期望或删除断言。
 """
 
     user_prompt += f"""

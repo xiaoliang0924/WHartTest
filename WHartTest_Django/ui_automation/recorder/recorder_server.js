@@ -2026,6 +2026,96 @@ async function cmdRunSteps(params) {
 }
 
 /**
+ * 采集失败步骤的定向探索现场。
+ *
+ * 这里不执行点击、输入等有副作用的动作，只读取当前页面状态：实际 URL、
+ * 标题、可见文本、可交互元素摘要和一张现场截图。这样失败回放仍然保持
+ * 原用例语义，同时为 AI 提供真实页面证据，而不是只根据 Timeout 猜测。
+ */
+async function cmdInspectPage() {
+  if (!state.page || !state.running) {
+    return { ok: false, error: '录制会话未启动' };
+  }
+
+  const page = state.page;
+  let pageUrl = '';
+  let title = '';
+  let bodyText = '';
+  let interactiveElements = [];
+
+  try { pageUrl = page.url(); } catch (_) {}
+  try { title = String(await page.title() || '').slice(0, 300); } catch (_) {}
+  try {
+    const snapshot = await page.evaluate(() => {
+      const visible = (el) => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && Number(style.opacity || 1) > 0
+          && rect.width > 0
+          && rect.height > 0;
+      };
+      const textOf = (el) => String(
+        el.innerText || el.textContent || el.getAttribute('aria-label') || ''
+      ).replace(/\s+/g, ' ').trim().slice(0, 120);
+      const elements = Array.from(document.querySelectorAll(
+        'a,button,input,textarea,select,[role],[data-testid],[aria-label]'
+      )).filter(visible).slice(0, 160).map((el) => ({
+        selector: (() => {
+          try {
+            const described = window.__whart && typeof window.__whart.describe === 'function'
+              ? window.__whart.describe(el) : null;
+            return described ? {
+              locator_type: described.locator_type || '',
+              locator_value: described.locator_value || '',
+            } : null;
+          } catch (_) { return null; }
+        })(),
+        tag: String(el.tagName || '').toLowerCase(),
+        role: el.getAttribute('role') || '',
+        id: el.id || '',
+        name: el.getAttribute('name') || '',
+        type: el.getAttribute('type') || '',
+        placeholder: el.getAttribute('placeholder') || '',
+        aria_label: el.getAttribute('aria-label') || '',
+        test_id: el.getAttribute('data-testid') || el.getAttribute('data-test-id') || '',
+        text: textOf(el),
+      }));
+      return {
+        body_text: String(document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 12000),
+        interactive_elements: elements,
+      };
+    });
+    bodyText = snapshot.body_text || '';
+    interactiveElements = Array.isArray(snapshot.interactive_elements)
+      ? snapshot.interactive_elements : [];
+  } catch (e) {
+    serverLog('失败现场页面结构采集失败:', e && e.message ? e.message : String(e));
+  }
+
+  let screenshot = '';
+  try {
+    const shot = await page.screenshot({ type: 'jpeg', quality: 60 });
+    screenshot = 'data:image/jpeg;base64,' + shot.toString('base64');
+  } catch (e) {
+    serverLog('失败现场截图采集失败:', e && e.message ? e.message : String(e));
+  }
+
+  return {
+    ok: true,
+    state: {
+      page_url: pageUrl,
+      title,
+      body_text: bodyText,
+      interactive_elements: interactiveElements,
+      screenshot,
+      captured_at: new Date().toISOString(),
+    },
+  };
+}
+
+/**
  * 重建干净页面：前置执行结束后调用。
  * 关闭旧页面并在同一上下文新建页面（登录态/cookie 保留），
  * 导航到当前地址并重新建立帧推流——彻底消除滚动/弹层/半渲染等残留.
@@ -2429,6 +2519,8 @@ rl.on('line', (line) => {
           return respond(await cmdInput(msg.params || {}));
         case 'run_steps':
           return respond(await cmdRunSteps(msg.params || {}));
+        case 'inspect_page':
+          return respond(await cmdInspectPage());
         case 'remove_action':
           return respond(await cmdRemoveAction(msg.params || {}));
         case 'add_wait':
