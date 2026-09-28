@@ -212,6 +212,10 @@ const TEST_TYPE_PROMPTS: Record<string, string> = {
 };
 
 const CASE_STEP_DETAIL_PROMPT = `【前置条件与步骤粒度（必须遵守）】
+【当前项目登录信息】
+{{project_credentials_info}}
+生成用例时必须使用上面当前项目凭据中与目标账号匹配的真实 system_url，并将真实地址写入用例；禁止输出 system_url 占位文字，禁止沿用示例地址、工单系统地址或其他项目地址。若目标账号没有配置 system_url，必须明确提示项目凭据缺少系统地址，禁止猜测。
+
 前置条件必须写成编号列表，至少包含：
 1. 使用哪个账号登录：姓名/用户名/密码，以及系统完整 URL
 2. 需要准备的业务数据与状态（例如：存在状态为“待处理”的工单，当前处理人为当前登录用户）
@@ -239,7 +243,7 @@ const CASE_STEP_DETAIL_PROMPT = `【前置条件与步骤粒度（必须遵守�
 
 正确示例：
 前置条件：
-1. 使用李亮账号(admin/admin123)登录系统(http://test.bot.by56.com/work-order/login)
+1. 使用当前项目凭据中的目标账号登录系统（使用该账号对应的 system_url）
 2. 存在状态为“待处理”的工单，当前处理人为当前登录用户
 步骤：
 1. 在左侧进入该工单详情页，点击“转派” / 弹出转派弹窗

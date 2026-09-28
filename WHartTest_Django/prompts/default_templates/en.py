@@ -596,7 +596,7 @@ Start executing now.''',
 
       **Login step rules (MUST follow)**:
       - For features that require login: write the account in preconditions, then write login again as step 1
-      - Login is 1 step only, e.g. "Log in with 802714/000000 at https://test.bot.by56.com/work-order/login"
+      - Login is 1 step only. Use the `system_url` matched to the target account in the current project's credentials; never reuse an example URL or another project's URL.
       - Forbidden: open login URL, enter username, enter password, click Login as four steps
 
       Minimum business-step split after login (normally >= 3):
@@ -613,10 +613,10 @@ Start executing now.''',
 
       Required example:
       Preconditions:
-      1. Log in with Li Liang (admin/admin123) at http://test.bot.by56.com/work-order/login
+      1. Log in with the target account from the current project's credentials at its configured `system_url`
       2. A work order in "Pending" status exists, and the current handler is the logged-in user
       Steps:
-      1. Log in with Li Liang (admin/admin123) at http://test.bot.by56.com/work-order/login / login succeeds
+      1. Log in with the target account from the current project's credentials at its configured `system_url` / login succeeds
       2. Open the work-order detail page and click Transfer / the transfer dialog opens
       3. Select a transfer target / selection succeeds
       4. Leave Transfer Reason empty / the handover-instruction field is empty

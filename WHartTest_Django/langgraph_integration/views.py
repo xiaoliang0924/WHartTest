@@ -18,6 +18,11 @@ from asgiref.sync import async_to_sync, sync_to_async
 logger = logging.getLogger(__name__)
 _background_title_tasks = set()
 
+# Test-case generation requests may include this marker in the user message.
+# It is replaced with the current project's configured credentials after the
+# project permission check, so generation never needs a hard-coded example URL.
+PROJECT_CREDENTIALS_MESSAGE_MARKER = "{{project_credentials_info}}"
+
 
 def _friendly_llm_http_error_message(raw: str, api_url: str = "") -> str:
     """Turn HTML / Cloudflare / typo responses into actionable Chinese hints."""
@@ -777,6 +782,53 @@ async def _format_project_credentials(project):
         return ""
 
 
+async def _inject_project_credentials_into_message(message: str, project) -> str:
+    """Replace the generation marker with credentials from the active project.
+
+    The case-generation page sends part of its design guidance as the user
+    message. Keeping the project-specific address in this server-side context
+    makes the behavior consistent even when a custom system prompt is selected
+    and does not contain ``{credentials_info}``.
+    """
+    if PROJECT_CREDENTIALS_MESSAGE_MARKER not in (message or ""):
+        return message
+
+    credentials = await sync_to_async(list)(
+        project.credentials.all().values("user_role", "username", "system_url")
+    )
+    if credentials:
+        login_targets = "\n".join(
+            "- 角色: {user_role} / 用户名: {username} / system_url: {system_url}".format(
+                user_role=item.get("user_role") or "未指定角色",
+                username=item.get("username") or "未指定用户名",
+                system_url=item.get("system_url") or "未配置",
+            )
+            for item in credentials
+        )
+    else:
+        login_targets = "当前项目未配置登录信息。"
+    authoritative_context = (
+        "【当前项目登录信息（权威来源，生成用例时必须以此为准）】\n"
+        f"{login_targets}\n"
+        "输出到用例中的 URL 必须使用匹配凭据里的真实 system_url，不得输出 system_url 占位文字。"
+        "如果目标账号未配置 system_url，必须明确提示项目凭据缺少系统地址，禁止猜测或沿用其他项目地址。"
+    )
+    return message.replace(PROJECT_CREDENTIALS_MESSAGE_MARKER, authoritative_context)
+
+
+async def _ensure_project_credentials_in_system_prompt(prompt: str, project) -> str:
+    """Make full project credentials available without putting them in user text."""
+    credentials_text = await _format_project_credentials(project)
+    if not prompt:
+        return credentials_text
+    if (
+        "当前项目已配置以下登录信息" in prompt
+        or "## Project Credentials" in prompt
+    ):
+        return prompt
+    return f"{prompt.rstrip()}\n\n## Current Project Credentials\n{credentials_text}"
+
+
 async def _format_project_skills(project):
     """
     格式化全局 Skills 信息为文本（渐进式加载）
@@ -1056,6 +1108,17 @@ class ChatAPIView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        needs_project_credentials_context = (
+            PROJECT_CREDENTIALS_MESSAGE_MARKER in (user_message_content or "")
+        )
+
+        # Resolve project-specific login URLs before the message reaches the
+        # model. This prevents generation guidance from falling back to a URL
+        # belonging to another project.
+        user_message_content = await _inject_project_credentials_into_message(
+            user_message_content, project
+        )
+
         try:
             attached_files = await sync_to_async(validate_file_ids)(file_ids, project, request.user)
             llm_attachment_context = await sync_to_async(build_llm_attachment_context)(attached_files)
@@ -1262,6 +1325,10 @@ class ChatAPIView(APIView):
                 ) = await get_effective_system_prompt_async(
                     request.user, prompt_id, project
                 )
+                if needs_project_credentials_context:
+                    effective_prompt = await _ensure_project_credentials_in_system_prompt(
+                        effective_prompt, project
+                    )
                 logger.info(
                     f"ChatAPIView: Got effective prompt from {prompt_source}: {effective_prompt[:100] if effective_prompt else 'None'}..."
                 )
