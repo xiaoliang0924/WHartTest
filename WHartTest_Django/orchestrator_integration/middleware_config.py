@@ -858,6 +858,11 @@ DEFAULT_HIGH_RISK_TOOLS = {
         "allowed_decisions": ["approve", "reject"],
         "description": "自动化脚本执行需要审批",
     },
+    # 内置 Skill 脚本执行工具的实际名称
+    "execute_skill_script": {
+        "allowed_decisions": ["approve", "reject"],
+        "description": "Skill 脚本执行需要审批",
+    },
     # 测试用例批量操作
     "batch_delete_testcases": {
         "allowed_decisions": ["approve", "reject"],
@@ -989,11 +994,21 @@ def build_dynamic_interrupt_on(
     user_approvals = get_user_tool_approvals(user, session_id) if user else {}
     logger.info(f"[HITL] 用户偏好: {user_approvals}")
 
-    # 如果提供了工具名列表，默认所有工具都需要审批
+    # 工具名列表仅用于过滤配置，不应把所有工具都默认升级为高风险工具。
+    # 只读工具（例如 read_skill_content）如果被错误地加入 interrupt_on，
+    # Agent 会停在 HumanInTheLoopMiddleware.after_model，前端又没有审批卡片，
+    # 最终表现为一直加载。真正需要审批的工具必须显式出现在 base_tools 中。
     if all_tool_names:
-        logger.info(f"[HITL] 所有工具默认需要审批: {all_tool_names}")
         dynamic_config = {}
-        for tool_name in all_tool_names:
+        configured_tool_names = [
+            tool_name for tool_name in all_tool_names if tool_name in base_tools
+        ]
+        logger.info(
+            "[HITL] 当前工具中需要审批的工具: %s（全部工具: %s）",
+            configured_tool_names,
+            all_tool_names,
+        )
+        for tool_name in configured_tool_names:
             user_policy = user_approvals.get(tool_name)
 
             if user_policy == "always_allow":
@@ -1473,12 +1488,13 @@ async def build_dynamic_interrupt_on_async(
     config = dict(base_tools)
 
     if all_tool_names:
-        for tool_name in all_tool_names:
-            if tool_name not in config:
-                config[tool_name] = {
-                    "allowed_decisions": ["approve", "reject"],
-                    "description": f"工具 {tool_name} 需要审批",
-                }
+        # 与同步版本保持一致：all_tool_names 只用于过滤显式配置，
+        # 不再将 read_skill_content 等只读工具默认设置为需审批。
+        config = {
+            tool_name: tool_config
+            for tool_name, tool_config in config.items()
+            if tool_name in all_tool_names
+        }
 
     if not user:
         return config

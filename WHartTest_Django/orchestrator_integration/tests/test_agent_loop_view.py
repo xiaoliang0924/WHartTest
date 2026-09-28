@@ -35,6 +35,7 @@ from ..agent_loop_view import (
     _testcase_bound_ui_timeout_seconds,
     _mcp_tool_load_timeout_seconds,
 )
+from ..middleware_config import build_dynamic_interrupt_on
 
 
 class SsePayloadDecodeTests(SimpleTestCase):
@@ -80,6 +81,36 @@ class McpToolLoadTimeoutConfigTests(SimpleTestCase):
     def test_invalid_timeout_falls_back_to_default(self):
         with patch.dict(os.environ, {"MCP_TOOL_LOAD_TIMEOUT_SECONDS": "invalid"}):
             self.assertEqual(_mcp_tool_load_timeout_seconds(), 30.0)
+
+
+class HitlToolSelectionTests(SimpleTestCase):
+    def test_read_only_skill_tool_is_not_blocked_by_default(self):
+        config = build_dynamic_interrupt_on(
+            base_tools={
+                "execute_skill_script": {
+                    "allowed_decisions": ["approve", "reject"],
+                },
+            },
+            all_tool_names=["read_skill_content", "execute_skill_script"],
+        )
+
+        self.assertNotIn("read_skill_content", config)
+        self.assertIn("execute_skill_script", config)
+
+    def test_explicitly_configured_tools_keep_hitl(self):
+        config = build_dynamic_interrupt_on(
+            base_tools={
+                "playwright_click": {
+                    "allowed_decisions": ["approve", "reject"],
+                },
+            },
+            all_tool_names=["read_skill_content", "playwright_click"],
+        )
+
+        self.assertEqual(
+            config["playwright_click"]["allowed_decisions"],
+            ["approve", "reject"],
+        )
 
 
 class GeneratedUiCaseFollowupTests(SimpleTestCase):
