@@ -624,6 +624,7 @@ async def _validate_generated_ui_case(
 
     from django.utils import timezone
     from ui_automation.consumers import SocketUserManager
+    from ui_automation.generated_case_service import bind_generated_ui_case_auth_state
     from ui_automation.models import UiExecutionRecord, UiTestCase
 
     consumer = SocketUserManager.get_web_user(user.username)
@@ -660,6 +661,18 @@ async def _validate_generated_ui_case(
         )()
         return {"status": "failed", "validation_status": "unavailable", "message": message}
 
+    try:
+        auth_binding = await sync_to_async(bind_generated_ui_case_auth_state)(
+            ui_test_case_id=int(ui_test_case_id),
+            project_id=int(project_id),
+        )
+    except Exception as exc:
+        logger.exception(
+            "Generated UI testcase auth state auto-binding failed: ui_case=%s",
+            ui_test_case_id,
+        )
+        auth_binding = {"status": "failed", "bound_count": 0, "message": str(exc)[:300]}
+
     await sync_to_async(
         lambda: UiTestCase.objects.filter(id=ui_test_case_id).update(
             status=1,
@@ -668,6 +681,7 @@ async def _validate_generated_ui_case(
                 "generation_validation": {
                     "status": "running",
                     "message": "正在回放验证生成的 UI 自动化用例。",
+                    "auth_binding": auth_binding,
                 }
             },
         )
@@ -759,6 +773,7 @@ async def _validate_generated_ui_case(
             "status": "passed" if passed else "failed",
             "execution_record_id": execution_record.id,
             "message": message,
+            "auth_binding": auth_binding,
         }
         exploration = (result_data.get("exploration") or {}) if not passed else {}
         if exploration:

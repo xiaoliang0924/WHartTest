@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from django.db import transaction
 
 from .models import (
     UiCaseStepsDetailed,
+    UiAuthState,
     UiElement,
     UiModule,
     UiPage,
@@ -29,6 +31,122 @@ VALID_ASSERTIONS = {
     "visible", "hidden", "enabled", "disabled", "checked", "text",
     "contain_text", "value", "count", "url", "title",
 }
+
+
+def _auth_state_match_score(base_url: str, observed_url: str) -> int:
+    """Score an environment URL against a URL observed by the AI browser.
+
+    Environment configurations in existing projects commonly point to the
+    login URL while the generated case records a post-login page.  Matching
+    the parent path handles that layout, while an exact scheme/host match keeps
+    an HTTP environment from accidentally winning over HTTPS.
+    """
+    try:
+        base = urlsplit(str(base_url or '').strip())
+        observed = urlsplit(str(observed_url or '').strip())
+    except Exception:
+        return -1
+    if not base.netloc or not observed.netloc:
+        return -1
+    if base.netloc.lower() != observed.netloc.lower():
+        return -1
+
+    score = 100 if base.scheme.lower() == observed.scheme.lower() else 40
+    base_path = (base.path or '/').rstrip('/') or '/'
+    observed_path = (observed.path or '/').rstrip('/') or '/'
+    if observed_path == base_path or observed_path.startswith(base_path + '/'):
+        return score + 40
+
+    # A configured login page such as /work-order/login owns post-login pages
+    # such as /work-order/my-tickets and /work-order/users.
+    parent_path = base_path.rsplit('/', 1)[0] or '/'
+    if observed_path == parent_path or observed_path.startswith(parent_path + '/'):
+        return score + 30
+    return score
+
+
+def _resolve_active_auth_state(
+    *, project_id: int, observed_urls: list[str]
+) -> UiAuthState | None:
+    """Find the enabled login state belonging to the observed environment."""
+    urls = [str(url or '').strip() for url in observed_urls if str(url or '').strip()]
+    if not urls:
+        return None
+
+    candidates = list(
+        UiAuthState.objects.filter(
+            env_config__project_id=project_id,
+            is_active=True,
+        ).select_related('env_config').order_by('-updated_at', '-id')
+    )
+    best = None
+    best_score = -1
+    for auth_state in candidates:
+        state_json = auth_state.state_json or {}
+        if not isinstance(state_json, dict):
+            continue
+        if not (state_json.get('cookies') or state_json.get('origins')):
+            continue
+        scores = [
+            _auth_state_match_score(auth_state.env_config.base_url, url)
+            for url in urls
+        ]
+        valid_scores = [score for score in scores if score >= 0]
+        if not valid_scores:
+            continue
+        # Prefer a state matching more observed pages, then exact HTTPS/host.
+        score = sum(valid_scores) + (max(valid_scores) * 2)
+        if score > best_score:
+            best = auth_state
+            best_score = score
+    return best
+
+
+def bind_generated_ui_case_auth_state(
+    *, ui_test_case_id: int, project_id: int | None = None
+) -> dict[str, Any]:
+    """Bind an enabled environment login state to unbound generated steps.
+
+    This is intentionally limited to currently unbound page steps.  A
+    manually selected auth state is explicit user configuration and must never
+    be overwritten by automatic matching.
+    """
+    ui_case = UiTestCase.objects.filter(id=ui_test_case_id).first()
+    if ui_case is None:
+        return {'status': 'not_found', 'bound_count': 0}
+    if project_id is not None and int(ui_case.project_id) != int(project_id):
+        return {'status': 'project_mismatch', 'bound_count': 0}
+
+    case_steps = list(
+        UiCaseStepsDetailed.objects.filter(test_case=ui_case)
+        .select_related('page_step', 'page_step__page')
+        .order_by('case_sort')
+    )
+    observed_urls = [
+        step.page_step.page.url
+        for step in case_steps
+        if step.page_step and step.page_step.page
+    ]
+    auth_state = _resolve_active_auth_state(
+        project_id=ui_case.project_id,
+        observed_urls=observed_urls,
+    )
+    if auth_state is None:
+        return {'status': 'not_available', 'bound_count': 0}
+
+    page_step_ids = [
+        step.page_step_id for step in case_steps if step.page_step_id
+    ]
+    bound_count = UiPageSteps.objects.filter(
+        id__in=page_step_ids,
+        auth_state__isnull=True,
+    ).update(auth_state=auth_state)
+    return {
+        'status': 'bound' if bound_count else 'already_bound',
+        'bound_count': bound_count,
+        'auth_state_id': auth_state.id,
+        'env_config_id': auth_state.env_config_id,
+    }
 
 
 def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
@@ -150,6 +268,18 @@ def persist_generated_ui_testcase(
     )
 
     page_cache: dict[str, UiPage] = {}
+    observed_urls = [str(data.get('url') or '').strip()]
+    for step in data['steps']:
+        observed_urls.append(str(step.get('url') or '').strip())
+        observed_urls.extend(
+            str(action.get('url') or '').strip()
+            for action in step.get('actions') or []
+            if action.get('type') == 'goto'
+        )
+    generated_auth_state = _resolve_active_auth_state(
+        project_id=project_id,
+        observed_urls=observed_urls,
+    )
     total_actions = 0
     for index, step in enumerate(data["steps"], 1):
         url = str(step.get("url") or data.get("url") or "").strip()
@@ -178,12 +308,14 @@ def persist_generated_ui_testcase(
             description=str(step.get("description") or "")[:2000],
             run_flow="浏览器观察动作自动生成",
             creator=user,
+            auth_state=generated_auth_state,
         )
         stats = apply_recorded_actions(
             page=page,
             page_step=page_step,
             user=user,
             actions=actions,
+            auth_state_id=generated_auth_state.id if generated_auth_state else None,
         )
         if not stats["steps_created"]:
             raise ValueError(f"第 {index} 步没有生成可执行的 UI 步骤。")
@@ -205,4 +337,6 @@ def persist_generated_ui_testcase(
         "created": True,
         "steps": ui_case.case_steps.count(),
         "actions": total_actions,
+        "auth_state_id": generated_auth_state.id if generated_auth_state else None,
+        "auth_state_bound": bool(generated_auth_state),
     }
