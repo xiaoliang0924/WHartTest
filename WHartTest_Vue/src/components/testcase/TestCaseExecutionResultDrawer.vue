@@ -56,7 +56,34 @@
         show-icon
         class="block"
       >
-        {{ failReasonText }}
+        <div class="failure-alert-content">
+          <div>{{ failReasonText }}</div>
+          <div v-if="failReasonItems.length || failReasonDetail || failSuggestionText" class="failure-alert-extra">
+            <a-popover
+              v-if="failReasonItems.length || failReasonDetail"
+              trigger="hover"
+              position="top"
+            >
+              <a-button type="text" size="mini" class="actual-result-detail-trigger">
+                {{ text.viewDetails }}
+              </a-button>
+              <template #content>
+                <div class="actual-result-popover">
+                  <div v-if="failReasonItems.length" class="actual-result-detail-title">
+                    {{ text.detectedFields }}（{{ failReasonItems.length }}）
+                  </div>
+                  <div v-if="failReasonItems.length" class="actual-result-items">
+                    <span v-for="(item, index) in failReasonItems" :key="`${index}-${item}`">{{ item }}</span>
+                  </div>
+                  <p v-if="failReasonDetail" class="actual-result-detail-text">{{ failReasonDetail }}</p>
+                </div>
+              </template>
+            </a-popover>
+            <div v-if="failSuggestionText" class="failure-suggestion">
+              <strong>{{ text.recommendation }}：</strong>{{ failSuggestionText }}
+            </div>
+          </div>
+        </div>
       </a-alert>
       <a-alert v-if="isRunning" type="info" :title="text.runningHint" show-icon class="block" />
 
@@ -239,6 +266,7 @@ const text = computed(() => (
         actual: 'Actual',
         viewDetails: 'Details',
         detectedFields: 'Detected fields',
+        recommendation: 'Suggestion',
         status: 'Status',
         running: 'Running',
         pass: 'Pass',
@@ -292,6 +320,7 @@ const text = computed(() => (
         actual: '实际结果',
         viewDetails: '查看详情',
         detectedFields: '实际检测到的字段',
+        recommendation: '建议',
         status: '状态',
         running: '执行中',
         pass: '通过',
@@ -401,12 +430,28 @@ const resolveSessionId = (): string | null => {
 
 const effectiveSessionId = computed(() => resolveSessionId());
 
-const failReasonText = computed(() => {
+const failureAnalysis = computed(() => {
   const summary = record.value?.summary || '';
-  const reasonMatch = summary.match(/失败原因[:：]\s*([\s\S]+?)(?:\n\s*\n|###|结论|$)/);
-  const text = (reasonMatch?.[1] || summary).replace(/[#|*`-]/g, ' ').replace(/\s+/g, ' ').trim();
-  return text.slice(0, 240);
+  const reasonMatch = summary.match(/失败原因[:：]\s*([\s\S]+?)(?=(?:\r?\n|\\n)\s*(?:[-*]\s*)?(?:建议|###|结论)|$)/);
+  const suggestionMatch = summary.match(/(?:^|\r?\n|\\n)\s*[-*]?\s*建议[:：]\s*([^\r\n]+)/);
+  const rawReason = (reasonMatch?.[1] || summary)
+    .replace(/\\r\\n|\\n/g, '\n')
+    .replace(/\r?\n/g, ' ')
+    .replace(/[#|*`]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const formatted = formatActualResult(rawReason);
+  return {
+    reason: formatted.summary.slice(0, 240),
+    items: formatted.items,
+    detail: formatted.detail,
+    suggestion: (suggestionMatch?.[1] || '').replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim(),
+  };
 });
+const failReasonText = computed(() => failureAnalysis.value.reason);
+const failReasonItems = computed(() => failureAnalysis.value.items);
+const failReasonDetail = computed(() => failureAnalysis.value.detail);
+const failSuggestionText = computed(() => failureAnalysis.value.suggestion);
 
 const statusLabel = computed(() => {
   if (isPreDataBlocked.value) return text.value.preDataFailed;
@@ -832,6 +877,24 @@ defineExpose({
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.failure-alert-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.failure-alert-extra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px 12px;
+  margin-top: 4px;
+}
+
+.failure-suggestion {
+  color: var(--color-text-2);
 }
 
 .footer-actions {
