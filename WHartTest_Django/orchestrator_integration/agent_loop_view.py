@@ -638,6 +638,14 @@ async def _validate_generated_ui_case(
     from ui_automation.models import UiExecutionRecord, UiTestCase
 
     consumer = SocketUserManager.get_web_user(user.username)
+    # LLM generation can outlive a brief browser network interruption. Give the
+    # frontend's authenticated WebSocket reconnect a short window to re-register
+    # before recording the validation as unavailable.
+    if consumer is None:
+        reconnect_deadline = asyncio.get_running_loop().time() + 10
+        while consumer is None and asyncio.get_running_loop().time() < reconnect_deadline:
+            await asyncio.sleep(0.25)
+            consumer = SocketUserManager.get_web_user(user.username)
     if consumer is None:
         message = "UI 自动化连接不可用，无法自动回放验证。请刷新页面后重试。"
         await sync_to_async(

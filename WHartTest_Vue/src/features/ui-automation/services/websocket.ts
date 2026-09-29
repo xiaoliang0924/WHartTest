@@ -6,6 +6,7 @@
 import { ref, shallowRef } from 'vue'
 import { useAuthStore } from '@/store/authStore'
 import { getCurrentServerLanguage } from '@/utils/installLocaleAdapters'
+import { API_ENDPOINTS, getApiBaseUrl } from '@/config/api'
 
 /** 消息类型枚举 */
 export const UiSocketEnum = {
@@ -81,6 +82,7 @@ class UiWebSocketService {
   private rejectPendingConnect: ((error: Error) => void) | null = null
   private manuallyDisconnected = false
   private authenticationRejected = false
+  private refreshingAuthentication = false
   private handlers: Map<string, MessageHandler[]> = new Map()
   
   public connected = ref(false)
@@ -141,13 +143,16 @@ class UiWebSocketService {
 
       socket.onopen = () => {
         const authStore = useAuthStore()
-        const accessToken = authStore.accessToken || localStorage.getItem('auth-accessToken')
+        // HTTP 的 401 刷新流程会先更新 localStorage；authStore 可能仍保留旧值。
+        // 使用持久化中的最新 access token，避免 WebSocket 用已过期令牌握手。
+        const accessToken = localStorage.getItem('auth-accessToken') || authStore.accessToken
         if (!accessToken) {
           this.authenticationRejected = true
           const error = new Error('登录状态已失效，请重新登录后再试')
           this.error.value = error
           settle(error)
           socket.close(4401, 'missing authentication token')
+          void this.refreshAuthenticationAndReconnect()
           return
         }
         socket.send(JSON.stringify({
@@ -195,6 +200,7 @@ class UiWebSocketService {
             this.authenticationRejected = true
             settle(error)
             socket.close(4401, 'authentication rejected')
+            void this.refreshAuthenticationAndReconnect()
             return
           }
         } catch {
@@ -245,6 +251,40 @@ class UiWebSocketService {
       this.reconnectTimer = null
       this.connect().catch(console.error)
     }, delay)
+  }
+
+  /** WebSocket JWT 过期时刷新 access token，并恢复常驻连接。 */
+  private async refreshAuthenticationAndReconnect() {
+    if (this.refreshingAuthentication || this.manuallyDisconnected) return
+    this.refreshingAuthentication = true
+    try {
+      const authStore = useAuthStore()
+      const refreshToken = localStorage.getItem('auth-refreshToken') || authStore.refreshToken
+      if (!refreshToken) return
+
+      const response = await fetch(`${getApiBaseUrl()}${API_ENDPOINTS.AUTH.REFRESH}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept-Language': getCurrentServerLanguage(),
+        },
+        body: JSON.stringify({ refresh: refreshToken }),
+      })
+      if (!response.ok) return
+
+      const data = await response.json()
+      if (!data.access || this.manuallyDisconnected) return
+
+      authStore.accessToken = data.access
+      localStorage.setItem('auth-accessToken', data.access)
+      this.authenticationRejected = false
+      this.error.value = null
+      this.attemptReconnect()
+    } catch (error) {
+      console.warn('[WebSocket] Failed to refresh authentication:', error)
+    } finally {
+      this.refreshingAuthentication = false
+    }
   }
   
   /** 发送消息 */
