@@ -152,7 +152,7 @@ function getContextOptionsWithHeaders(options = {}) {
     const message = error && error.message ? String(error.message) : String(error);
     const isTimeout = error && (error.name === 'TimeoutError' || /Timeout \d+ms exceeded/i.test(message));
     if (isTimeout) {
-      console.log(`RESULT=FAIL: 操作超时 - ${message}`);
+      console.log('RESULT=FAIL: 操作超时 - ' + message);
       return;
     }
     console.error('❌ Automation error:', error.message);
@@ -175,7 +175,7 @@ function getContextOptionsWithHeaders(options = {}) {
     const message = error && error.message ? String(error.message) : String(error);
     const isTimeout = error && (error.name === 'TimeoutError' || /Timeout \d+ms exceeded/i.test(message));
     if (isTimeout) {
-      console.log(`RESULT=FAIL: 操作超时 - ${message}`);
+      console.log('RESULT=FAIL: 操作超时 - ' + message);
       return;
     }
     console.error('❌ Automation error:', error.message);
