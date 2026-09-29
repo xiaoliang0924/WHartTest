@@ -65,13 +65,16 @@
       </a-card>
 
       <a-card v-if="record?.data_usage" :title="text.dataUsage" size="small" class="block">
-        <a-alert :type="dataUsageAlertType" :title="dataUsageMessage" show-icon />
-        <div v-if="record.data_usage.matched_identifier" class="usage-detail">
-          {{ text.dataIdentifier }}：{{ record.data_usage.matched_identifier.value }}
-        </div>
-        <div v-if="record.data_usage.evidence" class="usage-evidence">
-          {{ text.dataEvidence }}：{{ record.data_usage.evidence }}
-        </div>
+        <a-alert :type="dataUsageAlertType" :title="dataUsageConclusion" show-icon />
+        <p v-if="dataUsageMessage" class="usage-message">{{ dataUsageMessage }}</p>
+        <ol v-if="dataUsageEvidenceItems.length" class="usage-evidence-list">
+          <li v-for="(item, index) in dataUsageEvidenceItems" :key="`${index}-${item}`">{{ item }}</li>
+        </ol>
+        <a-collapse v-if="record.data_usage.evidence" :default-active-key="[]" :bordered="false" class="usage-raw-collapse">
+          <a-collapse-item :header="text.rawEvidence" key="raw-evidence">
+            <pre class="usage-raw-evidence">{{ record.data_usage.evidence }}</pre>
+          </a-collapse-item>
+        </a-collapse>
       </a-card>
 
       <a-card :title="text.stepResults" size="small" class="block">
@@ -176,7 +179,19 @@ const text = computed(() => (
         summary: 'Summary',
         dataUsage: 'Generated Data Usage',
         dataIdentifier: 'Matched identifier',
-        dataEvidence: 'Evidence',
+        dataConclusion: 'Conclusion',
+        dataConclusionVerified: 'Generated data use was confirmed.',
+        dataConclusionReferenced: 'The log mentions generated data, but actual use was not confirmed.',
+        dataConclusionUnknown: 'Generated data use could not be confirmed.',
+        dataConclusionNotApplicable: 'No generated data was used in this run.',
+        rawEvidence: 'View raw execution log',
+        rowVisible: 'Generated record was visible in the list',
+        rowNotVisible: 'Generated record was not visible in the list',
+        dialogOpened: 'The expected dialog opened',
+        dialogNotOpened: 'The expected dialog did not open',
+        evidenceUnavailable: 'No readable page operation evidence was found.',
+        resultPass: 'Execution result',
+        resultFail: 'Execution failure',
         stepResults: 'Step Results',
         waitingSteps: 'Waiting for execution results...',
         noSteps: 'No structured step results',
@@ -215,7 +230,19 @@ const text = computed(() => (
         summary: '结果摘要',
         dataUsage: '造数数据使用情况',
         dataIdentifier: '匹配标识',
-        dataEvidence: '执行证据',
+        dataConclusion: '结论',
+        dataConclusionVerified: '已确认使用本次造数数据。',
+        dataConclusionReferenced: '日志提到了造数标识，但还未确认实际使用。',
+        dataConclusionUnknown: '暂时无法确认是否使用了本次造数数据。',
+        dataConclusionNotApplicable: '本次执行未使用自动造数数据。',
+        rawEvidence: '查看原始执行日志',
+        rowVisible: '本次造数记录已在列表中显示',
+        rowNotVisible: '列表中未找到本次造数记录',
+        dialogOpened: '目标弹窗已打开',
+        dialogNotOpened: '目标弹窗未打开',
+        evidenceUnavailable: '没有提取到可读的页面操作记录。',
+        resultPass: '执行结果',
+        resultFail: '执行失败',
         stepResults: '步骤结果',
         waitingSteps: '等待执行结果...',
         noSteps: '暂无结构化步骤结果',
@@ -246,6 +273,62 @@ const isRunning = computed(() => record.value?.status === 'running' || (props.pr
 const isPreDataBlocked = computed(() => record.value?.summary?.startsWith('测试数据准备失败') || false);
 
 const dataUsageMessage = computed(() => record.value?.data_usage?.message || '');
+const dataUsageConclusion = computed(() => {
+  const status = record.value?.data_usage?.status;
+  if (status === 'verified_used') return `${text.value.dataConclusion}：${text.value.dataConclusionVerified}`;
+  if (status === 'referenced') return `${text.value.dataConclusion}：${text.value.dataConclusionReferenced}`;
+  if (status === 'not_applicable') return `${text.value.dataConclusion}：${text.value.dataConclusionNotApplicable}`;
+  return `${text.value.dataConclusion}：${text.value.dataConclusionUnknown}`;
+});
+
+const dataUsageEvidenceItems = computed(() => {
+  const usage = record.value?.data_usage;
+  if (!usage) return [];
+
+  const items: string[] = [];
+  const matchedIdentifier = usage.matched_identifier;
+  if (matchedIdentifier?.value) {
+    const identifierKey = isEnglish.value
+      ? matchedIdentifier.key
+      : ({ ticketNo: '工单号', ticketId: '工单 ID', work_order_id: '工单 ID', processingTicketId: '处理工单 ID' } as Record<string, string>)[matchedIdentifier.key]
+        || matchedIdentifier.key;
+    items.push(`${text.value.dataIdentifier}：${identifierKey} ${matchedIdentifier.value}`);
+  }
+
+  const evidence = (usage.evidence || '').replace(/\\r\\n|\\n/g, '\n').replace(/\r/g, '\n');
+  const urls = [...evidence.matchAll(/\bURL\s*=\s*(https?:\/\/[^\s"'`,}\\]+)/gi)]
+    .map((match) => {
+      try {
+        const parsedUrl = new URL(match[1].replace(/[\])}>.;，。]+$/, ''));
+        return `${parsedUrl.origin}${parsedUrl.pathname}`;
+      } catch {
+        return match[1].replace(/[\])}>.;，。]+$/, '');
+      }
+    });
+  const uniqueUrls = [...new Set(urls)];
+  uniqueUrls.slice(0, 2).forEach((url) => items.push(`${isEnglish.value ? 'Page' : '页面'}：${url}`));
+
+  const rowVisible = evidence.match(/\bROW_VISIBLE\s*=\s*(true|false)\b/i)?.[1]?.toLowerCase();
+  if (rowVisible) items.push(rowVisible === 'true' ? text.value.rowVisible : text.value.rowNotVisible);
+
+  const dialogOpened = evidence.match(/\bDIALOG\s*=\s*(true|false)\b/i)?.[1]?.toLowerCase();
+  if (dialogOpened) items.push(dialogOpened === 'true' ? text.value.dialogOpened : text.value.dialogNotOpened);
+
+  const results = [...evidence.matchAll(/\bRESULT\s*=\s*(PASS|FAIL)\s*:\s*([^\n]+)/gi)];
+  const uniqueResults = [...new Set(results.map((match) => {
+    const description = match[2]
+      .replace(/\\[nrt]/g, ' ')
+      .replace(/["'}\],]+\s*$/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const label = match[1].toUpperCase() === 'PASS' ? text.value.resultPass : text.value.resultFail;
+    return description ? `${label}：${description}` : label;
+  }))];
+  uniqueResults.slice(0, 3).forEach((result) => items.push(result));
+
+  if (items.length === 0) items.push(text.value.evidenceUnavailable);
+  return items;
+});
 const dataUsageAlertType = computed(() => {
   const status = record.value?.data_usage?.status;
   if (status === 'verified_used') return 'success';
@@ -481,12 +564,37 @@ defineExpose({
   gap: 12px;
 }
 
-.usage-detail,
-.usage-evidence {
+.usage-message {
   margin-top: 8px;
   line-height: 1.6;
+  color: var(--color-text-2);
+}
+
+.usage-evidence-list {
+  margin: 8px 0 0;
+  padding-left: 24px;
+  color: var(--color-text-1);
+  line-height: 1.8;
+}
+
+.usage-evidence-list li {
+  padding-left: 4px;
+  overflow-wrap: anywhere;
+}
+
+.usage-raw-collapse {
+  margin-top: 8px;
+}
+
+.usage-raw-evidence {
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
   white-space: pre-wrap;
-  word-break: break-all;
+  overflow-wrap: anywhere;
+  color: var(--color-text-2);
+  font: inherit;
+  font-size: 12px;
 }
 
 .status-bar {
