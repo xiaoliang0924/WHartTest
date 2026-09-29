@@ -615,6 +615,7 @@ const handleAddUser = async (done: (closed: boolean) => void) => {
 // 编辑用户模态框相关
 const editUserModalVisible = ref(false);
 const editUserFormRef = ref();
+const editUserOriginalName = reactive({ first_name: '', last_name: '' });
 const editUserForm = reactive<UpdateUserRequest & { confirmPassword: string, id: number }>({
   id: 0,
   username: '',
@@ -655,6 +656,9 @@ const onEditUserTabChange = async (key: string) => {
 }
 
 const editUser = async (user: User) => {
+  editUserOriginalName.first_name = user.first_name || '';
+  editUserOriginalName.last_name = user.last_name || '';
+
   // 设置表单数据
   Object.assign(editUserForm, {
     id: user.id,
@@ -695,8 +699,12 @@ const handleEditUser = async (done: (closed: boolean) => void) => {
 
   // 只包含已修改的字段
   if (editUserForm.email) updateData.email = editUserForm.email;
-  if (editUserForm.first_name !== undefined) updateData.first_name = editUserForm.first_name;
-  if (editUserForm.last_name !== undefined) updateData.last_name = editUserForm.last_name;
+  if (editUserForm.first_name !== editUserOriginalName.first_name) {
+    updateData.first_name = editUserForm.first_name || '';
+  }
+  if (editUserForm.last_name !== editUserOriginalName.last_name) {
+    updateData.last_name = editUserForm.last_name || '';
+  }
   if (editUserForm.is_staff !== undefined) updateData.is_staff = editUserForm.is_staff;
   if (editUserForm.is_active !== undefined) updateData.is_active = editUserForm.is_active;
 
@@ -712,7 +720,7 @@ const handleEditUser = async (done: (closed: boolean) => void) => {
     if (response.success) {
       Message.success(pageText.value.updateUserSuccess);
       // 刷新用户列表
-      fetchUserList();
+      await fetchUserList();
       done(true); // 关闭模态框
     } else {
       Message.error(response.error || pageText.value.updateUserFailed);
