@@ -61,7 +61,7 @@
       <a-alert v-if="isRunning" type="info" :title="text.runningHint" show-icon class="block" />
 
       <a-card v-if="record?.summary" :title="text.summary" size="small" class="block">
-        <div class="summary-text">{{ record.summary }}</div>
+        <div class="summary-text" v-html="summaryHtml"></div>
       </a-card>
 
       <a-card v-if="record?.data_usage" :title="text.dataUsage" size="small" class="block">
@@ -88,6 +88,33 @@
         >
           <template #status="{ record: step }">
             <a-tag :color="stepStatusColor(step.status)">{{ stepStatusLabel(step.status) }}</a-tag>
+          </template>
+          <template #actualResult="{ record: step }">
+            <div class="actual-result-cell">
+              <span>{{ step.actual_result_summary }}</span>
+              <a-popover
+                v-if="step.actual_result_items.length || step.actual_result_detail"
+                trigger="hover"
+                position="top"
+              >
+                <a-button type="text" size="mini" class="actual-result-detail-trigger">
+                  {{ text.viewDetails }}
+                </a-button>
+                <template #content>
+                  <div class="actual-result-popover">
+                    <div v-if="step.actual_result_items.length" class="actual-result-detail-title">
+                      {{ text.detectedFields }}（{{ step.actual_result_items.length }}）
+                    </div>
+                    <div v-if="step.actual_result_items.length" class="actual-result-items">
+                      <span v-for="(item, index) in step.actual_result_items" :key="`${index}-${item}`">{{ item }}</span>
+                    </div>
+                    <p v-if="step.actual_result_detail" class="actual-result-detail-text">
+                      {{ step.actual_result_detail }}
+                    </p>
+                  </div>
+                </template>
+              </a-popover>
+            </div>
           </template>
         </a-table>
         <a-empty v-else :description="isRunning ? text.waitingSteps : isPreDataBlocked ? text.preDataNoSteps : text.noSteps" />
@@ -120,6 +147,8 @@
 import { computed, ref, watch, onBeforeUnmount } from 'vue';
 import { useRouter } from 'vue-router';
 import type { TableColumnData } from '@arco-design/web-vue';
+import DOMPurify from 'dompurify';
+import { marked } from 'marked';
 import { IconClose } from '@arco-design/web-vue/es/icon';
 import {
   getLatestTestCaseRunRecord,
@@ -208,6 +237,8 @@ const text = computed(() => (
         description: 'Description',
         expected: 'Expected',
         actual: 'Actual',
+        viewDetails: 'Details',
+        detectedFields: 'Detected fields',
         status: 'Status',
         running: 'Running',
         pass: 'Pass',
@@ -259,6 +290,8 @@ const text = computed(() => (
         description: '描述',
         expected: '预期结果',
         actual: '实际结果',
+        viewDetails: '查看详情',
+        detectedFields: '实际检测到的字段',
         status: '状态',
         running: '执行中',
         pass: '通过',
@@ -271,6 +304,11 @@ const text = computed(() => (
 
 const isRunning = computed(() => record.value?.status === 'running' || (props.preparing && !record.value));
 const isPreDataBlocked = computed(() => record.value?.summary?.startsWith('测试数据准备失败') || false);
+const summaryHtml = computed(() => {
+  const summary = record.value?.summary || '';
+  if (!summary) return '';
+  return DOMPurify.sanitize(marked.parse(summary) as string);
+});
 
 const dataUsageMessage = computed(() => record.value?.data_usage?.message || '');
 const dataUsageConclusion = computed(() => {
@@ -396,20 +434,61 @@ const stepColumns = computed<TableColumnData[]>(() => [
   { title: text.value.step, dataIndex: 'step_number', width: 70, align: 'center' },
   { title: text.value.description, dataIndex: 'description', ellipsis: true, tooltip: true },
   { title: text.value.expected, dataIndex: 'expected_result', ellipsis: true, tooltip: true },
-  { title: text.value.actual, dataIndex: 'actual_result', ellipsis: true, tooltip: true },
+  { title: text.value.actual, dataIndex: 'actual_result_summary', slotName: 'actualResult' },
   { title: text.value.status, slotName: 'status', width: 90, align: 'center' },
 ]);
 
+const formatActualResult = (value: string) => {
+  const normalized = value.replace(/\\r\\n|\\n/g, '\n').replace(/\\r/g, '\n').trim();
+  const arrayMatch = normalized.match(/\[[\s\S]*\]/);
+  if (arrayMatch && arrayMatch.index !== undefined) {
+    const candidates = [arrayMatch[0], arrayMatch[0].replace(/\\"/g, '"').replace(/\\\\/g, '\\')];
+    for (const candidate of candidates) {
+      try {
+        const parsed: unknown = JSON.parse(candidate);
+        if (Array.isArray(parsed) && parsed.every((item) => typeof item === 'string' || typeof item === 'number')) {
+          const items = parsed.map(String);
+          const prefix = normalized.slice(0, arrayMatch.index)
+            .replace(/(?:实际(?:结果)?|actual(?:\s+result)?)\s*[:=]\s*$/i, '')
+            .replace(/[：:=|\s]+$/, '')
+            .trim();
+          const fieldCount = isEnglish.value ? `${items.length} fields detected` : `检测到 ${items.length} 个字段`;
+          return {
+            summary: prefix ? `${prefix} · ${fieldCount}` : fieldCount,
+            items,
+            detail: '',
+          };
+        }
+      } catch {
+        // Continue with the normalized text when the embedded value is not valid JSON.
+      }
+    }
+  }
+
+  const compact = normalized.replace(/\s+/g, ' ');
+  const maxLength = 96;
+  return {
+    summary: compact.length > maxLength ? `${compact.slice(0, maxLength)}…` : compact || '-',
+    items: [],
+    detail: compact.length > maxLength ? compact : '',
+  };
+};
+
 const displaySteps = computed(() => {
   const steps = record.value?.step_results || [];
-  return steps.map((step: TestCaseRunStepResult, index: number) => ({
-    key: `${step.step_number || index + 1}-${index}`,
-    step_number: step.step_number || index + 1,
-    description: step.description || '-',
-    expected_result: step.expected_result || '-',
-    actual_result: step.actual_result || step.error || '-',
-    status: step.status || 'unknown',
-  }));
+  return steps.map((step: TestCaseRunStepResult, index: number) => {
+    const actualResult = formatActualResult(step.actual_result || step.error || '-');
+    return {
+      key: `${step.step_number || index + 1}-${index}`,
+      step_number: step.step_number || index + 1,
+      description: step.description || '-',
+      expected_result: step.expected_result || '-',
+      actual_result_summary: actualResult.summary,
+      actual_result_items: actualResult.items,
+      actual_result_detail: actualResult.detail,
+      status: step.status || 'unknown',
+    };
+  });
 });
 
 const stepStatusLabel = (status?: string) => {
@@ -627,8 +706,132 @@ defineExpose({
 }
 
 .summary-text {
-  white-space: pre-wrap;
   line-height: 1.6;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.summary-text :deep(h1),
+.summary-text :deep(h2),
+.summary-text :deep(h3),
+.summary-text :deep(h4) {
+  margin: 16px 0 8px;
+  color: var(--color-text-1);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.summary-text :deep(h1:first-child),
+.summary-text :deep(h2:first-child),
+.summary-text :deep(h3:first-child),
+.summary-text :deep(h4:first-child) {
+  margin-top: 0;
+}
+
+.summary-text :deep(p) {
+  margin: 6px 0;
+}
+
+.summary-text :deep(ul),
+.summary-text :deep(ol) {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+
+.summary-text :deep(table) {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 10px 0 14px;
+  overflow-x: auto;
+  border-collapse: collapse;
+  table-layout: auto;
+  font-size: 13px;
+}
+
+.summary-text :deep(th),
+.summary-text :deep(td) {
+  min-width: 76px;
+  max-width: 360px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-2);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.summary-text :deep(th) {
+  background: var(--color-fill-2);
+  font-weight: 600;
+}
+
+.summary-text :deep(tr:nth-child(even) td) {
+  background: var(--color-fill-1);
+}
+
+.summary-text :deep(pre),
+.summary-text :deep(code) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.summary-text :deep(pre) {
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--color-fill-1);
+}
+
+.actual-result-cell {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.actual-result-detail-trigger {
+  flex: 0 0 auto;
+  height: auto;
+  padding: 0 2px;
+  line-height: 1.5;
+}
+
+.actual-result-popover {
+  max-width: min(520px, 72vw);
+  max-height: 320px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+
+.actual-result-detail-title {
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.actual-result-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.actual-result-items span {
+  padding: 2px 8px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 4px;
+  background: var(--color-fill-1);
+  overflow-wrap: anywhere;
+}
+
+.actual-result-detail-text {
+  max-width: 520px;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .footer-actions {
