@@ -376,7 +376,7 @@ const columns = computed(() => [
     dataIndex: 'name',
     align: 'center',
     render: ({ record }: { record: User }) => {
-      const fullName = [record.last_name, record.first_name].filter(Boolean).join(' ');
+      const fullName = [record.last_name, record.first_name].filter(Boolean).join('');
       return fullName || '-';
     },
   },
