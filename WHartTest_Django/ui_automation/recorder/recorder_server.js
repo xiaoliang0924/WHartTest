@@ -45,6 +45,7 @@ function send(msg) {
 }
 
 function pushEvent(event, data) {
+  if (event === 'frame' && state.loginInProgress) return;
   send({ event, data });
 }
 
@@ -994,6 +995,7 @@ const state = {
   freezeAnimation: (process.env.RECORDER_FREEZE_ANIMATION || 'true').toLowerCase() !== 'false',
   running: false,
   preRunning: false,      // 前置步骤执行中（不记录动作/导航）
+  loginInProgress: false, // 凭据输入期间不向前端推送页面帧
   frameTimer: null,
   capturing: false,
   startedUrl: '',
@@ -2750,6 +2752,133 @@ async function cmdClose() {
   return { ok: true };
 }
 
+/** 使用环境配置的账号完成手动登录。凭据仅在此 RPC 内存中使用，不写日志或录制动作。 */
+async function cmdLogin(params) {
+  if (!state.page || !state.running) {
+    return { ok: false, error: '浏览器会话未启动' };
+  }
+  const page = state.page;
+  const url = String(params.url || '');
+  const username = String(params.username || '');
+  const password = String(params.password || '');
+  const manualText = String(params.manual_button_text || '手动登录');
+  let passwordField = null;
+  let accountField = null;
+  if (!url || !username || !password) {
+    return { ok: false, error: '自动登录配置不完整，请检查登录页 URL、账号和密码。' };
+  }
+
+  const startedAt = Date.now();
+  state.preRunning = true;
+  state.loginInProgress = true;
+  try {
+    if (page.url() !== url) {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    }
+
+    passwordField = params.password_selector
+      ? page.locator(String(params.password_selector)).first()
+      : page.locator('input[type="password"]').first();
+    const passwordReady = await passwordField.isVisible().catch(() => false);
+    if (!passwordReady) {
+      const manualButton = page.getByRole('button', { name: manualText, exact: true }).first();
+      const manualLink = page.getByRole('link', { name: manualText, exact: true }).first();
+      if (await manualButton.isVisible().catch(() => false)) {
+        await manualButton.click({ timeout: 10000 });
+      } else if (await manualLink.isVisible().catch(() => false)) {
+        await manualLink.click({ timeout: 10000 });
+      } else {
+        const manualTextLocator = page.getByText(manualText, { exact: true }).first();
+        if (await manualTextLocator.isVisible().catch(() => false)) {
+          await manualTextLocator.click({ timeout: 10000 });
+        }
+      }
+    }
+    await passwordField.waitFor({ state: 'visible', timeout: 15000 });
+
+    if (params.account_selector) {
+      accountField = page.locator(String(params.account_selector)).first();
+    } else {
+      const candidates = [
+        page.getByLabel(/账号|用户名|用户|手机号|工号|account|username/i).first(),
+        page.getByPlaceholder(/账号|用户名|用户|手机号|工号|account|username/i).first(),
+        page.locator('input[type="text"], input[type="tel"], input:not([type])').first(),
+      ];
+      for (const candidate of candidates) {
+        if (await candidate.isVisible().catch(() => false)) {
+          accountField = candidate;
+          break;
+        }
+      }
+    }
+    if (!accountField || !(await accountField.isVisible().catch(() => false))) {
+      return { ok: false, error: '未找到可见的账号输入框，请配置账号输入框定位器。' };
+    }
+
+    await accountField.fill(username, { timeout: 10000 });
+    await passwordField.fill(password, { timeout: 10000 });
+
+    let submitButton;
+    if (params.submit_selector) {
+      submitButton = page.locator(String(params.submit_selector)).first();
+    } else {
+      submitButton = page.getByRole('button', {
+        name: /^(?:登录|确定登录|sign\s*in|log\s*in|submit)$/i,
+      }).first();
+    }
+    if (!(await submitButton.isVisible().catch(() => false))) {
+      return { ok: false, error: '未找到可见的登录按钮，请配置登录按钮定位器。' };
+    }
+    await submitButton.click({ timeout: 10000 });
+
+    if (params.success_selector) {
+      await page.locator(String(params.success_selector)).first().waitFor({
+        state: 'visible', timeout: 30000,
+      });
+    } else {
+      await page.waitForFunction(() => {
+        const visible = (el) => {
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden'
+            && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+        };
+        const path = new URL(window.location.href).pathname;
+        const onLoginRoute = /\/(login|signin|sign-in|auth)(\/|$)/i.test(path);
+        const passwordVisible = Array.from(document.querySelectorAll('input[type="password"]')).some(visible);
+        const authenticatedShellVisible = Array.from(
+          document.querySelectorAll('nav,[role="navigation"],aside')
+        ).some(visible);
+        return !passwordVisible && (!onLoginRoute || authenticatedShellVisible);
+      }, { timeout: 30000 });
+    }
+
+    // 清理输入值，避免后续 Trace、截图或录制动作保留凭据。
+    await passwordField.fill('').catch(() => {});
+    await accountField.fill('').catch(() => {});
+    return {
+      ok: true,
+      state: {
+        message: '账号登录成功，已进入业务系统',
+        page_url: page.url(),
+        duration: (Date.now() - startedAt) / 1000,
+      },
+    };
+  } catch (_) {
+    // Playwright 诊断字符串可能包含 DOM 内容，故不直接回传异常以免泄露凭据。
+    return {
+      ok: false,
+      error: '自动登录失败：请核对登录页、账号密码和定位配置，或配置登录成功标志。',
+      state: { duration: (Date.now() - startedAt) / 1000 },
+    };
+  } finally {
+    if (passwordField) await passwordField.fill('').catch(() => {});
+    if (accountField) await accountField.fill('').catch(() => {});
+    state.loginInProgress = false;
+    state.preRunning = false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 主循环
 // ---------------------------------------------------------------------------
@@ -2778,6 +2907,8 @@ rl.on('line', (line) => {
           return respond(await cmdPing());
         case 'start':
           return respond(await cmdStart(msg.params || {}));
+        case 'login':
+          return respond(await cmdLogin(msg.params || {}));
         case 'input':
           return respond(await cmdInput(msg.params || {}));
         case 'run_steps':

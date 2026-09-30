@@ -2,6 +2,7 @@ import logging
 # -*- coding: utf-8 -*-
 """UI 自动化序列化器"""
 
+from django.core.exceptions import ImproperlyConfigured
 from rest_framework import serializers
 
 logger = logging.getLogger(__name__)
@@ -425,11 +426,76 @@ class UiEnvironmentConfigSerializer(serializers.ModelSerializer):
     """环境配置序列化器"""
     creator_name = serializers.CharField(source='creator.username', read_only=True)
     auth_state_active = serializers.SerializerMethodField()
+    login_password = serializers.CharField(
+        write_only=True, required=False, allow_blank=True, trim_whitespace=False
+    )
+    login_password_configured = serializers.SerializerMethodField()
 
     class Meta:
         model = UiEnvironmentConfig
-        fields = '__all__'
+        # Never expose the encrypted value; clients only receive a configured flag.
+        fields = [
+            'id', 'project', 'name', 'base_url', 'login_url', 'login_username',
+            'login_password', 'login_password_configured', 'login_manual_button_text',
+            'login_account_selector', 'login_password_selector', 'login_submit_selector',
+            'login_success_selector', 'db_c_status', 'db_rud_status', 'db_type',
+            'mysql_config', 'extra_config', 'is_default', 'creator', 'creator_name',
+            'created_at', 'updated_at', 'auth_state_active',
+        ]
         read_only_fields = ['creator', 'created_at', 'updated_at']
+
+    def get_login_password_configured(self, obj) -> bool:
+        return obj.has_login_credentials
+
+    def validate(self, attrs):
+        username = attrs.get(
+            'login_username', getattr(self.instance, 'login_username', '')
+        )
+        new_password = attrs.get('login_password', '')
+        old_password = bool(
+            self.instance and self.instance.login_password_encrypted
+        )
+        username_changed = bool(
+            self.instance and username and username != self.instance.login_username
+        )
+        if username and not (new_password or (old_password and not username_changed)):
+            raise serializers.ValidationError({
+                'login_password': '配置或更换自动登录账号时，请填写对应的登录密码。'
+            })
+        return attrs
+
+    def create(self, validated_data):
+        password = validated_data.pop('login_password', '')
+        if password:
+            instance = UiEnvironmentConfig(**validated_data)
+            try:
+                instance.set_login_password(password)
+            except ImproperlyConfigured as exc:
+                raise serializers.ValidationError({
+                    'login_password': '服务端自动登录加密密钥未正确配置。'
+                }) from exc
+            instance.save()
+            return instance
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop('login_password', '')
+        username_cleared = (
+            'login_username' in validated_data and not validated_data['login_username']
+        )
+        if password:
+            try:
+                instance.set_login_password(password)
+            except ImproperlyConfigured as exc:
+                raise serializers.ValidationError({
+                    'login_password': '服务端自动登录加密密钥未正确配置。'
+                }) from exc
+        elif username_cleared:
+            instance.login_password_encrypted = ''
+        instance = super().update(instance, validated_data)
+        if password or username_cleared:
+            instance.save(update_fields=['login_password_encrypted', 'updated_at'])
+        return instance
 
     def get_auth_state_active(self, obj) -> bool:
         """该环境当前是否有启用的登录态（前端列表徽标展示）。"""

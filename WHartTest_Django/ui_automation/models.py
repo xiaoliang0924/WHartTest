@@ -473,6 +473,14 @@ class UiEnvironmentConfig(models.Model):
     )
     name = models.CharField(_('环境名称'), max_length=64)
     base_url = models.URLField(_('基础 URL'), blank=True, null=True)
+    login_url = models.URLField(_('登录页 URL'), blank=True, default='')
+    login_username = models.CharField(_('自动登录账号'), max_length=256, blank=True, default='')
+    login_password_encrypted = models.TextField(_('自动登录密码（加密）'), blank=True, default='')
+    login_manual_button_text = models.CharField(_('手动登录按钮文案'), max_length=64, blank=True, default='手动登录')
+    login_account_selector = models.CharField(_('账号输入框定位器'), max_length=512, blank=True, default='')
+    login_password_selector = models.CharField(_('密码输入框定位器'), max_length=512, blank=True, default='')
+    login_submit_selector = models.CharField(_('登录按钮定位器'), max_length=512, blank=True, default='')
+    login_success_selector = models.CharField(_('登录成功标志定位器'), max_length=512, blank=True, default='')
     db_c_status = models.BooleanField(_('数据库新增状态'), default=False)
     db_rud_status = models.BooleanField(_('数据库查改删状态'), default=False)
     DB_TYPE_CHOICES = [('mysql', 'MySQL')]
@@ -496,6 +504,22 @@ class UiEnvironmentConfig(models.Model):
 
     def __str__(self):
         return f"{self.project.name} - {self.name}"
+
+    @property
+    def has_login_credentials(self) -> bool:
+        return bool(self.login_username and self.login_password_encrypted)
+
+    def set_login_password(self, password: str) -> None:
+        from .secrets import encrypt_ui_secret
+
+        self.login_password_encrypted = encrypt_ui_secret(password)
+
+    def get_login_password(self) -> str:
+        from .secrets import decrypt_ui_secret
+
+        if not self.login_password_encrypted:
+            return ''
+        return decrypt_ui_secret(self.login_password_encrypted)
 
     def save(self, *args, **kwargs):
         if self.is_default:

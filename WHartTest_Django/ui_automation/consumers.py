@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Optional
 from urllib.parse import parse_qs
 from channels.generic.websocket import AsyncWebsocketConsumer
@@ -913,7 +914,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         self._recorder_exec_user = user
         from .views import _resolve_recorder_skill_dir, _serialize_page_step_for_recorder, _auth_state_by_id
         from .recorder.session_manager import recorder_manager, RecorderSessionError
-        from .models import UiEnvironmentConfig, UiPageSteps, UiTestCase, UiCaseStepsDetailed
+        from .models import UiEnvironmentConfig, UiPage, UiPageSteps, UiTestCase, UiCaseStepsDetailed
         import time as _time
 
         env_config = None
@@ -951,13 +952,84 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 await self._recorder_exec_error(kind, args, user, '用例没有可执行的页面步骤')
                 return
 
-        # 仅注入显式绑定的登录态（取首个步骤的绑定）；未绑定 → 无痕启动
+        # 生成用例回放不一定携带 env_config_id：先沿首步骤绑定的快照找环境，
+        # 无快照时再按用例页面 URL 匹配项目环境，供自动登录配置使用。
         storage_state = None
         first_auth_id = getattr(groups[0], 'auth_state_id', None) if groups else None
+        bound = None
         if first_auth_id:
             bound = await sync_to_async(_auth_state_by_id)(first_auth_id)
-            if bound is not None:
-                storage_state = bound.state_json
+            if env_config is None and bound is not None:
+                env_config = bound.env_config
+                env_config_id = env_config.id
+
+        if env_config is None and kind != 'page_steps':
+            def _infer_environment_for_case():
+                from .generated_case_service import _auth_state_match_score
+
+                page_ids = [ps.page_id for ps in groups if ps.page_id]
+                observed_urls = list(
+                    UiPage.objects.filter(id__in=page_ids)
+                    .exclude(url__isnull=True).exclude(url='')
+                    .values_list('url', flat=True)
+                )
+                candidates = list(
+                    UiEnvironmentConfig.objects.filter(project_id=project_id)
+                    .order_by('-is_default', '-updated_at', '-id')
+                )
+                ranked = []
+                for candidate in candidates:
+                    score = max(
+                        (_auth_state_match_score(candidate.base_url, url) for url in observed_urls),
+                        default=-1,
+                    )
+                    if score >= 0:
+                        ranked.append((score, candidate))
+                if not ranked:
+                    return None
+                best_score = max(item[0] for item in ranked)
+                best = [candidate for score, candidate in ranked if score == best_score]
+                defaults = [candidate for candidate in best if candidate.is_default]
+                if len(defaults) == 1:
+                    return defaults[0]
+                return best[0] if len(best) == 1 else None
+
+            env_config = await sync_to_async(_infer_environment_for_case)()
+            if env_config is not None:
+                env_config_id = env_config.id
+
+        login_profile = None
+        if env_config is not None and env_config.login_username:
+            if not env_config.has_login_credentials:
+                await self._recorder_exec_error(
+                    kind, args, user, '环境自动登录配置不完整：请填写账号和密码。'
+                )
+                return
+            try:
+                login_profile = {
+                    'url': env_config.login_url or env_config.base_url or '',
+                    'username': env_config.login_username,
+                    'password': env_config.get_login_password(),
+                    'manual_button_text': env_config.login_manual_button_text or '手动登录',
+                    'account_selector': env_config.login_account_selector,
+                    'password_selector': env_config.login_password_selector,
+                    'submit_selector': env_config.login_submit_selector,
+                    'success_selector': env_config.login_success_selector,
+                }
+            except Exception as exc:
+                logger.error('[recorder-exec] 环境自动登录密钥读取失败: %s', exc)
+                await self._recorder_exec_error(
+                    kind, args, user, '无法读取环境自动登录密码，请检查服务端加密密钥配置。'
+                )
+                return
+            if not login_profile['url']:
+                await self._recorder_exec_error(
+                    kind, args, user, '环境自动登录缺少登录页 URL，请在环境配置中填写。'
+                )
+                return
+        elif bound is not None:
+            # 未配置账号登录时保留旧的 storageState 快照兼容行为。
+            storage_state = bound.state_json
 
         try:
             skill_dir = _resolve_recorder_skill_dir()
@@ -1021,12 +1093,6 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             # 同步 request 移出事件循环（to_thread），执行期间帧转发/中断仍可响应
             await asyncio.to_thread(session.request, 'start', start_params, 90)
             logger.info('[recorder-exec] start 请求完成，开始逐组执行')
-            # case 模式采集 Playwright trace：执行前开启，结束后 stop 落盘 zip
-            if kind != 'page_steps':
-                try:
-                    await asyncio.to_thread(session.request, 'start_trace', {'name': f'case_{args.get("case_id")}'}, 15)
-                except Exception as exc:
-                    logger.warning('[recorder-exec] 开启 trace 失败（不影响执行）: %s', exc)
             # 回执生效运行时（headless=false 观看模式）→ 前端据此自动打开执行画布
             web_user = SocketUserManager.get_web_user(user)
             if web_user:
@@ -1049,13 +1115,61 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
             message = ''
             group_index = 0
+            if login_profile:
+                total_steps += 1
+                try:
+                    auth_resp = await asyncio.to_thread(
+                        session.request, 'login', login_profile, 90,
+                    )
+                    auth_state = (auth_resp.get('state') or {}) if isinstance(auth_resp, dict) else {}
+                    auth_ok = bool(isinstance(auth_resp, dict) and auth_resp.get('ok'))
+                    auth_message = str(
+                        auth_state.get('message') or auth_resp.get('error') or ''
+                    ) if isinstance(auth_resp, dict) else '登录执行器返回无效响应'
+                    all_step_results.append({
+                        'index': 0,
+                        'group': 0,
+                        'ope_key': 'manual_login',
+                        'description': '手动登录并验证',
+                        'status': 'success' if auth_ok else 'failed',
+                        'message': auth_message or '账号登录成功，已进入业务系统',
+                        'duration': float(auth_state.get('duration') or 0),
+                    })
+                    if auth_ok:
+                        passed_steps += 1
+                    else:
+                        failed_steps += 1
+                        message = auth_message or '环境账号登录失败，请检查账号、密码和登录页定位配置。'
+                except Exception as exc:
+                    failed_steps += 1
+                    logger.warning('[recorder-exec] 环境账号登录失败: %s', type(exc).__name__)
+                    message = '环境账号登录失败，请核对登录页、账号密码和定位配置。'
+                    all_step_results.append({
+                        'index': 0,
+                        'group': 0,
+                        'ope_key': 'manual_login',
+                        'description': '手动登录并验证',
+                        'status': 'failed',
+                        'message': message,
+                        'duration': 0,
+                    })
+            # 登录凭据不进入 Trace：先认证并清空密码框，再开始采集业务回放。
+            if kind != 'page_steps' and not failed_steps:
+                try:
+                    await asyncio.to_thread(session.request, 'start_trace', {'name': f'case_{args.get("case_id")}'}, 15)
+                except Exception as exc:
+                    logger.warning('[recorder-exec] 开启 trace 失败（不影响执行）: %s', exc)
+
             # 组间登录态切换与执行器同语义："向上匹配"——未绑定步骤沿用上一个
             # 已绑定步骤的登录态（不清理），仅生效登录态变化时才切换上下文
-            pending_auth = getattr(groups[0], 'auth_state_id', None) if groups else None
+            pending_auth = (
+                None if login_profile else
+                (getattr(groups[0], 'auth_state_id', None) if groups else None)
+            )
             current_auth = pending_auth  # start 时按首个生效登录态注入
-            for page_step in groups:
+            for page_step in ([] if failed_steps else groups):
                 group_index += 1
-                if getattr(page_step, 'auth_state_id', None):
+                if not login_profile and getattr(page_step, 'auth_state_id', None):
                     pending_auth = getattr(page_step, 'auth_state_id', None) or None
                 if pending_auth != current_auth:
                     group_storage = None
@@ -1072,6 +1186,16 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                         )
                     current_auth = pending_auth
                 steps = await sync_to_async(_serialize_page_step_for_recorder)(page_step)
+                if login_profile and group_index == 1:
+                    # 生成用例可能把浏览器最初被重定向到的登录 URL 保存成页面入口；
+                    # 已完成本次新登录后，跳过该登录导航，避免重新落回登录页。
+                    def _is_login_navigation(step):
+                        if step.get('ope_key') != 'goto':
+                            return False
+                        target = str((step.get('ope_value') or {}).get('url') or '')
+                        return bool(re.search(r'/+(?:login|signin|sign-in)(?:/|$|[?])', target, re.I))
+
+                    steps = [step for step in steps if not _is_login_navigation(step)]
                 logger.info(
                     '[recorder-exec] 第 %d/%d 组执行 page_step=%s steps=%d base_url=%s',
                     group_index, len(groups), page_step.id, len(steps), group_bases[group_index - 1],
@@ -1080,7 +1204,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 #（与执行器 total_steps 口径一致：sum(len(ps.steps))）
                 group_step_count = len(steps)
                 base_url = group_bases[group_index - 1]
-                if base_url:
+                if base_url and not (login_profile and group_index == 1):
                     steps = [{
                         'ope_key': 'goto',
                         'ope_value': {'url': base_url},

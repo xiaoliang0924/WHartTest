@@ -841,6 +841,42 @@ class RecorderBrowserExecTests(TestCase):
         self.assertEqual(record.status, 2)
         self.assertEqual(record.executor_name if hasattr(record, 'executor_name') else 'recorder-browser', 'recorder-browser')
 
+    def test_case_uses_environment_manual_login_before_trace_and_steps(self):
+        """配置账号后使用全新上下文手动登录，且认证凭据不进入 Trace/业务步骤。"""
+        from unittest.mock import patch
+        from ui_automation.models import UiEnvironmentConfig
+
+        self.env.login_url = 'http://env.local/login?redirect=/tickets'
+        self.env.login_username = 'qa-user'
+        self.env.login_password_encrypted = 'encrypted-value'
+        self.env.save(update_fields=[
+            'login_url', 'login_username', 'login_password_encrypted',
+        ])
+        consumer, session, _received, layer = self._consumer_env()
+
+        async def scenario():
+            await consumer.handle_execute_test_case(
+                {'case_id': self.case.id, 'env_config_id': self.env.id,
+                 'actuator_id': 'recorder-browser'}, 'alice',
+            )
+            if consumer._recorder_exec_task is not None:
+                await asyncio.wait_for(consumer._recorder_exec_task, timeout=15)
+
+        with patch.object(UiEnvironmentConfig, 'get_login_password', return_value='secret-password'):
+            self._run(scenario)()
+
+        methods = [method for method, _params in session.requests]
+        self.assertLess(methods.index('login'), methods.index('start_trace'))
+        self.assertLess(methods.index('start_trace'), methods.index('run_steps'))
+        start_params = next(params for method, params in session.requests if method == 'start')
+        self.assertNotIn('storage_state', start_params)
+        login_params = next(params for method, params in session.requests if method == 'login')
+        self.assertEqual(login_params['manual_button_text'], '手动登录')
+        self.assertEqual(login_params['password'], 'secret-password')
+        self.assertNotIn('secret-password', str(layer.sent))
+        result = next(data for data in layer.sent if data.get('data', {}).get('func_name') == 'u_case_result')
+        self.assertEqual(result['data']['args']['status'], 'success')
+
     def test_case_auth_upward_inherit_skips_context_switch(self):
         """未绑定步骤"向上匹配"最近绑定的登录态：绑定 A/无/B/无 的用例只在
         第 3 步切换一次上下文（注入 B），第 2/4 步沿用不清空（与执行器同语义）。"""

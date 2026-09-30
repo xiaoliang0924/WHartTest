@@ -352,6 +352,14 @@ export interface UiEnvironmentConfig extends TimeStampFields {
   project: number
   name: string
   base_url?: string
+  login_url?: string
+  login_username?: string
+  login_password_configured?: boolean
+  login_manual_button_text?: string
+  login_account_selector?: string
+  login_password_selector?: string
+  login_submit_selector?: string
+  login_success_selector?: string
   db_c_status: boolean
   db_rud_status: boolean
   db_type: 'mysql'
@@ -446,4 +454,6 @@ export type UiElementForm = Omit<UiElement, 'id' | 'creator' | 'creator_name' | 
 export type UiPageStepsForm = Omit<UiPageSteps, 'id' | 'page_name' | 'module_name' | 'status' | 'result_data' | 'step_count' | 'creator' | 'creator_name' | 'created_at' | 'updated_at'>
 export type UiTestCaseForm = Omit<UiTestCase, 'id' | 'module_name' | 'status' | 'result_data' | 'error_message' | 'step_count' | 'creator' | 'creator_name' | 'created_at' | 'updated_at'>
 export type UiPublicDataForm = Omit<UiPublicData, 'id' | 'creator' | 'creator_name' | 'created_at' | 'updated_at'>
-export type UiEnvironmentConfigForm = Omit<UiEnvironmentConfig, 'id' | 'creator' | 'creator_name' | 'created_at' | 'updated_at'>
+export type UiEnvironmentConfigForm = Omit<UiEnvironmentConfig, 'id' | 'creator' | 'creator_name' | 'created_at' | 'updated_at' | 'login_password_configured'> & {
+  login_password?: string
+}

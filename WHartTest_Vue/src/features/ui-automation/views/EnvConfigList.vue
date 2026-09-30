@@ -150,6 +150,44 @@
         <a-form-item field="base_url" label="基础 URL">
           <a-input v-model="formData.base_url" placeholder="如：http://localhost:3000" />
         </a-form-item>
+        <a-divider>自动登录配置</a-divider>
+        <a-alert v-if="isEdit && currentConfig?.login_password_configured" type="info" style="margin-bottom: 12px">
+          已保存登录密码；留空表示沿用原密码。执行时会新建浏览器会话，点击“手动登录”后输入账号密码。
+        </a-alert>
+        <a-form-item field="login_url" label="登录页 URL">
+          <a-input v-model="formData.login_url" placeholder="如：https://example.com/login?redirect=/my-tickets" />
+        </a-form-item>
+        <a-row :gutter="16">
+          <a-col :span="12">
+            <a-form-item field="login_username" label="登录账号">
+              <a-input v-model="formData.login_username" placeholder="业务系统账号" autocomplete="off" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item field="login_password" label="登录密码">
+              <a-input-password v-model="formData.login_password" :placeholder="isEdit && currentConfig?.login_password_configured ? '留空以保留原密码' : '业务系统密码'" autocomplete="new-password" />
+            </a-form-item>
+          </a-col>
+        </a-row>
+        <a-form-item field="login_manual_button_text" label="手动登录入口文案">
+          <a-input v-model="formData.login_manual_button_text" placeholder="手动登录" />
+        </a-form-item>
+        <a-collapse>
+          <a-collapse-item key="locators" header="高级定位配置（页面无法自动识别时填写）">
+            <a-form-item field="login_account_selector" label="账号输入框定位器">
+              <a-input v-model="formData.login_account_selector" placeholder="CSS，例如 input[name=account]" />
+            </a-form-item>
+            <a-form-item field="login_password_selector" label="密码输入框定位器">
+              <a-input v-model="formData.login_password_selector" placeholder="CSS，例如 input[type=password]" />
+            </a-form-item>
+            <a-form-item field="login_submit_selector" label="登录按钮定位器">
+              <a-input v-model="formData.login_submit_selector" placeholder="CSS，例如 button[type=submit]" />
+            </a-form-item>
+            <a-form-item field="login_success_selector" label="登录成功标志（可选）">
+              <a-input v-model="formData.login_success_selector" placeholder="CSS；留空时根据离开登录页判断" />
+            </a-form-item>
+          </a-collapse-item>
+        </a-collapse>
         <a-form-item field="is_default" label="设为默认">
           <a-switch v-model="formData.is_default" />
         </a-form-item>
@@ -246,6 +284,14 @@ const formData = reactive<UiEnvironmentConfigForm>({
   project: 0,
   name: '',
   base_url: '',
+  login_url: '',
+  login_username: '',
+  login_password: '',
+  login_manual_button_text: '手动登录',
+  login_account_selector: '',
+  login_password_selector: '',
+  login_submit_selector: '',
+  login_success_selector: '',
   db_c_status: false,
   db_rud_status: false,
   db_type: 'mysql',
@@ -439,6 +485,14 @@ const resetForm = () => {
     project: projectId.value || 0,
     name: '',
     base_url: '',
+    login_url: '',
+    login_username: '',
+    login_password: '',
+    login_manual_button_text: '手动登录',
+    login_account_selector: '',
+    login_password_selector: '',
+    login_submit_selector: '',
+    login_success_selector: '',
     db_c_status: false,
     db_rud_status: false,
     db_type: 'mysql',
@@ -463,6 +517,14 @@ const editConfig = (record: UiEnvironmentConfig) => {
     project: record.project,
     name: record.name,
     base_url: record.base_url || '',
+    login_url: record.login_url || '',
+    login_username: record.login_username || '',
+    login_password: '',
+    login_manual_button_text: record.login_manual_button_text || '手动登录',
+    login_account_selector: record.login_account_selector || '',
+    login_password_selector: record.login_password_selector || '',
+    login_submit_selector: record.login_submit_selector || '',
+    login_success_selector: record.login_success_selector || '',
     db_c_status: record.db_c_status,
     db_rud_status: record.db_rud_status,
     db_type: record.db_type || 'mysql',
@@ -504,10 +566,12 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
   }
   submitting.value = true
   try {
-    const data = { 
+    const data = {
       ...formData, 
       mysql_config: buildMysqlConfig()
     }
+    // 密码仅在用户本次输入时传输；留空代表继续沿用服务端保存的加密值。
+    if (!data.login_password) delete data.login_password
     if (isEdit.value && currentConfig.value) {
       await envConfigApi.update(currentConfig.value.id, data)
       Message.success('更新成功')

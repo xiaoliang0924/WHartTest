@@ -1524,7 +1524,7 @@ def _auth_state_by_id(auth_state_id):
     """按 id 取登录态快照（录制表单选择的绑定登录态），无效返回 None。"""
     if not auth_state_id:
         return None
-    state = UiAuthState.objects.filter(id=auth_state_id).first()
+    state = UiAuthState.objects.select_related('env_config').filter(id=auth_state_id).first()
     if state is None or not isinstance(state.state_json, dict):
         return None
     return state

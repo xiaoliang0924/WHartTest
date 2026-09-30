@@ -73,6 +73,7 @@ SECRET_KEY = os.environ.get(
     "DJANGO_SECRET_KEY",
     "django-insecure-jsto-5oth_9(a_xfy#zg@$i$0w47h9a$rw0s&(v#1o5t+s-!*7",  # 开发环境兜底值
 )
+UI_AUTH_ENCRYPTION_KEY = os.environ.get("UI_AUTH_ENCRYPTION_KEY") or SECRET_KEY
 
 # 安全警告：生产环境禁止开启 DEBUG！
 # 从环境变量加载 DEBUG 开关；生产环境默认应为 False。

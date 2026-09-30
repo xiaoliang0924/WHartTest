@@ -28,6 +28,9 @@ daphne==4.2.1
 # https://github.com/theskumar/python-dotenv/blob/main/LICENSE
 python-dotenv==1.1.1
 
+# UI 自动登录凭据加密 - Apache-2.0/BSD-3-Clause
+cryptography>=43,<48
+
 # OpenAI API客户端 - MIT许可证 (v1.x 重大升级)
 # https://github.com/openai/openai-python/blob/main/LICENSE
 openai>=1.109.1
