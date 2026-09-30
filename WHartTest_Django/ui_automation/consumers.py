@@ -999,7 +999,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 env_config_id = env_config.id
 
         login_profile = None
-        if env_config is not None and env_config.login_username:
+        if env_config is not None and env_config.login_enabled:
             if not env_config.has_login_credentials:
                 await self._recorder_exec_error(
                     kind, args, user, '环境自动登录配置不完整：请填写账号和密码。'

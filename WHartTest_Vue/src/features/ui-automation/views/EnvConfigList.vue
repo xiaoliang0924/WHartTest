@@ -150,44 +150,50 @@
         <a-form-item field="base_url" label="基础 URL">
           <a-input v-model="formData.base_url" placeholder="如：http://localhost:3000" />
         </a-form-item>
-        <a-divider>自动登录配置</a-divider>
-        <a-alert v-if="isEdit && currentConfig?.login_password_configured" type="info" style="margin-bottom: 12px">
-          已保存登录密码；留空表示沿用原密码。执行时会新建浏览器会话，点击“手动登录”后输入账号密码。
-        </a-alert>
-        <a-form-item field="login_url" label="登录页 URL">
-          <a-input v-model="formData.login_url" placeholder="如：https://example.com/login?redirect=/my-tickets" />
+        <a-divider>登录辅助（可选）</a-divider>
+        <a-form-item field="login_enabled" label="启用手动登录辅助">
+          <a-switch v-model="formData.login_enabled" />
+          <span class="form-hint">适用于需要点击“手动登录”后填写账号密码的系统；关闭时此环境不会尝试登录。</span>
         </a-form-item>
-        <a-row :gutter="16">
-          <a-col :span="12">
-            <a-form-item field="login_username" label="登录账号">
-              <a-input v-model="formData.login_username" placeholder="业务系统账号" autocomplete="off" />
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item field="login_password" label="登录密码">
-              <a-input-password v-model="formData.login_password" :placeholder="isEdit && currentConfig?.login_password_configured ? '留空以保留原密码' : '业务系统密码'" autocomplete="new-password" />
-            </a-form-item>
-          </a-col>
-        </a-row>
-        <a-form-item field="login_manual_button_text" label="手动登录入口文案">
-          <a-input v-model="formData.login_manual_button_text" placeholder="手动登录" />
-        </a-form-item>
-        <a-collapse>
-          <a-collapse-item key="locators" header="高级定位配置（页面无法自动识别时填写）">
-            <a-form-item field="login_account_selector" label="账号输入框定位器">
-              <a-input v-model="formData.login_account_selector" placeholder="CSS，例如 input[name=account]" />
-            </a-form-item>
-            <a-form-item field="login_password_selector" label="密码输入框定位器">
-              <a-input v-model="formData.login_password_selector" placeholder="CSS，例如 input[type=password]" />
-            </a-form-item>
-            <a-form-item field="login_submit_selector" label="登录按钮定位器">
-              <a-input v-model="formData.login_submit_selector" placeholder="CSS，例如 button[type=submit]" />
-            </a-form-item>
-            <a-form-item field="login_success_selector" label="登录成功标志（可选）">
-              <a-input v-model="formData.login_success_selector" placeholder="CSS；留空时根据离开登录页判断" />
-            </a-form-item>
-          </a-collapse-item>
-        </a-collapse>
+        <template v-if="formData.login_enabled">
+          <a-alert v-if="isEdit && currentConfig?.login_password_configured" type="info" style="margin-bottom: 12px">
+            已保存登录密码；留空表示沿用原密码。执行时会新建浏览器会话，点击“手动登录”后输入账号密码。
+          </a-alert>
+          <a-form-item field="login_url" label="登录页 URL">
+            <a-input v-model="formData.login_url" placeholder="如：https://example.com/login?redirect=/my-tickets" />
+          </a-form-item>
+          <a-row :gutter="16">
+            <a-col :span="12">
+              <a-form-item field="login_username" label="登录账号">
+                <a-input v-model="formData.login_username" placeholder="业务系统账号" autocomplete="off" />
+              </a-form-item>
+            </a-col>
+            <a-col :span="12">
+              <a-form-item field="login_password" label="登录密码">
+                <a-input-password v-model="formData.login_password" :placeholder="isEdit && currentConfig?.login_password_configured ? '留空以保留原密码' : '业务系统密码'" autocomplete="new-password" />
+              </a-form-item>
+            </a-col>
+          </a-row>
+          <a-form-item field="login_manual_button_text" label="登录页切换入口文案">
+            <a-input v-model="formData.login_manual_button_text" placeholder="手动登录" />
+          </a-form-item>
+          <a-collapse>
+            <a-collapse-item key="locators" header="高级定位配置（页面无法自动识别时填写）">
+              <a-form-item field="login_account_selector" label="账号输入框定位器">
+                <a-input v-model="formData.login_account_selector" placeholder="CSS，例如 input[name=account]" />
+              </a-form-item>
+              <a-form-item field="login_password_selector" label="密码输入框定位器">
+                <a-input v-model="formData.login_password_selector" placeholder="CSS，例如 input[type=password]" />
+              </a-form-item>
+              <a-form-item field="login_submit_selector" label="登录按钮定位器">
+                <a-input v-model="formData.login_submit_selector" placeholder="CSS，例如 button[type=submit]" />
+              </a-form-item>
+              <a-form-item field="login_success_selector" label="登录成功标志（可选）">
+                <a-input v-model="formData.login_success_selector" placeholder="CSS；留空时根据离开登录页判断" />
+              </a-form-item>
+            </a-collapse-item>
+          </a-collapse>
+        </template>
         <a-form-item field="is_default" label="设为默认">
           <a-switch v-model="formData.is_default" />
         </a-form-item>
@@ -284,6 +290,7 @@ const formData = reactive<UiEnvironmentConfigForm>({
   project: 0,
   name: '',
   base_url: '',
+  login_enabled: false,
   login_url: '',
   login_username: '',
   login_password: '',
@@ -485,6 +492,7 @@ const resetForm = () => {
     project: projectId.value || 0,
     name: '',
     base_url: '',
+    login_enabled: false,
     login_url: '',
     login_username: '',
     login_password: '',
@@ -517,6 +525,7 @@ const editConfig = (record: UiEnvironmentConfig) => {
     project: record.project,
     name: record.name,
     base_url: record.base_url || '',
+    login_enabled: record.login_enabled ?? Boolean(record.login_username || record.login_password_configured),
     login_url: record.login_url || '',
     login_username: record.login_username || '',
     login_password: '',
@@ -687,6 +696,11 @@ watch(projectId, () => {
 .auth-tip {
   font-size: 12px;
   color: var(--color-text-3);
+}
+.form-hint {
+  margin-left: 12px;
+  color: var(--color-text-3);
+  font-size: 12px;
 }
 .mysql-config-form :deep(.arco-form-item) {
   margin-bottom: 16px;

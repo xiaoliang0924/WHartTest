@@ -473,6 +473,7 @@ class UiEnvironmentConfig(models.Model):
     )
     name = models.CharField(_('环境名称'), max_length=64)
     base_url = models.URLField(_('基础 URL'), blank=True, null=True)
+    login_enabled = models.BooleanField(_('启用登录辅助'), default=False)
     login_url = models.URLField(_('登录页 URL'), blank=True, default='')
     login_username = models.CharField(_('自动登录账号'), max_length=256, blank=True, default='')
     login_password_encrypted = models.TextField(_('自动登录密码（加密）'), blank=True, default='')

@@ -352,6 +352,7 @@ export interface UiEnvironmentConfig extends TimeStampFields {
   project: number
   name: string
   base_url?: string
+  login_enabled: boolean
   login_url?: string
   login_username?: string
   login_password_configured?: boolean

@@ -435,7 +435,7 @@ class UiEnvironmentConfigSerializer(serializers.ModelSerializer):
         model = UiEnvironmentConfig
         # Never expose the encrypted value; clients only receive a configured flag.
         fields = [
-            'id', 'project', 'name', 'base_url', 'login_url', 'login_username',
+            'id', 'project', 'name', 'base_url', 'login_enabled', 'login_url', 'login_username',
             'login_password', 'login_password_configured', 'login_manual_button_text',
             'login_account_selector', 'login_password_selector', 'login_submit_selector',
             'login_success_selector', 'db_c_status', 'db_rud_status', 'db_type',
@@ -448,6 +448,17 @@ class UiEnvironmentConfigSerializer(serializers.ModelSerializer):
         return obj.has_login_credentials
 
     def validate(self, attrs):
+        # Older API clients did not send the opt-in flag. Keep their existing
+        # behavior when they explicitly submit login credentials.
+        if 'login_enabled' not in attrs and self.instance is None:
+            attrs['login_enabled'] = bool(
+                attrs.get('login_username') or attrs.get('login_password')
+            )
+        login_enabled = attrs.get(
+            'login_enabled', getattr(self.instance, 'login_enabled', False)
+        )
+        if not login_enabled:
+            return attrs
         username = attrs.get(
             'login_username', getattr(self.instance, 'login_username', '')
         )

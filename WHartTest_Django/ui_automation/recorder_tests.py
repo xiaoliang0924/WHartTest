@@ -847,10 +847,11 @@ class RecorderBrowserExecTests(TestCase):
         from ui_automation.models import UiEnvironmentConfig
 
         self.env.login_url = 'http://env.local/login?redirect=/tickets'
+        self.env.login_enabled = True
         self.env.login_username = 'qa-user'
         self.env.login_password_encrypted = 'encrypted-value'
         self.env.save(update_fields=[
-            'login_url', 'login_username', 'login_password_encrypted',
+            'login_enabled', 'login_url', 'login_username', 'login_password_encrypted',
         ])
         consumer, session, _received, layer = self._consumer_env()
 
