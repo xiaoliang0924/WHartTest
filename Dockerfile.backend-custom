@@ -1,5 +1,5 @@
 FROM ghcr.io/mgdaaslab/wharttest-backend:latest
-RUN python -m pip install --no-cache-dir 'cryptography>=43,<48'
+RUN python -c "import cryptography; from cryptography.fernet import Fernet"
 COPY WHartTest_Django/ /app/
 # 让部署镜像中的预置 Skill 与仓库代码同步。运行时会将该目录同步到
 # media/skills；若不复制，helpers.js 的修复只存在于本地而不会进入生产。
