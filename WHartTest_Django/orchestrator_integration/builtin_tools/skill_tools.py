@@ -45,6 +45,26 @@ def _set_complete_ticket_step_metadata(env: dict, testcase) -> None:
         if step.step_number > 1
     }
     env["WHARTTEST_COMPLETE_STEPS_JSON"] = json.dumps(steps, ensure_ascii=False)
+
+
+def _ensure_testcase_playwright_session_id(
+    session_id: Optional[str],
+    *,
+    skill_name: str,
+    run_js_args: Optional[list],
+    test_case_id: Optional[int],
+) -> Optional[str]:
+    """Keep testcase Playwright commands in the persistent browser session."""
+    if (
+        session_id
+        or skill_name != "playwright-skill"
+        or run_js_args is None
+        or not test_case_id
+    ):
+        return session_id
+    return f"case_{test_case_id}"
+
+
 _ARTIFACT_EXTENSIONS = {
     ".drawio",
     ".png",
@@ -1685,15 +1705,33 @@ def get_skill_tools(
                 if exec_command != command:
                     logger.info(f"[execute_skill_script] Windows 命令转换完成")
 
-            # 持久化 Playwright 会话路径
-            # 仅当 session_id 存在 + skill_name == 'playwright-skill' + 命令是 run.js 调用时启用
-            if session_id and skill_name == "playwright-skill":
+            # 用例执行中的裸 JS/run.js 命令必须共享同一个持久化浏览器会话。
+            # Agent 偶尔会漏传 session_id；在回退到独立 Node 进程前按用例补齐，
+            # 避免 page 未定义并丢失登录态。非 JS 的 shell 命令仍走普通执行路径。
+            inline_code = None
+            run_js_args = None
+            if skill_name == "playwright-skill":
                 inline_code = extract_playwright_inline_code(command, exec_command)
                 run_js_args = (
                     [inline_code]
                     if inline_code
                     else extract_runjs_args(exec_command)
                 )
+                resolved_session_id = _ensure_testcase_playwright_session_id(
+                    session_id,
+                    skill_name=skill_name,
+                    run_js_args=run_js_args,
+                    test_case_id=current_test_case_id,
+                )
+                if resolved_session_id != session_id:
+                    logger.info(
+                        "[execute_skill_script] 用例 Playwright 命令自动绑定持久化会话: %s",
+                        resolved_session_id,
+                    )
+                    session_id = resolved_session_id
+
+            # 持久化 Playwright 会话路径
+            if session_id and skill_name == "playwright-skill":
                 if run_js_args is not None:
                     # 调试日志
                     logger.debug(f"[execute_skill_script] run_js_args: {run_js_args}")

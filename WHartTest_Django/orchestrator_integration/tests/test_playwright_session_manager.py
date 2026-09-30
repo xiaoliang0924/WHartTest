@@ -9,6 +9,43 @@ from orchestrator_integration.builtin_tools.persistent_playwright import (
     PlaywrightSessionManager,
     _SessionEntry,
 )
+from orchestrator_integration.builtin_tools.skill_tools import (
+    _ensure_testcase_playwright_session_id,
+)
+
+
+class TestcasePlaywrightSessionRoutingTests(SimpleTestCase):
+    def test_missing_session_id_uses_testcase_persistent_session(self):
+        self.assertEqual(
+            _ensure_testcase_playwright_session_id(
+                None,
+                skill_name="playwright-skill",
+                run_js_args=["await page.getByText('查询').click()"],
+                test_case_id=1163,
+            ),
+            "case_1163",
+        )
+
+    def test_explicit_session_id_is_preserved(self):
+        self.assertEqual(
+            _ensure_testcase_playwright_session_id(
+                "case_42",
+                skill_name="playwright-skill",
+                run_js_args=["await page.title()"],
+                test_case_id=1163,
+            ),
+            "case_42",
+        )
+
+    def test_non_javascript_skill_commands_do_not_get_a_browser_session(self):
+        self.assertIsNone(
+            _ensure_testcase_playwright_session_id(
+                None,
+                skill_name="playwright-skill",
+                run_js_args=None,
+                test_case_id=1163,
+            )
+        )
 
 
 class PlaywrightSessionManagerConcurrencyTests(SimpleTestCase):
