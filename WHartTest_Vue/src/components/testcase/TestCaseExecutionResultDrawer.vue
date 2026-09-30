@@ -59,29 +59,34 @@
         <div class="failure-alert-content">
           <div>{{ failReasonText }}</div>
           <div v-if="failReasonItems.length || failReasonDetail || failSuggestionText" class="failure-alert-extra">
-            <a-popover
+            <a-button
               v-if="failReasonItems.length || failReasonDetail"
-              trigger="hover"
-              position="top"
+              type="text"
+              size="mini"
+              class="actual-result-detail-trigger"
+              :aria-expanded="failureDetailsExpanded"
+              @click="failureDetailsExpanded = !failureDetailsExpanded"
             >
-              <a-button type="text" size="mini" class="actual-result-detail-trigger">
-                {{ text.viewDetails }}
-              </a-button>
-              <template #content>
-                <div class="actual-result-popover">
-                  <div v-if="failReasonItems.length" class="actual-result-detail-title">
-                    {{ text.detectedFields }}（{{ failReasonItems.length }}）
-                  </div>
-                  <div v-if="failReasonItems.length" class="actual-result-items">
-                    <span v-for="(item, index) in failReasonItems" :key="`${index}-${item}`">{{ item }}</span>
-                  </div>
-                  <p v-if="failReasonDetail" class="actual-result-detail-text">{{ failReasonDetail }}</p>
-                </div>
-              </template>
-            </a-popover>
+              {{ failureDetailsExpanded ? text.hideDetails : text.viewDetails }}
+            </a-button>
             <div v-if="failSuggestionText" class="failure-suggestion">
               <strong>{{ text.recommendation }}：</strong>{{ failSuggestionText }}
             </div>
+          </div>
+          <div v-if="failureDetailsExpanded" class="failure-alert-detail">
+            <div class="failure-alert-detail-header">
+              <strong>{{ text.fullFailureDetails }}</strong>
+              <a-button size="mini" type="outline" @click="copyFailureDetails">
+                {{ text.copyDetails }}
+              </a-button>
+            </div>
+            <div v-if="failReasonItems.length" class="actual-result-detail-title">
+              {{ text.detectedFields }}（{{ failReasonItems.length }}）
+            </div>
+            <div v-if="failReasonItems.length" class="actual-result-items">
+              <span v-for="(item, index) in failReasonItems" :key="`${index}-${item}`">{{ item }}</span>
+            </div>
+            <p v-if="failReasonDetail" class="actual-result-detail-text">{{ failReasonDetail }}</p>
           </div>
         </div>
       </a-alert>
@@ -172,6 +177,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount } from 'vue';
+import { Message } from '@arco-design/web-vue';
 import { useRouter } from 'vue-router';
 import type { TableColumnData } from '@arco-design/web-vue';
 import DOMPurify from 'dompurify';
@@ -212,6 +218,7 @@ const record = ref<TestCaseRunRecord | null>(null);
 const screenshots = ref<TestCaseScreenshot[]>([]);
 const loading = ref(false);
 const streamError = ref('');
+const failureDetailsExpanded = ref(false);
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 const drawerVisible = computed({
@@ -265,6 +272,11 @@ const text = computed(() => (
         expected: 'Expected',
         actual: 'Actual',
         viewDetails: 'Details',
+        hideDetails: 'Hide details',
+        fullFailureDetails: 'Full error details',
+        copyDetails: 'Copy details',
+        copyDetailsSuccess: 'Error details copied',
+        copyDetailsFailure: 'Could not copy details; please select and copy the text',
         detectedFields: 'Detected fields',
         recommendation: 'Suggestion',
         status: 'Status',
@@ -319,6 +331,11 @@ const text = computed(() => (
         expected: '预期结果',
         actual: '实际结果',
         viewDetails: '查看详情',
+        hideDetails: '收起详情',
+        fullFailureDetails: '完整错误详情',
+        copyDetails: '复制详情',
+        copyDetailsSuccess: '错误详情已复制',
+        copyDetailsFailure: '复制失败，请手动选择复制',
         detectedFields: '实际检测到的字段',
         recommendation: '建议',
         status: '状态',
@@ -452,6 +469,34 @@ const failReasonText = computed(() => failureAnalysis.value.reason);
 const failReasonItems = computed(() => failureAnalysis.value.items);
 const failReasonDetail = computed(() => failureAnalysis.value.detail);
 const failSuggestionText = computed(() => failureAnalysis.value.suggestion);
+
+const copyFailureDetails = async () => {
+  const content = [failReasonDetail.value, ...failReasonItems.value].filter(Boolean).join('\n');
+  if (!content) return;
+
+  let textArea: HTMLTextAreaElement | null = null;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(content);
+    } else {
+      textArea = document.createElement('textarea');
+      textArea.value = content;
+      textArea.setAttribute('readonly', 'readonly');
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-9999px';
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      if (!document.execCommand('copy')) throw new Error('Clipboard copy command failed');
+    }
+    Message.success(text.value.copyDetailsSuccess);
+  } catch (error) {
+    console.error('复制错误详情失败:', error);
+    Message.error(text.value.copyDetailsFailure);
+  } finally {
+    textArea?.remove();
+  }
+};
 
 const statusLabel = computed(() => {
   if (isPreDataBlocked.value) return text.value.preDataFailed;
@@ -891,6 +936,26 @@ defineExpose({
   align-items: flex-start;
   gap: 6px 12px;
   margin-top: 4px;
+}
+
+.failure-alert-detail {
+  max-height: 320px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--color-border-2);
+  border-radius: 4px;
+  background: var(--color-bg-1);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.failure-alert-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
 }
 
 .failure-suggestion {
