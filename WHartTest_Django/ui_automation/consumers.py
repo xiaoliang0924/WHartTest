@@ -1142,8 +1142,26 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                         message = auth_message or '环境账号登录失败，请检查账号、密码和登录页定位配置。'
                 except Exception as exc:
                     failed_steps += 1
-                    logger.warning('[recorder-exec] 环境账号登录失败: %s', type(exc).__name__)
-                    message = '环境账号登录失败，请核对登录页、账号密码和定位配置。'
+                    rpc_result = getattr(exc, 'result', {}) or {}
+                    auth_state = rpc_result.get('state') if isinstance(rpc_result, dict) else {}
+                    auth_state = auth_state if isinstance(auth_state, dict) else {}
+                    message = str(
+                        rpc_result.get('error') if isinstance(rpc_result, dict) else ''
+                    ).strip()
+                    if not message:
+                        # Connection/process errors do not carry a page snapshot;
+                        # keep a useful transport error when available.
+                        message = str(exc).strip() or '登录执行器未返回诊断信息。'
+                    for secret in (
+                        login_profile.get('username'), login_profile.get('password'),
+                    ):
+                        if secret:
+                            message = message.replace(str(secret), '[已隐藏]')
+                    message = message[:500]
+                    logger.warning(
+                        '[recorder-exec] 环境账号登录失败 stage=%s: %s',
+                        auth_state.get('stage') or '执行器通信', message,
+                    )
                     all_step_results.append({
                         'index': 0,
                         'group': 0,
@@ -1151,7 +1169,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                         'description': '手动登录并验证',
                         'status': 'failed',
                         'message': message,
-                        'duration': 0,
+                        'duration': float(auth_state.get('duration') or 0),
+                        'page_url': auth_state.get('page_url') or '',
+                        'page_title': auth_state.get('page_title') or '',
+                        'screenshot': auth_state.get('screenshot') or None,
                     })
             # 登录凭据不进入 Trace：先认证并清空密码框，再开始采集业务回放。
             if kind != 'page_steps' and not failed_steps:

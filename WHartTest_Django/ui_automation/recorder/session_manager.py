@@ -45,7 +45,12 @@ EV_ACTIONS = 'actions'
 
 
 class RecorderSessionError(RuntimeError):
-    pass
+    def __init__(self, message: str, result: Optional[dict] = None):
+        super().__init__(message)
+        # Keep structured RPC failure data (for example, a redacted login
+        # diagnostic and screenshot) available to callers without changing the
+        # existing exception-based API.
+        self.result = result or {}
 
 
 class RecorderSessionMeta:
@@ -189,7 +194,9 @@ class RecorderSession:
             self.last_activity = time.time()
 
         if not result.get('ok'):
-            raise RecorderSessionError(result.get('error') or f'{method} 失败')
+            raise RecorderSessionError(
+                result.get('error') or f'{method} 失败', result=result,
+            )
         return result
 
     def save_login_state(self, timeout: float = 30.0) -> dict:

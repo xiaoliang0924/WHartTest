@@ -36,6 +36,10 @@ rl.on('line', (line) => {
   else if (method === 'input') send({ id, ok: true });
   else if (method === 'assert') send({ id, ok: true, state: { action: 'assert_visible' } });
   else if (method === 'finish') send({ id, ok: true, state: { actions: [], script: '' } });
+  else if (method === 'failed_login') send({
+    id, ok: false, error: '登录阶段「验证登录成功」失败：等待成功标志超时',
+    state: { stage: '验证登录成功', screenshot: 'data:image/jpeg;base64,diagnostic' },
+  });
   else if (method === 'close') { send({ id, ok: true }); process.exit(0); }
   else send({ id, ok: false, error: 'unknown method ' + method });
 });
@@ -100,6 +104,18 @@ class RecorderSessionManagerTests(TestCase):
         session.start(timeout=15)
         with self.assertRaises(RecorderSessionError):
             session.request('unknown_method', {}, timeout=3)
+        session.close()
+
+    def test_failed_rpc_preserves_structured_diagnostics(self):
+        session = self._spawn()
+        session.start(timeout=15)
+        with self.assertRaises(RecorderSessionError) as raised:
+            session.request('failed_login', {}, timeout=3)
+        self.assertEqual(raised.exception.result['state']['stage'], '验证登录成功')
+        self.assertEqual(
+            raised.exception.result['state']['screenshot'],
+            'data:image/jpeg;base64,diagnostic',
+        )
         session.close()
 
     def test_close_is_idempotent(self):
@@ -877,6 +893,65 @@ class RecorderBrowserExecTests(TestCase):
         self.assertNotIn('secret-password', str(layer.sent))
         result = next(data for data in layer.sent if data.get('data', {}).get('func_name') == 'u_case_result')
         self.assertEqual(result['data']['args']['status'], 'success')
+
+    def test_failed_environment_login_persists_redacted_diagnostics_and_screenshot(self):
+        """登录 RPC 失败时把脱敏诊断和截图带入执行记录，不执行业务步骤。"""
+        from unittest.mock import patch
+        from ui_automation.models import UiExecutionRecord, UiEnvironmentConfig
+
+        self.env.login_enabled = True
+        self.env.login_url = 'http://env.local/login'
+        self.env.login_username = 'qa-user'
+        self.env.login_password_encrypted = 'encrypted-value'
+        self.env.save(update_fields=[
+            'login_enabled', 'login_url', 'login_username', 'login_password_encrypted',
+        ])
+        consumer, session, _received, layer = self._consumer_env()
+        original_request = session.request
+        screenshot = 'data:image/jpeg;base64,credential-free-shot'
+
+        def fail_login(method, params=None, timeout=None):
+            if method == 'login':
+                raise RecorderSessionError(
+                    '登录阶段「验证登录成功」失败：等待成功标志超时',
+                    result={
+                        'ok': False,
+                        'error': '登录阶段「验证登录成功」失败：等待成功标志超时',
+                        'state': {
+                            'login_ok': False,
+                            'stage': '验证登录成功',
+                            'page_url': 'http://env.local/login',
+                            'page_title': '登录',
+                            'screenshot': screenshot,
+                            'duration': 30,
+                        },
+                    },
+                )
+            return original_request(method, params, timeout)
+
+        session.request = fail_login
+
+        async def scenario():
+            await consumer.handle_execute_test_case(
+                {'case_id': self.case.id, 'env_config_id': self.env.id,
+                 'actuator_id': 'recorder-browser'}, 'alice',
+            )
+            if consumer._recorder_exec_task is not None:
+                await asyncio.wait_for(consumer._recorder_exec_task, timeout=15)
+
+        with patch.object(UiEnvironmentConfig, 'get_login_password', return_value='secret-password'):
+            self._run(scenario)()
+
+        record = UiExecutionRecord.objects.get(test_case=self.case)
+        self.assertEqual(record.status, 3)
+        self.assertIn('验证登录成功', record.step_results[0]['message'])
+        self.assertEqual(record.step_results[0]['page_url'], 'http://env.local/login')
+        self.assertEqual(record.step_results[0]['screenshot'], screenshot)
+        self.assertEqual(record.screenshots, [screenshot])
+        self.assertNotIn('secret-password', record.error_message)
+        self.assertNotIn('qa-user', record.error_message)
+        methods = [method for method, _params in session.requests]
+        self.assertNotIn('run_steps', methods)
 
     def test_case_auth_upward_inherit_skips_context_switch(self):
         """未绑定步骤"向上匹配"最近绑定的登录态：绑定 A/无/B/无 的用例只在

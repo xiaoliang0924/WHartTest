@@ -2764,6 +2764,7 @@ async function cmdLogin(params) {
   const manualText = String(params.manual_button_text || '手动登录');
   let passwordField = null;
   let accountField = null;
+  let stage = '准备登录';
   if (!url || !username || !password) {
     return { ok: false, error: '自动登录配置不完整，请检查登录页 URL、账号和密码。' };
   }
@@ -2771,16 +2772,70 @@ async function cmdLogin(params) {
   const startedAt = Date.now();
   state.preRunning = true;
   state.loginInProgress = true;
+  const redact = (value) => {
+    let text = String(value || '');
+    for (const secret of [username, password]) {
+      if (secret) text = text.split(secret).join('[已隐藏]');
+    }
+    // Login URLs may contain redirect parameters or tokens; diagnostics only
+    // need the origin and path to identify the page.
+    text = text.replace(/https?:\/\/[^\s"'<>]+/g, (raw) => {
+      try {
+        const parsed = new URL(raw.replace(/[),.;]+$/, ''));
+        return `${parsed.origin}${parsed.pathname}`;
+      } catch (_) {
+        return '[页面地址已隐藏]';
+      }
+    });
+    return text.slice(0, 300);
+  };
+  const failure = async (summary, cause) => {
+    // Clear credentials before capturing the visible login error state.
+    let credentialsCleared = true;
+    if (passwordField) {
+      try { await passwordField.fill(''); } catch (_) { credentialsCleared = false; }
+    }
+    if (accountField) {
+      try { await accountField.fill(''); } catch (_) { credentialsCleared = false; }
+    }
+    const pageState = { page_url: '', page_title: '', screenshot: '' };
+    try {
+      pageState.page_url = redact(page.url());
+      pageState.page_title = redact(await page.title());
+    } catch (_) {}
+    if (credentialsCleared) {
+      try {
+        const shot = await page.screenshot({ type: 'jpeg', quality: 60 });
+        pageState.screenshot = 'data:image/jpeg;base64,' + shot.toString('base64');
+      } catch (_) {}
+    }
+    const detail = cause && (cause.message || String(cause));
+    const detailText = detail ? `；执行器信息：${redact(detail)}` : '';
+    const error = `登录阶段「${stage}」失败：${summary}${detailText}`;
+    return {
+      ok: false,
+      error,
+      state: {
+        login_ok: false,
+        stage,
+        ...pageState,
+        duration: (Date.now() - startedAt) / 1000,
+      },
+    };
+  };
   try {
+    stage = '打开登录页';
     if (page.url() !== url) {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     }
 
+    stage = '查找密码输入框';
     passwordField = params.password_selector
       ? page.locator(String(params.password_selector)).first()
       : page.locator('input[type="password"]').first();
     const passwordReady = await passwordField.isVisible().catch(() => false);
     if (!passwordReady) {
+      stage = '点击手动登录入口';
       const manualButton = page.getByRole('button', { name: manualText, exact: true }).first();
       const manualLink = page.getByRole('link', { name: manualText, exact: true }).first();
       if (await manualButton.isVisible().catch(() => false)) {
@@ -2794,8 +2849,10 @@ async function cmdLogin(params) {
         }
       }
     }
+    stage = '等待密码输入框';
     await passwordField.waitFor({ state: 'visible', timeout: 15000 });
 
+    stage = '查找账号输入框';
     if (params.account_selector) {
       accountField = page.locator(String(params.account_selector)).first();
     } else {
@@ -2812,12 +2869,14 @@ async function cmdLogin(params) {
       }
     }
     if (!accountField || !(await accountField.isVisible().catch(() => false))) {
-      return { ok: false, error: '未找到可见的账号输入框，请配置账号输入框定位器。' };
+      return await failure('未找到可见的账号输入框，请配置账号输入框定位器。');
     }
 
+    stage = '填写账号和密码';
     await accountField.fill(username, { timeout: 10000 });
     await passwordField.fill(password, { timeout: 10000 });
 
+    stage = '查找登录按钮';
     let submitButton;
     if (params.submit_selector) {
       submitButton = page.locator(String(params.submit_selector)).first();
@@ -2827,10 +2886,12 @@ async function cmdLogin(params) {
       }).first();
     }
     if (!(await submitButton.isVisible().catch(() => false))) {
-      return { ok: false, error: '未找到可见的登录按钮，请配置登录按钮定位器。' };
+      return await failure('未找到可见的登录按钮，请配置登录按钮定位器。');
     }
+    stage = '提交登录';
     await submitButton.click({ timeout: 10000 });
 
+    stage = '验证登录成功';
     if (params.success_selector) {
       await page.locator(String(params.success_selector)).first().waitFor({
         state: 'visible', timeout: 30000,
@@ -2864,13 +2925,10 @@ async function cmdLogin(params) {
         duration: (Date.now() - startedAt) / 1000,
       },
     };
-  } catch (_) {
-    // Playwright 诊断字符串可能包含 DOM 内容，故不直接回传异常以免泄露凭据。
-    return {
-      ok: false,
-      error: '自动登录失败：请核对登录页、账号密码和定位配置，或配置登录成功标志。',
-      state: { duration: (Date.now() - startedAt) / 1000 },
-    };
+  } catch (error) {
+    // Preserve the failure stage, redacted Playwright diagnostic, and a
+    // credential-cleared screenshot so the execution record can be diagnosed.
+    return await failure('请核对页面流程、定位配置和登录成功标志。', error);
   } finally {
     if (passwordField) await passwordField.fill('').catch(() => {});
     if (accountField) await accountField.fill('').catch(() => {});
