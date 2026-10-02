@@ -35,6 +35,7 @@ const readline = require('readline');
 const Module = require('module');
 const { execSync } = require('child_process');
 const { assertLocatorCount } = require('./step_assertions');
+const { loginWithCredentials } = require('./environment_login');
 
 // ---------------------------------------------------------------------------
 // 基础
@@ -2757,181 +2758,11 @@ async function cmdLogin(params) {
   if (!state.page || !state.running) {
     return { ok: false, error: '浏览器会话未启动' };
   }
-  const page = state.page;
-  const url = String(params.url || '');
-  const username = String(params.username || '');
-  const password = String(params.password || '');
-  const manualText = String(params.manual_button_text || '手动登录');
-  let passwordField = null;
-  let accountField = null;
-  let stage = '准备登录';
-  if (!url || !username || !password) {
-    return { ok: false, error: '自动登录配置不完整，请检查登录页 URL、账号和密码。' };
-  }
-
-  const startedAt = Date.now();
   state.preRunning = true;
   state.loginInProgress = true;
-  const redact = (value) => {
-    let text = String(value || '');
-    for (const secret of [username, password]) {
-      if (secret) text = text.split(secret).join('[已隐藏]');
-    }
-    // Login URLs may contain redirect parameters or tokens; diagnostics only
-    // need the origin and path to identify the page.
-    text = text.replace(/https?:\/\/[^\s"'<>]+/g, (raw) => {
-      try {
-        const parsed = new URL(raw.replace(/[),.;]+$/, ''));
-        return `${parsed.origin}${parsed.pathname}`;
-      } catch (_) {
-        return '[页面地址已隐藏]';
-      }
-    });
-    return text.slice(0, 300);
-  };
-  const failure = async (summary, cause) => {
-    // Clear credentials before capturing the visible login error state.
-    let credentialsCleared = true;
-    if (passwordField) {
-      try { await passwordField.fill(''); } catch (_) { credentialsCleared = false; }
-    }
-    if (accountField) {
-      try { await accountField.fill(''); } catch (_) { credentialsCleared = false; }
-    }
-    const pageState = { page_url: '', page_title: '', screenshot: '' };
-    try {
-      pageState.page_url = redact(page.url());
-      pageState.page_title = redact(await page.title());
-    } catch (_) {}
-    if (credentialsCleared) {
-      try {
-        const shot = await page.screenshot({ type: 'jpeg', quality: 60 });
-        pageState.screenshot = 'data:image/jpeg;base64,' + shot.toString('base64');
-      } catch (_) {}
-    }
-    const detail = cause && (cause.message || String(cause));
-    const detailText = detail ? `；执行器信息：${redact(detail)}` : '';
-    const error = `登录阶段「${stage}」失败：${summary}${detailText}`;
-    return {
-      ok: false,
-      error,
-      state: {
-        login_ok: false,
-        stage,
-        ...pageState,
-        duration: (Date.now() - startedAt) / 1000,
-      },
-    };
-  };
   try {
-    stage = '打开登录页';
-    if (page.url() !== url) {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    }
-
-    stage = '查找密码输入框';
-    passwordField = params.password_selector
-      ? page.locator(String(params.password_selector)).first()
-      : page.locator('input[type="password"]').first();
-    const passwordReady = await passwordField.isVisible().catch(() => false);
-    if (!passwordReady) {
-      stage = '点击手动登录入口';
-      const manualButton = page.getByRole('button', { name: manualText, exact: true }).first();
-      const manualLink = page.getByRole('link', { name: manualText, exact: true }).first();
-      if (await manualButton.isVisible().catch(() => false)) {
-        await manualButton.click({ timeout: 10000 });
-      } else if (await manualLink.isVisible().catch(() => false)) {
-        await manualLink.click({ timeout: 10000 });
-      } else {
-        const manualTextLocator = page.getByText(manualText, { exact: true }).first();
-        if (await manualTextLocator.isVisible().catch(() => false)) {
-          await manualTextLocator.click({ timeout: 10000 });
-        }
-      }
-    }
-    stage = '等待密码输入框';
-    await passwordField.waitFor({ state: 'visible', timeout: 15000 });
-
-    stage = '查找账号输入框';
-    if (params.account_selector) {
-      accountField = page.locator(String(params.account_selector)).first();
-    } else {
-      const candidates = [
-        page.getByLabel(/账号|用户名|用户|手机号|工号|account|username/i).first(),
-        page.getByPlaceholder(/账号|用户名|用户|手机号|工号|account|username/i).first(),
-        page.locator('input[type="text"], input[type="tel"], input:not([type])').first(),
-      ];
-      for (const candidate of candidates) {
-        if (await candidate.isVisible().catch(() => false)) {
-          accountField = candidate;
-          break;
-        }
-      }
-    }
-    if (!accountField || !(await accountField.isVisible().catch(() => false))) {
-      return await failure('未找到可见的账号输入框，请配置账号输入框定位器。');
-    }
-
-    stage = '填写账号和密码';
-    await accountField.fill(username, { timeout: 10000 });
-    await passwordField.fill(password, { timeout: 10000 });
-
-    stage = '查找登录按钮';
-    let submitButton;
-    if (params.submit_selector) {
-      submitButton = page.locator(String(params.submit_selector)).first();
-    } else {
-      submitButton = page.getByRole('button', {
-        name: /^(?:登录|确定登录|sign\s*in|log\s*in|submit)$/i,
-      }).first();
-    }
-    if (!(await submitButton.isVisible().catch(() => false))) {
-      return await failure('未找到可见的登录按钮，请配置登录按钮定位器。');
-    }
-    stage = '提交登录';
-    await submitButton.click({ timeout: 10000 });
-
-    stage = '验证登录成功';
-    if (params.success_selector) {
-      await page.locator(String(params.success_selector)).first().waitFor({
-        state: 'visible', timeout: 30000,
-      });
-    } else {
-      await page.waitForFunction(() => {
-        const visible = (el) => {
-          const style = window.getComputedStyle(el);
-          const rect = el.getBoundingClientRect();
-          return style.display !== 'none' && style.visibility !== 'hidden'
-            && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
-        };
-        const path = new URL(window.location.href).pathname;
-        const onLoginRoute = /\/(login|signin|sign-in|auth)(\/|$)/i.test(path);
-        const passwordVisible = Array.from(document.querySelectorAll('input[type="password"]')).some(visible);
-        const authenticatedShellVisible = Array.from(
-          document.querySelectorAll('nav,[role="navigation"],aside')
-        ).some(visible);
-        return !passwordVisible && (!onLoginRoute || authenticatedShellVisible);
-      }, { timeout: 30000 });
-    }
-
-    // 清理输入值，避免后续 Trace、截图或录制动作保留凭据。
-    await passwordField.fill('').catch(() => {});
-    await accountField.fill('').catch(() => {});
-    return {
-      ok: true,
-      state: {
-        message: '账号登录成功，已进入业务系统',
-        page_url: page.url(),
-        duration: (Date.now() - startedAt) / 1000,
-      },
-    };
-  } catch (error) {
-    // Preserve the failure stage, redacted Playwright diagnostic, and a
-    // credential-cleared screenshot so the execution record can be diagnosed.
-    return await failure('请核对页面流程、定位配置和登录成功标志。', error);
+    return await loginWithCredentials(state.page, params);
   } finally {
-    if (passwordField) await passwordField.fill('').catch(() => {});
-    if (accountField) await accountField.fill('').catch(() => {});
     state.loginInProgress = false;
     state.preRunning = false;
   }
