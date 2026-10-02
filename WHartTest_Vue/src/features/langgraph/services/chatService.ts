@@ -55,7 +55,7 @@ interface StreamState {
   maxSteps?: number;     // Agent Loop 最大步骤数
   testcaseStep?: number; // 手工测试用例当前步骤
   testcaseTotal?: number;
-  testcaseStepState?: 'pending' | 'running' | 'completed' | 'waiting_llm';
+  testcaseStepState?: 'pending' | 'running' | 'completed' | 'waiting_llm' | 'generating_ui_case';
   testcaseProgressMessage?: string;
   testcaseStartedAt?: number;
   userMessage?: string;  // 用户发送的消息内容
@@ -90,7 +90,7 @@ export interface AgentLoopSseEvent {
   max_steps?: number | string;
   step?: number | string;
   total_steps?: number | string;
-  state?: 'pending' | 'running' | 'completed' | 'waiting_llm';
+  state?: 'pending' | 'running' | 'completed' | 'waiting_llm' | 'generating_ui_case';
   message?: string;
   summary?: string | Record<string, unknown>;
   data?: string | { content?: string } | Record<string, unknown> | null;
@@ -802,9 +802,9 @@ export async function sendChatMessageStream(
               stream.currentStep = stepNumber;
               stream.testcaseStep = stepNumber;
               if (total !== undefined) stream.testcaseTotal = total;
-              stream.testcaseStepState = parsed.state || 'running';
-              stream.testcaseProgressMessage = typeof parsed.message === 'string' ? parsed.message : undefined;
             }
+            stream.testcaseStepState = parsed.state || 'running';
+            stream.testcaseProgressMessage = typeof parsed.message === 'string' ? parsed.message : undefined;
           }
 
           // 处理 Agent Loop 工具结果事件
@@ -1509,9 +1509,9 @@ export async function resumeAgentLoop(
               stream.currentStep = stepNumber;
               stream.testcaseStep = stepNumber;
               if (total !== undefined) stream.testcaseTotal = total;
-              stream.testcaseStepState = parsed.state || 'running';
-              stream.testcaseProgressMessage = typeof parsed.message === 'string' ? parsed.message : undefined;
             }
+            stream.testcaseStepState = parsed.state || 'running';
+            stream.testcaseProgressMessage = typeof parsed.message === 'string' ? parsed.message : undefined;
           }
 
           // 处理工具结果事件

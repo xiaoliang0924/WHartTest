@@ -781,6 +781,7 @@ class TestCaseRunRecord(models.Model):
     step_results = models.JSONField(_("步骤结果"), default=list, blank=True)
     execution_log = models.TextField(_("执行日志"), blank=True, default="")
     generate_playwright_script = models.BooleanField(_("生成脚本"), default=False)
+    ui_generation = models.JSONField(_("UI 用例生成进度"), default=dict, blank=True)
     execution_mode = models.CharField(
         _("本次执行模式"),
         max_length=20,

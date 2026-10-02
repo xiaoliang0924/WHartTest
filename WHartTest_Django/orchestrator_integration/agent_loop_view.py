@@ -591,7 +591,9 @@ async def _force_save_generated_ui_case(*, llm, tools, messages) -> Dict[str, An
     human = HumanMessage(content="以下是本次已通过执行的原始证据，请据此保存 UI 自动化用例：\n\n" + observations)
     try:
         bound_model = llm.bind_tools([save_tool], tool_choice="required")
-        response = await bound_model.ainvoke([system, human])
+        response = await asyncio.wait_for(bound_model.ainvoke([system, human]), timeout=180)
+    except asyncio.TimeoutError:
+        return {"status": "failed", "message": "生成模型在 180 秒内未返回，可使用本次执行记录重试生成。"}
     except Exception as exc:
         logger.exception("UI testcase generation follow-up model call failed")
         return {"status": "failed", "message": f"生成模型调用失败：{str(exc)[:500]}"}
@@ -615,7 +617,7 @@ async def _force_save_generated_ui_case(*, llm, tools, messages) -> Dict[str, An
 
 
 async def _validate_generated_ui_case(
-    *, user, project_id: int, ui_test_case_id: int, validation_session_id: str
+    *, user, project_id: int, ui_test_case_id: int, validation_session_id: str, background=False
 ) -> Dict[str, Any]:
     """Replay a freshly generated UI case before reporting it as usable.
 
@@ -637,15 +639,11 @@ async def _validate_generated_ui_case(
     from ui_automation.generated_case_service import bind_generated_ui_case_auth_state
     from ui_automation.models import UiExecutionRecord, UiTestCase
 
-    consumer = SocketUserManager.get_web_user(user.username)
-    # LLM generation can outlive a brief browser network interruption. Give the
-    # frontend's authenticated WebSocket reconnect a short window to re-register
-    # before recording the validation as unavailable.
-    if consumer is None:
-        reconnect_deadline = asyncio.get_running_loop().time() + 10
-        while consumer is None and asyncio.get_running_loop().time() < reconnect_deadline:
-            await asyncio.sleep(0.25)
-            consumer = SocketUserManager.get_web_user(user.username)
+    if background:
+        from ui_automation.background_runner import create_background_runner
+        consumer = create_background_runner(user)
+    else:
+        consumer = SocketUserManager.get_web_user(user.username)
     if consumer is None:
         message = "UI 自动化连接不可用，无法自动回放验证。请刷新页面后重试。"
         await sync_to_async(
@@ -1034,7 +1032,7 @@ async def _apply_safe_generated_ui_repair(
 
 
 async def _repair_generated_ui_case_after_failure(
-    *, test_case_id: int, project_id: int, ui_test_case_id: int, user, validation: Dict[str, Any]
+    *, test_case_id: int, project_id: int, ui_test_case_id: int, user, validation: Dict[str, Any], background=False
 ) -> Dict[str, Any]:
     """Diagnose and safely repair a failed generated case, then replay it.
 
@@ -1104,6 +1102,7 @@ async def _repair_generated_ui_case_after_failure(
                 project_id=int(project_id),
                 ui_test_case_id=int(ui_test_case_id),
                 validation_session_id=f"ui-generation-repair-{uuid.uuid4().hex}",
+                background=background,
             )
             if current_validation.get("status") == "success":
                 break
@@ -1130,8 +1129,28 @@ async def _repair_generated_ui_case_after_failure(
     return {"validation": current_validation, "attempts": attempts}
 
 
+async def _queue_generated_ui_case(*, record, llm_config_id):
+    from .ui_generation_jobs import enqueue_generation
+
+    if not record or record.status != "pass":
+        return {"enabled": True, "status": "skipped", "message": "功能测试未通过，未自动生成 UI 用例。"}
+    # Once functional execution passes, handing off must finish even if the
+    # client disconnects during the database/broker transaction.
+    try:
+        result = await asyncio.shield(sync_to_async(enqueue_generation)(
+            record.pk, llm_config_id=llm_config_id,
+        ))
+        await sync_to_async(record.refresh_from_db)()
+        return result
+    except ValueError as exc:
+        from .ui_generation_jobs import write_state
+        result = {"enabled": True, "status": "failed", "message": str(exc)}
+        await sync_to_async(write_state)(record, result)
+        return result
+
+
 async def _finalize_generated_ui_case(
-    *, llm, tools, messages, test_case_id, project_id, record, user=None
+    *, llm, tools, messages, test_case_id, project_id, record, user=None, background=False, on_stage=None
 ) -> Dict[str, Any]:
     """Generate, replay-validate, bind, and report a UI case after success."""
     if not test_case_id:
@@ -1195,11 +1214,14 @@ async def _finalize_generated_ui_case(
 
     validation = {"status": "skipped", "message": "未进行回放验证。"}
     if ui_case_id and user is not None:
+        if on_stage:
+            await on_stage("validating")
         validation = await _validate_generated_ui_case(
             user=user,
             project_id=int(project_id),
             ui_test_case_id=int(ui_case_id),
             validation_session_id=f"ui-generation-validation-{uuid.uuid4().hex}",
+            background=background,
         )
         if validation.get("status") == "failed":
             repair_result = await _repair_generated_ui_case_after_failure(
@@ -1208,6 +1230,7 @@ async def _finalize_generated_ui_case(
                 ui_test_case_id=int(ui_case_id),
                 user=user,
                 validation=validation,
+                background=background,
             )
             validation = repair_result.get("validation") or validation
 
@@ -3819,14 +3842,8 @@ class AgentLoopStreamAPIView(View):
                                                                     "message": "功能用例已通过，正在生成并回放验证 UI 自动化用例",
                                                                 }
                                                             )
-                                                        script_generation_result = await _finalize_generated_ui_case(
-                                                            llm=llm,
-                                                            tools=tools,
-                                                            messages=generation_messages,
-                                                            test_case_id=test_case_id,
-                                                            project_id=project_id,
-                                                            record=record,
-                                                            user=request.user,
+                                                        script_generation_result = await _queue_generated_ui_case(
+                                                            record=record, llm_config_id=active_config.pk,
                                                         )
                                                     complete_event = {
                                                         "type": "complete",
@@ -3956,14 +3973,8 @@ class AgentLoopStreamAPIView(View):
                                                         generation_messages = await _get_agent_state_messages(
                                                             agent, invoke_config
                                                         )
-                                                        script_generation_result = await _finalize_generated_ui_case(
-                                                            llm=llm,
-                                                            tools=tools,
-                                                            messages=generation_messages,
-                                                            test_case_id=test_case_id,
-                                                            project_id=project_id,
-                                                            record=record,
-                                                            user=request.user,
+                                                        script_generation_result = await _queue_generated_ui_case(
+                                                            record=record, llm_config_id=active_config.pk,
                                                         )
                                                     complete_event = {
                                                         "type": "complete",
@@ -4337,14 +4348,8 @@ class AgentLoopStreamAPIView(View):
                                     "message": "功能用例已通过，正在生成并回放验证 UI 自动化用例",
                                 }
                             )
-                        script_generation_result = await _finalize_generated_ui_case(
-                            llm=llm,
-                            tools=tools,
-                            messages=all_messages if "all_messages" in locals() else [],
-                            test_case_id=test_case_id,
-                            project_id=project_id,
-                            record=record,
-                            user=request.user,
+                        script_generation_result = await _queue_generated_ui_case(
+                            record=record, llm_config_id=active_config.pk,
                         )
                         if complete_data.get("test_case_run") and record:
                             complete_data["test_case_run"]["summary"] = record.summary
@@ -4359,7 +4364,7 @@ class AgentLoopStreamAPIView(View):
             # "running" forever and the UI keeps showing the preparation spinner.
             if test_case_id:
                 try:
-                    await _complete_testcase_run_with_report(
+                    cancelled_record, _ = await _complete_testcase_run_with_report(
                         session_id=session_id,
                         final_content=(
                             streamed_assistant_content
@@ -4369,6 +4374,14 @@ class AgentLoopStreamAPIView(View):
                         messages=(all_messages if "all_messages" in locals() else []),
                         error_message="自动化执行流被取消或中断，未完成的步骤未执行。",
                     )
+                    if (
+                        generate_playwright_script and cancelled_record
+                        and cancelled_record.status == "pass" and not should_stop(session_id)
+                    ):
+                        await _queue_generated_ui_case(
+                            record=cancelled_record,
+                            llm_config_id=active_config.pk if "active_config" in locals() else None,
+                        )
                 except Exception:
                     logger.exception(
                         "AgentLoopStreamAPI: Failed to finalize cancelled testcase run. "
@@ -4770,6 +4783,16 @@ class AgentLoopStopAPIView(View):
         session_id = body_data.get("session_id")
         if not session_id:
             return api_error_response("session_id is required", 400)
+
+        from testcases.models import TestCaseRunRecord
+        from .ui_generation_jobs import request_job_stop
+        generation_record = await sync_to_async(
+            TestCaseRunRecord.objects.filter(session_id=session_id).first
+        )()
+        if generation_record:
+            if generation_record.executor_id != user.pk and not user.is_superuser:
+                return api_error_response("无权停止其他用户的任务", 403)
+            await sync_to_async(request_job_stop)(generation_record)
 
         # 3. 设置停止信号
         success = set_stop_signal(session_id)

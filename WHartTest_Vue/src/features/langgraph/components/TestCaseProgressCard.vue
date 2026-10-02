@@ -24,7 +24,7 @@ const props = withDefaults(defineProps<{
   currentStep: number;
   totalSteps: number;
   startedAt?: number;
-  state?: 'pending' | 'running' | 'completed' | 'waiting_llm';
+  state?: 'pending' | 'running' | 'completed' | 'waiting_llm' | 'generating_ui_case';
   message?: string;
 }>(), {
   startedAt: 0,
@@ -37,12 +37,13 @@ let timer: ReturnType<typeof setInterval> | undefined;
 
 const safeTotal = computed(() => Math.max(1, props.totalSteps || 1));
 const currentStep = computed(() => Math.min(safeTotal.value, Math.max(0, props.currentStep || 0)));
-const completedSteps = computed(() => props.state === 'completed'
+const completedSteps = computed(() => (props.state === 'completed' || props.state === 'generating_ui_case')
   ? currentStep.value
   : Math.max(0, currentStep.value - 1));
 const pendingSteps = computed(() => Math.max(0, safeTotal.value - completedSteps.value - (props.state === 'running' ? 1 : 0)));
 const percent = computed(() => Math.round((completedSteps.value / safeTotal.value) * 100));
 const stateLabel = computed(() => {
+  if (props.state === 'generating_ui_case') return '功能通过，UI 用例生成中';
   if (props.state === 'running') return '浏览器执行中';
   if (props.state === 'waiting_llm') return '等待模型响应';
   if (props.state === 'completed') return '正在确认下一步';

@@ -73,6 +73,14 @@
         @decision="handleToolDecision"
       />
 
+      <UiGenerationStatus
+        v-if="generationRecord?.session_id === sessionId && projectStore.currentProjectId"
+        class="generation-job-status"
+        :record="generationRecord"
+        :project-id="projectStore.currentProjectId"
+        @updated="handleGenerationUpdated"
+      />
+
       <TestCaseProgressCard
         v-if="testcaseProgress"
         :current-step="testcaseProgress.currentStep"
@@ -187,7 +195,8 @@ import {
   resumeAgentLoop,
   applyTestCaseRunReportToStream,
 } from '@/features/langgraph/services/chatService';
-import { getLatestTestCaseRunRecord } from '@/services/testcaseService';
+import { getLatestTestCaseRunRecord, isUiGenerationActive, type TestCaseRunRecord } from '@/services/testcaseService';
+import UiGenerationStatus from '@/components/testcase/UiGenerationStatus.vue';
 import { listLlmConfigs, partialUpdateLlmConfig } from '@/features/langgraph/services/llmConfigService';
 import { getUserPrompts } from '@/features/prompts/services/promptService';
 import type { ChatRequest, ChatHistoryMessage, ChatHistoryResponseData, ChatSessionDetail } from '@/features/langgraph/types/chat';
@@ -1348,9 +1357,11 @@ const promoteExecutionReportInMessages = (msgs: ChatMessage[]): ChatMessage[] =>
 const attachExecutionReportIfMissing = async (chatSessionId: string) => {
   if (!chatSessionId || !projectStore.currentProjectId) return false;
 
-  if (hasExecutionReportMessage()) {
-    return false;
+  const caseForPolling = findExecuteTestCaseIdForSession(chatSessionId);
+  if (caseForPolling && testcaseResultPollSessionId !== chatSessionId) {
+    startTestcaseResultPolling(chatSessionId, caseForPolling);
   }
+  if (hasExecutionReportMessage()) return false;
 
   const stream = activeStreams.value[chatSessionId];
   ensureStreamUserMessageSolidified(stream);
@@ -1406,6 +1417,14 @@ const attachExecutionReportIfMissing = async (chatSessionId: string) => {
 
 // SSE 连接可能在最后一条工具输出后不再发送 complete。用执行记录的终态
 // 校准当前用例会话，避免后端已有结果而聊天页一直停在步骤截图。
+const generationRecord = ref<TestCaseRunRecord | null>(null);
+
+const handleGenerationUpdated = (record: TestCaseRunRecord) => {
+  generationRecord.value = record;
+  appendExecutionReportMessage(record.summary, record.status === 'pass' ? 'pass' : 'fail');
+  startTestcaseResultPolling(record.session_id, record.testcase);
+};
+
 let testcaseResultPollTimer: ReturnType<typeof setInterval> | null = null;
 let testcaseResultPollInFlight = false;
 let testcaseResultPollSessionId: string | null = null;
@@ -1423,28 +1442,20 @@ const stopTestcaseResultPolling = () => {
 };
 
 const startTestcaseResultPolling = (chatSessionId: string, caseId: number) => {
+  if (testcaseResultPollSessionId === chatSessionId && testcaseResultPollTimer) return;
   stopTestcaseResultPolling();
   testcaseResultPollSessionId = chatSessionId;
+  const pollingProjectId = projectStore.currentProjectId;
   testcaseResultPollCompletedAt = null;
 
   const checkResult = async () => {
     if (testcaseResultPollInFlight || testcaseResultPollSessionId !== chatSessionId) return;
-    if (sessionId.value !== chatSessionId || !projectStore.currentProjectId) {
+    if (sessionId.value !== chatSessionId || projectStore.currentProjectId !== pollingProjectId) {
       stopTestcaseResultPolling();
       return;
     }
     const stream = activeStreams.value[chatSessionId];
-    if (stream?.executionReport?.content) {
-      appendExecutionReportMessage(
-        stream.executionReport.content,
-        stream.executionReport.status
-      );
-      stopTestcaseResultPolling();
-      await nextTick();
-      chatMessagesRef.value?.scrollToBottom();
-      return;
-    }
-    if (stream?.isComplete) {
+    if (stream?.isComplete && !isUiGenerationActive(generationRecord.value?.ui_generation)) {
       testcaseResultPollCompletedAt ??= Date.now();
       if (Date.now() - testcaseResultPollCompletedAt >= TESTCASE_RESULT_RECONCILE_GRACE_MS) {
         // Give the durable run record time to reach a terminal state. If it did
@@ -1458,11 +1469,16 @@ const startTestcaseResultPolling = (chatSessionId: string, caseId: number) => {
     testcaseResultPollInFlight = true;
     try {
       const response = await getLatestTestCaseRunRecord(
-        projectStore.currentProjectId, caseId, chatSessionId
+        pollingProjectId!, caseId, chatSessionId
       );
-      if (testcaseResultPollSessionId !== chatSessionId) return;
+      if (testcaseResultPollSessionId !== chatSessionId || sessionId.value !== chatSessionId
+        || projectStore.currentProjectId !== pollingProjectId) return;
       const record = response.success ? response.data : undefined;
-      if (!record || record.status === 'running' || !record.summary) return;
+      if (!record) return;
+      const reportChanged = generationRecord.value?.id !== record.id
+        || generationRecord.value?.summary !== record.summary;
+      generationRecord.value = record;
+      if (record.status === 'running' || !record.summary) return;
 
       const summary = extractFirstExecutionReport(record.summary);
       if (!isExecutionReportContent(summary)) return;
@@ -1470,11 +1486,16 @@ const startTestcaseResultPolling = (chatSessionId: string, caseId: number) => {
         applyTestCaseRunReportToStream(stream, record);
         stream.isComplete = true;
       }
-      appendExecutionReportMessage(summary, record.status === 'pass' ? 'pass' : 'fail');
+      if (reportChanged || !messages.value.some((message) =>
+        message.messageType === 'execution_report' && message.content === summary)) {
+        appendExecutionReportMessage(summary, record.status === 'pass' ? 'pass' : 'fail');
+      }
       clearSessionRunning(chatSessionId);
-      stopTestcaseResultPolling();
-      await nextTick();
-      chatMessagesRef.value?.scrollToBottom();
+      if (!isUiGenerationActive(record.ui_generation)) stopTestcaseResultPolling();
+      if (reportChanged) {
+        await nextTick();
+        chatMessagesRef.value?.scrollToBottom();
+      }
     } finally {
       testcaseResultPollInFlight = false;
     }
@@ -1616,6 +1637,8 @@ const applyChatHistoryResponse = (data: ChatHistoryResponseData) => {
   }
 
   syncRemoteGenerating();
+  const caseForGeneration = findExecuteTestCaseIdForSession(data.session_id);
+  if (caseForGeneration) startTestcaseResultPolling(data.session_id, caseForGeneration);
   if (isRemoteGenerating.value) {
     isLoading.value = true;
   } else {
@@ -2328,6 +2351,8 @@ const switchSession = async (id: string) => {
       // 更新会话信息（不更新时间，因为这是加载历史记录）
       updateSessionInList(id, undefined, false);
       startRemoteSessionPolling();
+      const caseForGeneration = findExecuteTestCaseIdForSession(id);
+      if (caseForGeneration) startTestcaseResultPolling(id, caseForGeneration);
       if (!isRemoteGenerating.value) {
         void attachExecutionReportIfMissing(id);
       }
@@ -3465,6 +3490,7 @@ export default {
 </script>
 
 <style scoped>
+.generation-job-status { margin: 0 18px 10px; }
 .chat-layout {
   display: flex;
   height: 100%;

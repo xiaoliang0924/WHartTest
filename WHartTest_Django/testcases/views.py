@@ -1034,6 +1034,34 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             record = queryset.first()
         if not record:
             return Response({"detail": "暂无执行记录"}, status=status.HTTP_404_NOT_FOUND)
+        from orchestrator_integration.ui_generation_jobs import reconcile_expired_job
+        reconcile_expired_job(record)
+        return Response(TestCaseRunRecordSerializer(record, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"], url_path=r"run-records/(?P<record_id>\d+)/ui-generation")
+    def manage_ui_generation(self, request, project_pk=None, pk=None, record_id=None):
+        from .serializers import TestCaseRunRecordSerializer
+        from orchestrator_integration.ui_generation_jobs import (
+            enqueue_generation, reconcile_expired_job, request_job_stop,
+        )
+        testcase = self.get_object()
+        record = testcase.run_records.filter(pk=record_id).first()
+        if not record:
+            return Response({"detail": "执行记录不存在"}, status=status.HTTP_404_NOT_FOUND)
+        if record.executor_id != request.user.pk and not request.user.is_superuser:
+            return Response({"detail": "只能管理自己的生成任务"}, status=status.HTTP_403_FORBIDDEN)
+        action_name = request.data.get("action", "retry")
+        try:
+            reconcile_expired_job(record)
+            if action_name == "retry":
+                enqueue_generation(record.pk, retry=True)
+            elif action_name == "stop":
+                request_job_stop(record)
+            else:
+                return Response({"detail": "不支持的操作"}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        record.refresh_from_db()
         return Response(TestCaseRunRecordSerializer(record, context={"request": request}).data)
 
     @action(

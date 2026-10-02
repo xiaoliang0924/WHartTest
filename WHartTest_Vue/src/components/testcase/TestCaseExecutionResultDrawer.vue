@@ -92,6 +92,14 @@
       </a-alert>
       <a-alert v-if="isRunning" type="info" :title="text.runningHint" show-icon class="block" />
 
+      <UiGenerationStatus
+        v-if="record && projectId"
+        class="block"
+        :record="record"
+        :project-id="projectId"
+        @updated="handleGenerationUpdated"
+      />
+
       <a-card v-if="record?.summary" :title="text.summary" size="small" class="block">
         <div class="summary-text" v-html="summaryHtml"></div>
       </a-card>
@@ -176,6 +184,8 @@
 </template>
 
 <script setup lang="ts">
+import UiGenerationStatus from './UiGenerationStatus.vue';
+import { isUiGenerationActive } from '@/services/testcaseService';
 import { computed, ref, watch, onBeforeUnmount } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { useRouter } from 'vue-router';
@@ -347,6 +357,12 @@ const text = computed(() => (
         unknown: '未知',
       }
 ));
+
+const generationActive = computed(() => isUiGenerationActive(record.value?.ui_generation));
+const handleGenerationUpdated = (updated: TestCaseRunRecord) => {
+  record.value = updated;
+  if (generationActive.value) startPolling();
+};
 
 const isRunning = computed(() => record.value?.status === 'running' || (props.preparing && !record.value));
 const isPreDataBlocked = computed(() => record.value?.summary?.startsWith('测试数据准备失败') || false);
@@ -636,7 +652,7 @@ const refreshRecord = async () => {
     }
     if (response.success && response.data) {
       record.value = response.data;
-      if (response.data.status !== 'running') {
+      if (response.data.status !== 'running' && !isUiGenerationActive(response.data.ui_generation)) {
         stopPolling();
         emit('finished');
       }
@@ -650,7 +666,7 @@ const refreshRecord = async () => {
 const startPolling = () => {
   stopPolling();
   pollTimer = setInterval(() => {
-    if (isRunning.value) {
+    if (isRunning.value || generationActive.value) {
       refreshRecord();
     } else {
       stopPolling();
@@ -674,7 +690,7 @@ watch(
       if (props.preparing) screenshots.value = [];
     }
     await refreshRecord();
-    if (isRunning.value) {
+    if (isRunning.value || generationActive.value) {
       startPolling();
     }
   },

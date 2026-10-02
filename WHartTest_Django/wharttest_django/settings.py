@@ -707,6 +707,10 @@ CELERY_TASK_ROUTES = {
 # Celery Beat 调度器配置
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 CELERY_BEAT_SCHEDULE = {
+    "reconcile-ui-generation-jobs-every-minute": {
+        "task": "orchestrator_integration.reconcile_ui_generation_jobs",
+        "schedule": 60.0,
+    },
     "reconcile-stale-bound-ui-runs-every-minute": {
         "task": "testcases.reconcile_stale_bound_ui_run_records",
         "schedule": 60.0,

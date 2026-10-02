@@ -120,12 +120,46 @@ export interface TestCaseRunRecord {
     evidence?: string;
   };
   generate_playwright_script?: boolean;
+  ui_generation?: UiGenerationState;
   execution_mode?: 'hybrid' | 'script_only' | 'ai_only';
   actual_execution_path?: 'hybrid_script_pending' | 'agent_browser' | 'bound_ui_script' | 'agent_fallback' | 'agent_no_bound_script' | '';
   ui_test_case_id_snapshot?: number | null;
   started_at: string;
   completed_at?: string | null;
 }
+
+export interface UiGenerationState {
+  status?: 'queued' | 'generating' | 'validating' | 'stopping' | 'success' | 'failed' | 'stopped' | 'skipped';
+  message?: string;
+  reason?: string;
+  ui_test_case_id?: number | null;
+  validation_status?: string;
+}
+
+export const isUiGenerationActive = (state?: UiGenerationState) => (
+  ['queued', 'generating', 'validating', 'stopping'].includes(state?.status || '')
+);
+
+export const manageUiGeneration = async (
+  projectId: number, caseId: number, recordId: number, action: 'retry' | 'stop'
+): Promise<{ success: boolean; data?: TestCaseRunRecord; error?: string }> => {
+  const accessToken = useAuthStore().getAccessToken;
+  if (!accessToken) return { success: false, error: '未登录或会话已过期' };
+  try {
+    const response = await axios.post(
+      `${API_BASE_URL}/projects/${projectId}/testcases/${caseId}/run-records/${recordId}/ui-generation/`,
+      { action }, { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const record = response.data?.status === 'success' && response.data?.data
+      ? response.data.data : response.data;
+    if (!record || typeof record.session_id !== 'string') {
+      return { success: false, error: '执行记录响应格式不正确' };
+    }
+    return { success: true, data: record };
+  } catch (error: any) {
+    return { success: false, error: error.response?.data?.detail || error.message || '操作失败' };
+  }
+};
 
 export interface AiDiagnosisResult {
   root_cause_type: string;
