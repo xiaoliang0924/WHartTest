@@ -1184,6 +1184,16 @@ class SkillFailureReminderTests(SimpleTestCase):
         self.assertIn("必须输出完整测试报告", output)
         self.assertIn("## 测试执行结果: 不通过", output)
 
+    def test_timeout_after_step_pass_requests_script_repair(self):
+        output = _with_failure_reminder(
+            "[CASE_SCREENSHOT] /tmp/case_1191_step3.png\n"
+            "RESULT=PASS: 步骤3已选择待处理\n"
+            "locator.innerText: Timeout 15000ms exceeded",
+            skill_name="playwright-skill",
+        )
+        self.assertIn("脚本错误，请修正后重试", output)
+        self.assertNotIn("【步骤已通过】", output)
+
     def test_missing_file_on_whart_test_appends_retry_then_report_reminder(self):
         output = _with_failure_reminder(
             "文件不存在: /tmp/case_1520_step1.png",

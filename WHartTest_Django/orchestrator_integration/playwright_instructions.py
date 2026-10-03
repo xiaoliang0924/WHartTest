@@ -67,7 +67,7 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
 
 1. **逐步执行**：按步骤编号一步一脚本、一步一截图；禁止跳步、合并或省略。
 2. **筛选单独成步**：步骤含筛选/查询时，只做选条件 + 查询 + 验收 + 截图，不要同一步点进详情。
-   - 普通下拉：`selectFormDropdownOption(page, 字段标签, 选项)`。选完必须看筛选框里的值，禁止用列表单元格里的同名状态代替。
+   - 普通下拉：`selectFormDropdownOption(page, 字段标签, 选项)`。helper 已检查筛选框当前值；不要再手写 `.el-form-item` / `innerText()` 重复校验，避免依赖页面 DOM 结构。helper 返回失败就将当前步骤标失败。禁止用列表单元格里的同名状态代替。
    - **按工单状态找行**（如「找到处理中工单」）：必须操作页面真实的「工单状态」下拉（`selectFormDropdownOption(page, '工单状态', '处理中')` 或 `filterWorkOrdersByStatus(page, '处理中')`），不能把状态填进「工单号/工单编号」文本搜索框。
    - **字段名必须来自当前页面**：若用例字段名与页面占位文字不同，先 `describePageForAI(page)` 并基于实际可见控件调用 helper；例如「工单编号」可对应页面的「搜索工单号…」。禁止猜不存在的 placeholder。拿不到控件时，报告实际可见字段与定位错误，不得改写成「缺失业务」。
    - 弹窗多选：`selectDialogMultiSelect(page, 字段标签, 选项名)`
@@ -92,7 +92,7 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
 4. **容器内必须无头**：不要 `headless: false`。
 5. **产品不符合预期不要杀进程**：断言失败时 `console.log('RESULT=FAIL: ...')` + 截图上传，禁止 `throw` / `process.exit(1)`。通过则 `RESULT=PASS`。定位超时才允许脚本失败。
 6. **步骤1登录**：该步只调用 `await helpers.loginStep1(page);`（已含步骤1截图，禁止再调用 `screenshotCaseStep(page, 1)`）。**禁止**把登录 URL、`802714/000000` 整段、或密码作为 `loginStep1` 的位置参数传入（账号密码已由环境变量注入）。只有 stdout 出现 `RESULT=PASS` 才算成功；出现 `RESULT=FAIL` 必须停止。步骤 N 截图：`await helpers.screenshotCaseStep(page, N);`。禁止手写路径、禁止 Python 风格 goto/fill/click。
-7. **下拉筛选**：`selectFormDropdownOption(page, 字段标签, 选项)`。禁止 `getByText('某状态').click()`。
+7. **下拉筛选**：`selectFormDropdownOption(page, 字段标签, 选项)`；不要额外用 `.el-form-item`、`innerText()` 手写读取校验。helper 返回失败就标当前步骤失败。禁止 `getByText('某状态').click()`。
 8. **菜单页不要走错**：步骤写哪个菜单就进哪个页。优先用 `navigateByMenu(page, 菜单名)`；明确知道目标路由时才传唯一 URL 片段，禁止传 `/work-order` 这类父级公共前缀。
 """
 

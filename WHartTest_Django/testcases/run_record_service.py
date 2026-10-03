@@ -559,32 +559,29 @@ def build_step_results_from_execution_evidence(
                 continue
         step_outcomes[step_no] = match.group(3).lower()
 
-    # Authoritative per-step outcome: last RESULT=PASS/FAIL within that step's block only.
+    # Authoritative per-step outcome: compare the final result marker with the final
+    # Playwright timeout in that step. A helper may print RESULT=PASS and a later
+    # assertion/locator in the same script can still time out; a trailing timeout
+    # must invalidate that earlier pass. Conversely, a later explicit PASS after a
+    # recovered timeout remains valid.
     for step_no, window in progress_blocks.items():
-        last_result = None
-        for result_match in re.finditer(
+        result_matches = list(re.finditer(
             r"^RESULT=(PASS|FAIL)\b",
             window,
             flags=re.IGNORECASE | re.MULTILINE,
-        ):
-            last_result = result_match.group(1).lower()
+        ))
+        last_result = result_matches[-1] if result_matches else None
         if last_result:
-            step_outcomes[step_no] = last_result
-        timed_out = bool(
-            re.search(
-                r"Playwright exec timed out|浏览器已重置",
-                window,
-                flags=re.IGNORECASE,
-            )
-        )
-        has_pass = bool(
-            re.search(
-                rf"RESULT=PASS[:：]?\s*步骤\s*{step_no}\b",
-                window,
-                flags=re.IGNORECASE,
-            )
-        )
-        if timed_out and not has_pass:
+            step_outcomes[step_no] = last_result.group(1).lower()
+
+        timeout_matches = list(re.finditer(
+            r"(?:Timeout\s+\d+ms\s+exceeded|Playwright exec timed out|"
+            r"locator\.[\w]+:\s*Timeout|浏览器已重置)",
+            window,
+            flags=re.IGNORECASE,
+        ))
+        last_timeout = timeout_matches[-1] if timeout_matches else None
+        if last_timeout and (not last_result or last_timeout.start() > last_result.start()):
             step_outcomes[step_no] = "fail"
 
     if not step_outcomes:

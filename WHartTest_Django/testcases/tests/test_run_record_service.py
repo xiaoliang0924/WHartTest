@@ -207,6 +207,56 @@ class ExecutionResultReportTests(SimpleTestCase):
         fail_ctx = _extract_fail_context(transcript)
         self.assertIn("timed out", fail_ctx["reason"].lower())
 
+    def test_locator_timeout_after_helper_pass_marks_current_step_failed(self):
+        case = _fake_case(
+            id=1191,
+            steps=[
+                SimpleNamespace(step_number=n, description=f"步骤{n}", expected_result="")
+                for n in range(1, 5)
+            ],
+        )
+        transcript = (
+            "[执行进度] 正在执行步骤 1/4\nRESULT=PASS: 步骤1登录成功\n"
+            "[执行进度] 正在执行步骤 2/4\nRESULT=PASS: 步骤2已进入工单列表\n"
+            "[执行进度] 正在执行步骤 3/4\n"
+            "RESULT=PASS: 下拉「工单状态」已选中「待处理」\n"
+            "locator.innerText: Timeout 15000ms exceeded.\n"
+            "Call log:\n- waiting for locator('.el-form-item').filter({ hasText: '工单状态' })\n"
+        )
+
+        results = build_step_results_from_execution_evidence(
+            case, transcript, fail_reason="locator.innerText: Timeout 15000ms exceeded"
+        )
+        by_step = {item["step_number"]: item for item in results}
+
+        self.assertEqual(by_step[1]["status"], "pass")
+        self.assertEqual(by_step[2]["status"], "pass")
+        self.assertEqual(by_step[3]["status"], "fail")
+        self.assertEqual(by_step[4]["status"], "skip")
+
+    def test_timeout_recovered_by_later_pass_does_not_fail_step(self):
+        case = _fake_case(
+            id=1403,
+            steps=[
+                SimpleNamespace(step_number=n, description=f"步骤{n}", expected_result="")
+                for n in range(1, 3)
+            ],
+        )
+        transcript = (
+            "[执行进度] 正在执行步骤 1/2\nRESULT=PASS: 步骤1登录成功\n"
+            "[执行进度] 正在执行步骤 2/2\n"
+            "locator.innerText: Timeout 15000ms exceeded; retrying with helper\n"
+            "RESULT=PASS: 步骤2已选中待处理并校验筛选框值\n"
+        )
+
+        results = build_step_results_from_execution_evidence(
+            case, transcript, fail_reason="locator.innerText: Timeout 15000ms exceeded"
+        )
+        by_step = {item["step_number"]: item for item in results}
+
+        self.assertEqual(by_step[1]["status"], "pass")
+        self.assertEqual(by_step[2]["status"], "pass")
+
     def test_detects_existing_report(self):
         self.assertTrue(has_execution_result_report("## 测试执行结果: 不通过\n### 基本信息\n- 测试用例ID: 1520"))
         self.assertFalse(has_execution_result_report("【执行失败】\n- 失败步骤：第1步"))
