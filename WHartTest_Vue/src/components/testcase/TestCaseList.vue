@@ -231,7 +231,6 @@
           </a-button>
           <a-dropdown trigger="click" position="br">
             <a-button type="outline" size="mini" @click.stop>
-              <template #icon><icon-more /></template>
               {{ pageText.more }}
               <icon-down class="case-row-actions__chevron" />
             </a-button>
