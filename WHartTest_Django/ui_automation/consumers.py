@@ -1045,15 +1045,28 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         # 预加载每组导航地址（页面外键在异步上下文中不可触发）
         from .models import UiPage as _UiPage
 
+        def _is_login_url(url: str) -> bool:
+            return bool(re.search(r'/+(?:login|signin|sign-in)(?:/|$|[?])', str(url or ''), re.I))
+
+        def _is_login_navigation(step: dict) -> bool:
+            return step.get('ope_key') == 'goto' and _is_login_url(
+                (step.get('ope_value') or {}).get('url')
+            )
+
         def _load_group_urls(page_steps) -> list:
             urls = []
             for ps in page_steps:
-                url = ''
-                if env_config is not None and env_config.base_url:
+                page_url = ''
+                if ps.page_id:
+                    page_url = _UiPage.objects.filter(id=ps.page_id).values_list('url', flat=True).first() or ''
+                if login_profile:
+                    # 自动登录成功后，优先回到该步骤记录的业务页面；旧用例的页面 URL
+                    # 可能仍是登录页，此时保持当前已登录页面，不要再导航回登录入口。
+                    url = page_url if page_url and not _is_login_url(page_url) else ''
+                elif env_config is not None and env_config.base_url:
                     url = env_config.base_url
-                elif ps.page_id:
-                    page_obj = _UiPage.objects.filter(id=ps.page_id).values_list('url', flat=True).first()
-                    url = page_obj or ''
+                else:
+                    url = page_url
                 urls.append(str(url or '').strip())
             return urls
 
@@ -1207,15 +1220,8 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                         )
                     current_auth = pending_auth
                 steps = await sync_to_async(_serialize_page_step_for_recorder)(page_step)
-                if login_profile and group_index == 1:
-                    # 生成用例可能把浏览器最初被重定向到的登录 URL 保存成页面入口；
-                    # 已完成本次新登录后，跳过该登录导航，避免重新落回登录页。
-                    def _is_login_navigation(step):
-                        if step.get('ope_key') != 'goto':
-                            return False
-                        target = str((step.get('ope_value') or {}).get('url') or '')
-                        return bool(re.search(r'/+(?:login|signin|sign-in)(?:/|$|[?])', target, re.I))
-
+                if login_profile:
+                    # 登录只执行一次；后续分组中的显式登录页 goto 同样会使认证失效。
                     steps = [step for step in steps if not _is_login_navigation(step)]
                 logger.info(
                     '[recorder-exec] 第 %d/%d 组执行 page_step=%s steps=%d base_url=%s',
@@ -1225,7 +1231,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 #（与执行器 total_steps 口径一致：sum(len(ps.steps))）
                 group_step_count = len(steps)
                 base_url = group_bases[group_index - 1]
-                if base_url and not (login_profile and group_index == 1):
+                if base_url:
                     steps = [{
                         'ope_key': 'goto',
                         'ope_value': {'url': base_url},
