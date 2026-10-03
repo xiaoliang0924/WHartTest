@@ -272,6 +272,11 @@ def _map_ui_script_results_to_testcase_steps(
             group_no = int(group_value or index)
         except (TypeError, ValueError):
             group_no = index
+        # Recorder emits group0_0 for the shared login/authentication pre-step.
+        # It is not one of the generated UI case's page-step groups and must not
+        # be counted against the functional testcase's business steps.
+        if group_no <= 0:
+            continue
         groups.setdefault(group_no, []).append(item)
 
     expected_count = len(case_steps)

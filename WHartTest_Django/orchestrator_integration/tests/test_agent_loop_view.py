@@ -258,6 +258,29 @@ class ScriptOnlyResultMappingTests(SimpleTestCase):
         self.assertEqual(status, "pass")
         self.assertEqual([item["status"] for item in results], ["pass", "pass"])
 
+    def test_authentication_prestep_group_zero_is_excluded_from_business_mapping(self):
+        steps = [
+            SimpleNamespace(step_number=index, description=f"业务步骤{index}", expected_result="通过")
+            for index in range(1, 5)
+        ]
+        raw_results = [
+            {"step_id": "group0_0", "status": "success", "description": "手动登录并验证"},
+            *[
+                {"step_id": f"group{index}_1", "status": "success", "description": f"业务动作{index}"}
+                for index in range(1, 5)
+            ],
+        ]
+
+        results, status, reason = _map_ui_script_results_to_testcase_steps(
+            steps,
+            raw_results,
+            ui_status=2,
+        )
+
+        self.assertEqual(status, "pass")
+        self.assertEqual(reason, "")
+        self.assertEqual([item["status"] for item in results], ["pass"] * 4)
+
     def test_failed_recorder_action_fails_its_functional_step(self):
         results, status, reason = _map_ui_script_results_to_testcase_steps(
             self.steps,
