@@ -1669,6 +1669,20 @@ async function resolveLocatorWithFallback(page, selector, log, options = {}) {
   push(selector.locator_type || 'xpath', selector.locator_value, selector.locator_index);
   push(selector.locator_type_2, selector.locator_value_2, selector.locator_index_2);
   push(selector.locator_type_3, selector.locator_value_3, selector.locator_index_3);
+  // AI-generated forms sometimes expose the visible field title as plain text
+  // instead of an associated <label for=...> or aria-label. In that case
+  // getByLabel(title) cannot resolve the input, even though its placeholder
+  // contains the same title (for example, title "工单号", placeholder
+  // "搜索工单号..."). Keep the explicit locator chain first, then try the
+  // title as a partial placeholder match before declaring the element missing.
+  const configuredCandidates = [...candidates];
+  for (const [type, value, index] of configuredCandidates) {
+    if (type !== 'label') continue;
+    const hasSamePlaceholder = candidates.some(([candidateType, candidateValue]) =>
+      candidateType === 'placeholder' && candidateValue === value
+    );
+    if (!hasSamePlaceholder) push('placeholder', value, index);
+  }
   if (!candidates.length) return null;
 
   let locator = null;
