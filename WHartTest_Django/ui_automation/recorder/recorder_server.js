@@ -1915,6 +1915,34 @@ async function autoLoginIfPrompted(page, timeoutMs = 20000) {
   return { attempted: true, page_url: page.url() };
 }
 
+/**
+ * 登录后出现的版本提示可能覆盖业务页面并拦截回放点击。
+ * 只关闭含版本/更新文案且带明确确认按钮的可见对话框，避免误关业务弹窗。
+ */
+async function dismissVersionNoticeBeforeClick(page) {
+  if (!page) return false;
+  try {
+    const dialog = page
+      .locator('.el-overlay-dialog:visible, .el-dialog:visible, [role="dialog"]:visible')
+      .filter({ hasText: /版本|更新/ })
+      .last();
+    if (!(await dialog.isVisible().catch(() => false))) return false;
+
+    const acknowledge = dialog
+      .getByRole('button', { name: /^(我知道了|知道了)$/ })
+      .first();
+    if (!(await acknowledge.isVisible().catch(() => false))) return false;
+
+    await acknowledge.click({ timeout: 2000 });
+    await dialog.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(150);
+    return true;
+  } catch (_) {
+    // 弹窗若正在消失或页面已导航，不应阻断原回放步骤。
+    return false;
+  }
+}
+
 /** 执行一步平台步骤（ope_key 词汇表与执行器对齐），返回错误信息或 null */
 async function runOneStep(page, step) {
   const opeKey = String(step.ope_key || '');
@@ -2005,6 +2033,7 @@ async function runOneStep(page, step) {
   }
   switch (opeKey) {
     case 'click':
+      await dismissVersionNoticeBeforeClick(page);
       await locator.click({ timeout: 15000 });
       return null;
     case 'fill':
