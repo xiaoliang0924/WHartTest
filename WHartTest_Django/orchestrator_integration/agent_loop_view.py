@@ -250,7 +250,7 @@ async def _complete_testcase_run_with_report(
 
 
 def _map_ui_script_results_to_testcase_steps(
-    case_steps, raw_results, *, ui_status: int, ui_error: str = ""
+    case_steps, raw_results, *, ui_status: int, ui_error: str = "", ui_case_groups=None
 ):
     """Map recorder actions to functional steps using their recorded group IDs.
 
@@ -282,9 +282,59 @@ def _map_ui_script_results_to_testcase_steps(
     expected_count = len(case_steps)
     actual_count = len(groups)
     alignment_error = ""
+    combined_trailing_group = False
+    if ui_status == 2 and expected_count == actual_count + 1 and ui_case_groups:
+        # A generated UI page step may deliberately contain both the final
+        # business action and its following assertion (for example, search and
+        # verify the matching row). Accept that one-to-two mapping only when
+        # the functional steps and saved UI group explicitly support both acts.
+        previous = case_steps[-2] if expected_count >= 2 else None
+        final = case_steps[-1] if expected_count >= 1 else None
+        final_group = ui_case_groups[-1] if len(ui_case_groups) == actual_count else {}
+        previous_text = f"{getattr(previous, 'description', '')} {getattr(previous, 'expected_result', '')}"
+        final_text = f"{getattr(final, 'description', '')} {getattr(final, 'expected_result', '')}"
+        group_text = " ".join([
+            str(final_group.get("name") or ""),
+            str(final_group.get("description") or ""),
+            " ".join(str(value) for value in final_group.get("elements", [])),
+        ])
+        operations = {str(value or "").lower() for value in final_group.get("operations", [])}
+
+        def cjk_bigrams(value):
+            return {
+                run[index:index + 2]
+                for run in re.findall(r"[\u4e00-\u9fff]+", str(value))
+                for index in range(len(run) - 1)
+            }
+
+        shared_topic = (
+            cjk_bigrams(previous_text)
+            & cjk_bigrams(final_text)
+            & cjk_bigrams(group_text)
+        )
+        action_ops = {"click", "fill", "type", "select", "select_option", "check"}
+        assertion_ops = {"assert_visible", "assert_text", "contain_text", "assert_count"}
+        has_action_semantics = bool(re.search(r"输入|点击|查询|筛选|搜索|选择", previous_text))
+        has_assertion_semantics = bool(re.search(r"检查|验证|确认|是否|存在|显示|可见|包含", final_text))
+        group_has_action = bool(operations & action_ops) and bool(
+            re.search(r"输入|点击|查询|筛选|搜索|选择", group_text)
+        )
+        group_has_assertion = bool(operations & assertion_ops) and bool(
+            re.search(r"检查|验证|确认|断言|存在|显示|可见|包含", group_text)
+        )
+        combined_trailing_group = bool(
+            previous
+            and final
+            and shared_topic
+            and has_action_semantics
+            and has_assertion_semantics
+            and group_has_action
+            and group_has_assertion
+        )
+
     # 对失败执行优先呈现执行器返回的真实错误；步骤数不一致只对“脚本
     # 已通过、但无法证明功能步骤均被覆盖”的情况作为安全失败原因。
-    if ui_status == 2 and expected_count != actual_count:
+    if ui_status == 2 and expected_count != actual_count and not combined_trailing_group:
         alignment_error = (
             f"绑定 UI 用例包含 {actual_count} 组页面步骤，功能用例有 {expected_count} 步，"
             "无法逐步对应；为避免误报通过，本次按未对齐处理。"
@@ -292,7 +342,12 @@ def _map_ui_script_results_to_testcase_steps(
 
     step_results = []
     for index, step in enumerate(case_steps, start=1):
-        group_items = groups.get(index, [])
+        group_no = index
+        if combined_trailing_group and index == expected_count:
+            group_no = actual_count
+        elif combined_trailing_group and index == expected_count - 1:
+            group_no = actual_count
+        group_items = groups.get(group_no, [])
         group_failed = any(
             str(item.get("status") or "").lower() not in {"success", "pass", "passed"}
             for item in group_items
@@ -353,7 +408,7 @@ async def _run_testcase_with_bound_ui_script(
     from testcases.run_record_service import build_execution_result_report, build_pre_data_usage
     from testcases.models import TestCaseRunRecord
     from ui_automation.consumers import SocketUserManager
-    from ui_automation.models import UiExecutionRecord, UiTestCase
+    from ui_automation.models import UiCaseStepsDetailed, UiExecutionRecord, UiTestCase
 
     user = request.user
     ui_case = await sync_to_async(
@@ -416,12 +471,28 @@ async def _run_testcase_with_bound_ui_script(
         def build_case_report():
             case = TestCase.objects.prefetch_related("steps").get(id=testcase_id)
             case_steps = list(case.steps.all().order_by("step_number"))
+            ui_case_groups = []
+            for case_group in (
+                UiCaseStepsDetailed.objects.filter(test_case_id=ui_test_case_id)
+                .select_related("page_step")
+                .prefetch_related("page_step__step_details__element")
+                .order_by("case_sort")
+            ):
+                page_step = case_group.page_step
+                details = list(page_step.step_details.all())
+                ui_case_groups.append({
+                    "name": page_step.name,
+                    "description": page_step.description or "",
+                    "operations": [detail.ope_key or "" for detail in details],
+                    "elements": [detail.element.name for detail in details if detail.element],
+                })
             raw_results = ui_record.step_results if isinstance(ui_record.step_results, list) else []
             step_results, final_status, failure_reason = _map_ui_script_results_to_testcase_steps(
                 case_steps,
                 raw_results,
                 ui_status=ui_record.status,
                 ui_error=ui_record.error_message or "",
+                ui_case_groups=ui_case_groups,
             )
             summary = build_execution_result_report(
                 case,

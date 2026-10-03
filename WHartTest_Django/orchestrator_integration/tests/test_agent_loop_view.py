@@ -281,6 +281,44 @@ class ScriptOnlyResultMappingTests(SimpleTestCase):
         self.assertEqual(reason, "")
         self.assertEqual([item["status"] for item in results], ["pass"] * 4)
 
+    def test_combined_query_and_assertion_group_maps_to_two_functional_steps(self):
+        steps = [
+            SimpleNamespace(step_number=1, description="登录系统", expected_result="登录成功"),
+            SimpleNamespace(step_number=2, description="进入我的工单", expected_result="页面打开"),
+            SimpleNamespace(step_number=3, description="输入工单号并点击查询", expected_result="筛选结果"),
+            SimpleNamespace(step_number=4, description="检查列表中是否存在该工单", expected_result="目标工单可见"),
+        ]
+        raw_results = [
+            {"step_id": "group0_0", "status": "success", "description": "登录"},
+            {"step_id": "group1_1", "status": "success", "description": "打开页面"},
+            {"step_id": "group2_1", "status": "success", "description": "打开我的工单"},
+            {"step_id": "group3_1", "status": "success", "description": "输入工单号"},
+            {"step_id": "group3_2", "status": "success", "description": "查询"},
+            {"step_id": "group3_3", "status": "success", "description": "等待工单可见"},
+            {"step_id": "group3_4", "status": "success", "description": "断言工单可见"},
+        ]
+        ui_case_groups = [
+            {"name": "登录并进入我的工单", "description": "登录", "operations": ["assert_url"]},
+            {"name": "进入我的工单", "description": "打开菜单", "operations": ["click"]},
+            {
+                "name": "按工单号查询并确认列表可见",
+                "description": "输入工单号并点击查询，页面文本可见该工单号",
+                "operations": ["fill", "click", "wait_for_visible", "assert_visible"],
+                "elements": ["工单号", "查询", "工单号结果"],
+            },
+        ]
+
+        results, status, reason = _map_ui_script_results_to_testcase_steps(
+            steps,
+            raw_results,
+            ui_status=2,
+            ui_case_groups=ui_case_groups,
+        )
+
+        self.assertEqual(status, "pass")
+        self.assertEqual(reason, "")
+        self.assertEqual([item["status"] for item in results], ["pass"] * 4)
+
     def test_failed_recorder_action_fails_its_functional_step(self):
         results, status, reason = _map_ui_script_results_to_testcase_steps(
             self.steps,
