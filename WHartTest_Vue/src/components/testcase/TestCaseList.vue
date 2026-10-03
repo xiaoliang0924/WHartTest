@@ -220,22 +220,33 @@
         <span v-else>-</span>
       </template>
       <template #operations="{ record }">
-        <a-space :size="4">
-          <a-button type="primary" size="mini" @click.stop="handleViewTestCase(record)">{{ pageText.view }}</a-button>
-          <a-button type="primary" size="mini" @click.stop="handleEditTestCase(record)">{{ pageText.edit }}</a-button>
-          <a-button type="outline" size="mini" @click.stop="openMoveModal([record.id])">{{ pageText.move }}</a-button>
-          <a-button type="outline" size="mini" @click.stop="handleExecuteTestCase(record)">{{ pageText.execute }}</a-button>
-          <a-button
-            v-if="record.latest_run"
-            type="outline"
-            size="mini"
-            status="success"
-            @click.stop="handleViewExecutionReport(record)"
-          >
-            {{ pageText.report }}
+        <a-space class="case-row-actions" :size="6">
+          <a-button type="outline" size="mini" @click.stop="handleViewTestCase(record)">
+            <template #icon><icon-eye /></template>
+            {{ pageText.view }}
           </a-button>
-          <a-button type="outline" size="mini" @click.stop="handleCopyTestCase(record)">{{ pageText.copy }}</a-button>
-          <a-button type="primary" status="danger" size="mini" @click.stop="handleDeleteTestCase(record)">{{ pageText.delete }}</a-button>
+          <a-button type="primary" size="mini" @click.stop="handleExecuteTestCase(record)">
+            <template #icon><icon-play-arrow /></template>
+            {{ pageText.execute }}
+          </a-button>
+          <a-dropdown trigger="click" position="br">
+            <a-button type="outline" size="mini" @click.stop>
+              <template #icon><icon-more /></template>
+              {{ pageText.more }}
+              <icon-down class="case-row-actions__chevron" />
+            </a-button>
+            <template #content>
+              <a-doption @click.stop="handleEditTestCase(record)">{{ pageText.edit }}</a-doption>
+              <a-doption @click.stop="openMoveModal([record.id])">{{ pageText.move }}</a-doption>
+              <a-doption v-if="record.latest_run" @click.stop="handleViewExecutionReport(record)">
+                {{ pageText.report }}
+              </a-doption>
+              <a-doption @click.stop="handleCopyTestCase(record)">{{ pageText.copy }}</a-doption>
+              <a-doption class="case-row-actions__danger" @click.stop="handleDeleteTestCase(record)">
+                {{ pageText.delete }}
+              </a-doption>
+            </template>
+          </a-dropdown>
         </a-space>
       </template>
     </a-table>
@@ -280,7 +291,7 @@
 import { ref, reactive, onMounted, onUnmounted, computed, watch, toRefs } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message, Modal } from '@arco-design/web-vue';
-import { IconFolder, IconDownload, IconUpload, IconDown } from '@arco-design/web-vue/es/icon';
+import { IconFolder, IconDownload, IconUpload, IconDown, IconEye, IconMore, IconPlayArrow } from '@arco-design/web-vue/es/icon';
 import { useAppI18n } from '@/composables/useAppI18n';
 import ImportModal from '@/features/testcase-templates/components/ImportModal.vue';
 import ExportModal from '@/features/testcase-templates/components/ExportModal.vue';
@@ -363,6 +374,7 @@ const pageText = computed(() => (
         noProjectSelected: 'Select a project from the top bar',
         unassigned: 'Unassigned',
         view: 'View',
+        more: 'More',
         edit: 'Edit',
         execute: 'Run',
         report: 'Report',
@@ -436,6 +448,7 @@ const pageText = computed(() => (
         noProjectSelected: '请在顶部选择一个项目',
         unassigned: '未分配',
         view: '查看',
+        more: '更多',
         edit: '编辑',
         execute: '执行',
         report: '报告',
@@ -574,6 +587,7 @@ const isMoving = ref(false);
 const importModalRef = ref<InstanceType<typeof ImportModal> | null>(null);
 const exportModalRef = ref<InstanceType<typeof ExportModal> | null>(null);
 const COLUMN_WIDTH_STORAGE_KEY = 'wharttest:testcase-list-column-widths';
+const operationsColumnWidth = computed(() => isEnglish.value ? 230 : 205);
 
 const defaultColumnWidths: Record<string, number> = {
   id: 50,
@@ -629,7 +643,7 @@ const handleResize = () => {
 const tableScroll = computed(() => ({
 x: Math.max(
     1070,
-    32 + 36 + Object.keys(defaultColumnWidths).reduce((total, key) => total + getColumnWidth(key), 0) + 240
+    32 + 36 + Object.keys(defaultColumnWidths).reduce((total, key) => total + getColumnWidth(key), 0) + operationsColumnWidth.value
   ),
   y: tableContainerHeight.value,
 }));
@@ -762,7 +776,7 @@ const columns = computed(() => ([
     align: 'center',
     sortable: { sortDirections: ['ascend', 'descend'], sortOrder: getSortOrder('updated_at') },
   },
-  { title: pageText.value.actions, slotName: 'operations', width: 300, fixed: 'right', align: 'center' },
+  { title: pageText.value.actions, slotName: 'operations', width: operationsColumnWidth.value, fixed: 'right', align: 'center' },
 ]) as TableColumnData[]);
 
 const getRunStatusLabel = (status?: string) => {
@@ -1430,6 +1444,15 @@ defineExpose({
 
 .run-status-tag {
   cursor: pointer;
+}
+
+.case-row-actions__chevron {
+  margin-left: 2px;
+  font-size: 10px;
+}
+
+:deep(.case-row-actions__danger) {
+  color: var(--color-danger-6, #f53f3f);
 }
 
 /* 移除重复的样式定义 */
