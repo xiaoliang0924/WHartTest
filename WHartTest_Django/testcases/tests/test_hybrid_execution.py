@@ -1,13 +1,15 @@
 from django.contrib.auth.models import User
 from rest_framework import status
-from rest_framework.test import APITestCase, APIClient
+from rest_framework.test import APITransactionTestCase, APIClient
+from unittest.mock import patch
 
 from projects.models import Project
 from testcases.models import TestCase as TestCaseModel, TestCaseModule, TestCaseStep
 from ui_automation.models import UiModule, UiPage, UiElement, UiPageSteps, UiPageStepsDetailed, UiTestCase, UiCaseStepsDetailed, UiExecutionRecord
+from testcases.ai_diagnosis_service import diagnose_execution_failure
 
 
-class HybridExecutionAndBindingTests(APITestCase):
+class HybridExecutionAndBindingTests(APITransactionTestCase):
     def setUp(self):
         self.user = User.objects.create_superuser(
             username="testuser",
@@ -191,6 +193,120 @@ class HybridExecutionAndBindingTests(APITestCase):
         self.assertIn("root_cause_type", response.data)
         self.assertEqual(response.data["root_cause_type"], "SCRIPT_DEFECT")
         self.assertTrue(response.data["healing_suggestion"]["can_self_heal"])
+
+    def test_hidden_menu_click_on_recorded_target_route_is_diagnosed_as_redundant_navigation(self):
+        self.testcase.ui_test_case = self.ui_testcase
+        self.testcase.save()
+        self.ui_page.url = "https://example.test/work-order/my-tickets"
+        self.ui_page.save(update_fields=["url"])
+        self.ui_element.name = "我的工单菜单项"
+        self.ui_element.locator_type = "xpath"
+        self.ui_element.locator_value = "//li[@role='menuitem' and normalize-space()='我的工单']"
+        self.ui_element.save()
+        detail = self.ui_page_step.step_details.get()
+        record = UiExecutionRecord.objects.create(
+            test_case=self.ui_testcase,
+            executor=self.user,
+            status=3,
+            error_message="locator.click: Timeout 15000ms exceeded; element is not visible",
+            step_results=[{
+                "step_id": detail.id,
+                "status": 3,
+                "description": "click",
+                "page_url": "https://example.test/work-order/my-tickets",
+                "error_message": (
+                    "locator.click: Timeout 15000ms exceeded; "
+                    "locator resolved to <li role=menuitem>; element is not visible"
+                ),
+            }],
+        )
+
+        with patch("testcases.ai_diagnosis_service.LLMConfig.objects.filter") as configs:
+            configs.return_value.first.return_value = None
+            diagnosis = diagnose_execution_failure(
+                self.testcase, ui_record_id=record.id, user=self.user,
+            )
+
+        self.assertEqual(diagnosis["root_cause_type"], "SCRIPT_DEFECT")
+        self.assertEqual(diagnosis["healing_suggestion"]["repair_type"], "navigation_assertion")
+        self.assertTrue(diagnosis["healing_suggestion"]["can_self_heal"])
+        self.assertEqual(diagnosis["evidence"]["page_url"], self.ui_page.url)
+
+    def test_navigation_repair_preserves_failure_when_routes_differ(self):
+        self.testcase.ui_test_case = self.ui_testcase
+        self.testcase.save()
+        from asgiref.sync import async_to_sync
+        from orchestrator_integration.agent_loop_view import _apply_safe_generated_ui_repair
+
+        diagnosis = {
+            "root_cause_type": "SCRIPT_DEFECT",
+            "healing_suggestion": {"repair_type": "navigation_assertion", "can_self_heal": True},
+            "evidence": {
+                "actual_url": "https://example.test/work-order/dashboard",
+                "page_url": "https://example.test/work-order/my-tickets",
+            },
+            "failure_step_info": {
+                "operation_type": "click",
+                "element_id": self.ui_element.id,
+                "current_locator_value": "//li[@role='menuitem']",
+                "error_message": "element is not visible",
+            },
+        }
+        result = async_to_sync(_apply_safe_generated_ui_repair)(
+            project_id=self.project.id,
+            ui_test_case_id=self.ui_testcase.id,
+            diagnosis=diagnosis,
+            attempt=1,
+        )
+
+        self.assertEqual(result["status"], "skipped")
+        detail = self.ui_page_step.step_details.get()
+        self.assertEqual(detail.ope_key, "click")
+
+    def test_navigation_repair_replaces_only_redundant_hidden_menu_click_with_path_assertion(self):
+        self.testcase.ui_test_case = self.ui_testcase
+        self.testcase.save()
+        from asgiref.sync import async_to_sync
+        from orchestrator_integration.agent_loop_view import _apply_safe_generated_ui_repair
+
+        self.ui_page.url = "https://example.test/work-order/my-tickets"
+        self.ui_page.save(update_fields=["url"])
+        self.ui_element.locator_value = "//li[@role='menuitem' and normalize-space()='我的工单']"
+        self.ui_element.save(update_fields=["locator_value"])
+        detail = self.ui_page_step.step_details.get()
+        diagnosis = {
+            "root_cause_type": "SCRIPT_DEFECT",
+            "healing_suggestion": {
+                "repair_type": "navigation_assertion",
+                "can_self_heal": True,
+                "element_id": self.ui_element.id,
+            },
+            "evidence": {
+                "actual_url": "https://example.test/work-order/my-tickets?session=rotated",
+                "page_url": self.ui_page.url,
+            },
+            "failure_step_info": {
+                "operation_type": "click",
+                "element_id": self.ui_element.id,
+                "current_locator_value": self.ui_element.locator_value,
+                "error_message": "locator.click timeout; element is not visible",
+            },
+        }
+
+        result = async_to_sync(_apply_safe_generated_ui_repair)(
+            project_id=self.project.id,
+            ui_test_case_id=self.ui_testcase.id,
+            diagnosis=diagnosis,
+            attempt=1,
+        )
+
+        self.assertEqual(result["status"], "applied")
+        detail.refresh_from_db()
+        self.assertEqual(detail.ope_key, "assert_url")
+        self.assertEqual(detail.step_type, 1)
+        self.assertIsNone(detail.element_id)
+        self.assertEqual(detail.ope_value["expected"], self.ui_page.url)
+        self.assertEqual(detail.ope_value["match"], "path")
 
     def test_apply_healing_to_element(self):
         """测试一键应用自愈建议更新 UI 元素定位"""

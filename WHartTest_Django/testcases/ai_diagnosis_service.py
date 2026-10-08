@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 from django.utils import timezone
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -15,6 +16,22 @@ from langgraph_integration.views import create_llm_instance
 from ui_automation.models import UiTestCase, UiExecutionRecord, UiElement, UiCaseStepsDetailed
 
 logger = logging.getLogger(__name__)
+
+
+def _same_url_route(actual_url: str, expected_url: str) -> bool:
+    """Require the same origin and pathname before treating navigation as redundant."""
+    try:
+        actual = urlsplit(str(actual_url or "").strip())
+        expected = urlsplit(str(expected_url or "").strip())
+    except Exception:
+        return False
+    return bool(
+        actual.scheme and actual.netloc and actual.path
+        and expected.scheme and expected.netloc and expected.path
+        and actual.scheme.lower() == expected.scheme.lower()
+        and actual.netloc.lower() == expected.netloc.lower()
+        and (actual.path.rstrip("/") or "/") == (expected.path.rstrip("/") or "/")
+    )
 
 DIAGNOSIS_SYSTEM_PROMPT = """你是一名资深自动化测试架构师与 AI 测试排障专家。
 你的任务是对 UI 自动化执行失败的现场数据进行多模态/结构化深度分析，输出标准 JSON 格式的根因诊断报告和自愈建议。
@@ -35,7 +52,7 @@ DIAGNOSIS_SYSTEM_PROMPT = """你是一名资深自动化测试架构师与 AI �
   },
   "healing_suggestion": {
     "can_self_heal": true,
-    "repair_type": "locator" | "url_path" | "wait_for_visible" | "none",
+    "repair_type": "locator" | "url_path" | "wait_for_visible" | "navigation_assertion" | "none",
     "element_id": null,
     "element_name": "",
     "current_locator_type": "",
@@ -114,8 +131,21 @@ def _fallback_rule_diagnosis(
         or (failure_info.get("failure_step") or {}).get("expected")
         or ""
     )
+    recorded_page_url = str(step_info.get("page_url") or "")
+    hidden_menu_click = (
+        step_info.get("operation_type") == "click"
+        and "not visible" in error_lower
+        and "menuitem" in (str(step_info.get("locator_value") or "") + " " + error_lower).lower()
+        and _same_url_route(actual_url, recorded_page_url)
+    )
 
-    if "waitforfunction" in error_lower or "页面条件等待超时" in error_msg:
+    if hidden_menu_click:
+        root_cause_type = "SCRIPT_DEFECT"
+        root_cause_label = "目标页面已到达但仍点击隐藏菜单"
+        summary = "失败时已处于该步骤记录的目标路由，隐藏菜单点击是冗余导航动作"
+        can_self_heal = True
+        repair_type = "navigation_assertion"
+    elif "waitforfunction" in error_lower or "页面条件等待超时" in error_msg:
         # Only auto-relax a URL assertion when the observed page is the same
         # route and differs solely by query/hash. A redirect to login or an
         # unrelated route must remain a failure, not be hidden by a looser wait.
@@ -183,7 +213,10 @@ def _fallback_rule_diagnosis(
             "suggested_locator_type": "xpath",
             "suggested_locator_value": step_info.get("locator_value", ""),
             "wait_match": wait_match,
-            "explanation": "建议检查页面对应元素的 XPath/CSS 定位或使用文本/role 定位替代。",
+            "explanation": (
+                "失败时实际路由已与目标页面一致，可将冗余隐藏菜单点击替换为路径断言。"
+                if hidden_menu_click else "建议检查页面对应元素的 XPath/CSS 定位或使用文本/role 定位替代。"
+            ),
         },
         "defect_report": {
             "is_real_bug": root_cause_type == "BUG",
@@ -271,6 +304,7 @@ def extract_failure_context(
     locator_type = ""
     locator_value = ""
     page_name = ""
+    page_url = ""
     operation_type = ""
     ope_value = None
     step_description = failed_step_data.get("description", "") if failed_step_data else ""
@@ -315,6 +349,7 @@ def extract_failure_context(
             ope_value = detailed_step.ope_value
             if detailed_step.page_step and detailed_step.page_step.page:
                 page_name = detailed_step.page_step.page.name
+                page_url = detailed_step.page_step.page.url or ""
             if detailed_step.element:
                 element_id = detailed_step.element.id
                 element_name = detailed_step.element.name
@@ -396,6 +431,7 @@ def extract_failure_context(
             "operation_type": operation_type,
             "operation_value": json.dumps(ope_value, ensure_ascii=False) if ope_value else "",
             "actual_url": str(failed_step_data.get("page_url") or "") if failed_step_data else "",
+            "page_url": page_url,
             "actual_title": str(failed_step_data.get("page_title") or "") if failed_step_data else "",
             "ready_state": str(failed_step_data.get("ready_state") or "") if failed_step_data else "",
             "expected": str(failed_step_data.get("expected") or "") if failed_step_data else "",
@@ -527,6 +563,41 @@ UI用例名称: {testcase.ui_test_case.name if testcase.ui_test_case else '无'}
         diagnosis_result = _fallback_rule_diagnosis(testcase, ui_record, failure_info)
         diagnosis_result["diagnosed_by"] = "rule_fallback"
 
+    # Deterministic safety rule: the LLM must not recommend another locator
+    # when the failed action is a hidden menu click and the recorded target
+    # route is already active. The replay layer can replace only that redundant
+    # click with a URL-path assertion after checking the same evidence again.
+    failed_step = failure_info.get("failure_step") or {}
+    error_lower = str(failure_info.get("error_message") or "").lower()
+    locator_evidence = f"{failed_step.get('locator_value') or ''} {error_lower}".lower()
+    if (
+        failed_step.get("operation_type") == "click"
+        and "not visible" in error_lower
+        and "menuitem" in locator_evidence
+        and _same_url_route(
+            failed_step.get("actual_url") or (failure_info.get("exploration") or {}).get("page_url"),
+            failed_step.get("page_url"),
+        )
+    ):
+        diagnosis_result["root_cause_type"] = "SCRIPT_DEFECT"
+        diagnosis_result["root_cause_label"] = "目标页面已到达但仍点击隐藏菜单"
+        diagnosis_result["summary"] = "失败时已处于该步骤记录的目标路由，隐藏菜单点击是冗余导航动作"
+        diagnosis_result["healing_suggestion"] = {
+            **(diagnosis_result.get("healing_suggestion") or {}),
+            "can_self_heal": True,
+            "repair_type": "navigation_assertion",
+            "element_id": failed_step.get("element_id"),
+            "current_locator_value": failed_step.get("locator_value") or "",
+            "explanation": "实际 URL 与页面资产记录的目标路由一致，仅将隐藏的冗余菜单点击改为路径断言。",
+        }
+        diagnosis_result["failure_step_info"] = {
+            **(diagnosis_result.get("failure_step_info") or {}),
+            "operation_type": "click",
+            "element_id": failed_step.get("element_id"),
+            "current_locator_value": failed_step.get("locator_value") or "",
+            "error_message": failure_info.get("error_message") or "",
+        }
+
     diagnosis_result["diagnosed_at"] = timezone.now().isoformat()
     diagnosis_result["ui_execution_record_id"] = ui_record.id if ui_record else None
     # Keep the machine-collected evidence outside the LLM schema so the safe
@@ -540,6 +611,7 @@ UI用例名称: {testcase.ui_test_case.name if testcase.ui_test_case else '无'}
         or "",
         "expected": (failure_info.get("failure_step") or {}).get("expected") or "",
         "operation_type": (failure_info.get("failure_step") or {}).get("operation_type") or "",
+        "page_url": (failure_info.get("failure_step") or {}).get("page_url") or "",
     }
 
     return diagnosis_result

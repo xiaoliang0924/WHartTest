@@ -712,6 +712,8 @@ async def _force_save_generated_ui_case(*, llm, tools, messages) -> Dict[str, An
         "现在必须调用唯一可用工具 save_generated_ui_testcase 一次，"
         "传入 payload_json JSON 字符串，包含 name、description、url、steps。"
         "每个功能测试步骤对应一个 UI step，动作按实际观察顺序记录；"
+        "导航步骤必须检查当前页面状态：如果该步骤开始时 URL 的 origin+pathname 已与目标页面一致，不要生成冗余菜单点击，改为保存基于本次实际 URL 的 assert mode=url、match=path；"
+        "若必须点击导航，只能保存本次观察到的可见菜单项。定位到隐藏菜单节点时不得使用 force click 或单纯替换 XPath，应限定可见导航区域；没有可见目标时保留失败，不要伪造通过。"
         "没有足够证据的步骤不要编造，工具若因步骤不完整拒绝保存，应如实报告。"
         "禁止再次操作浏览器或调用其他工具。"
     ))
@@ -959,6 +961,80 @@ async def _apply_safe_generated_ui_repair(
         return {"status": "skipped", "reason": "AI 判断为业务或环境问题，未自动修改用例。"}
     if suggestion.get("can_self_heal") is not True:
         return {"status": "skipped", "reason": "AI 未确认存在安全的自动修复方案。"}
+
+    if repair_type == "navigation_assertion":
+        from ui_automation.models import UiCaseStepsDetailed, UiPageStepsDetailed
+
+        evidence = diagnosis.get("evidence") or {}
+        actual_url = str(evidence.get("actual_url") or "").strip()
+        target_url = str(evidence.get("page_url") or "").strip()
+        failure_info = diagnosis.get("failure_step_info") or {}
+        error_text = str(failure_info.get("error_message") or "").lower()
+        locator_evidence = " ".join((
+            str(failure_info.get("current_locator_value") or ""),
+            str(suggestion.get("current_locator_value") or ""),
+            error_text,
+        )).lower()
+        if (
+            failure_info.get("operation_type") != "click"
+            or "not visible" not in error_text
+            or "menuitem" not in locator_evidence
+        ):
+            return {"status": "skipped", "reason": "失败证据不能确认是隐藏菜单点击，未修改用例。"}
+        try:
+            actual = urlsplit(actual_url)
+            target = urlsplit(target_url)
+        except Exception:
+            return {"status": "skipped", "reason": "失败现场或目标页面 URL 无效，未修改用例。"}
+        if not (
+            actual.scheme and actual.netloc and actual.path
+            and target.scheme and target.netloc and target.path
+            and actual.scheme.lower() == target.scheme.lower()
+            and actual.netloc.lower() == target.netloc.lower()
+            and (actual.path.rstrip("/") or "/") == (target.path.rstrip("/") or "/")
+        ):
+            return {"status": "skipped", "reason": "失败时路由与目标页面不一致，保留导航点击失败。"}
+        try:
+            element_id = int(failure_info.get("element_id") or suggestion.get("element_id"))
+        except (TypeError, ValueError):
+            return {"status": "skipped", "reason": "失败记录没有可定位的菜单元素，未修改用例。"}
+
+        def replace_redundant_navigation():
+            from django.db import transaction
+
+            with transaction.atomic():
+                matching_ids = list(UiPageStepsDetailed.objects.filter(
+                    element_id=element_id,
+                    ope_key="click",
+                    page_step__case_usages__test_case_id=ui_test_case_id,
+                    page_step__project_id=project_id,
+                ).order_by().values_list("id", flat=True).distinct())
+                details = list(UiPageStepsDetailed.objects.select_for_update().filter(
+                    id__in=matching_ids,
+                ).order_by("id"))
+                if len(details) != 1:
+                    return {"status": "skipped", "reason": "无法唯一定位本用例中的失败菜单点击。"}
+                detail = details[0]
+                usages = UiCaseStepsDetailed.objects.filter(page_step_id=detail.page_step_id)
+                if usages.exclude(test_case_id=ui_test_case_id).exists():
+                    return {"status": "skipped", "reason": "页面步骤被其他用例复用，未修改共享步骤。"}
+                detail.ope_key = "assert_url"
+                detail.step_type = 1
+                detail.element = None
+                detail.ope_value = {"expected": target_url, "match": "path", "timeout": 10}
+                detail.description = "验证当前页面已到达目标路由"
+                detail.save(update_fields=[
+                    "ope_key", "step_type", "element", "ope_value", "description", "updated_at",
+                ])
+                return {
+                    "status": "applied",
+                    "repair_type": "navigation_assertion",
+                    "old_locator": f"click element #{element_id}",
+                    "new_locator": f"assert URL path {target.path}",
+                    "reason": "失败时实际 URL 已与目标页面路由一致，仅把隐藏的冗余导航点击改为路由断言。",
+                }
+
+        return await sync_to_async(replace_redundant_navigation)()
 
     if repair_type == "url_path":
         # A URL-path repair is safe only when machine evidence proves that the
