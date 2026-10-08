@@ -562,6 +562,28 @@ class FinalTestcaseStepTests(SimpleTestCase):
             2,
         )
 
+    def test_latest_passed_step_decodes_json_wrapped_mcp_text_blocks(self):
+        output = (
+            '[{"type":"text","text":"[CASE_STEP_EXECUTION] case=1313 step=1\\n'
+            'RESULT=PASS: 登录成功"},{"type":"text","text":"'
+            '[CASE_STEP_EXECUTION] case=1313 step=2\\nRESULT=PASS: 已进入列表"}]'
+        )
+        messages = [
+            ToolMessage(
+                content=output,
+                tool_call_id="json-wrapped-output",
+                name="execute_skill_script",
+            )
+        ]
+        self.assertEqual(
+            _latest_passed_helper_step_from_messages(messages, test_case_id=1313),
+            2,
+        )
+        self.assertEqual(
+            _extract_helper_testcase_progress(output),
+            (1313, 2),
+        )
+
     def test_latest_passed_helper_step_from_tool_messages(self):
         messages = [
             ToolMessage(

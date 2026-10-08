@@ -2027,9 +2027,34 @@ def _build_helper_step_commentary(
     return "\n".join(lines)
 
 
+def _tool_content_as_text(content: Any) -> str:
+    """Flatten MCP text blocks, including JSON-serialized block arrays, for evidence parsing."""
+    if isinstance(content, str):
+        stripped = content.strip()
+        if stripped.startswith(("[", "{")):
+            try:
+                decoded = json.loads(stripped)
+            except (TypeError, ValueError):
+                return content
+            if decoded != content:
+                return _tool_content_as_text(decoded)
+        return content
+    if isinstance(content, (list, tuple)):
+        return "\n".join(
+            text for text in (_tool_content_as_text(item) for item in content) if text
+        )
+    if isinstance(content, dict):
+        for key in ("text", "content", "output", "plain", "display", "result"):
+            value = content.get(key)
+            if value is not None:
+                return _tool_content_as_text(value)
+        return json.dumps(content, ensure_ascii=False)
+    return str(content or "")
+
+
 def _extract_helper_testcase_progress(content: Any) -> tuple[Optional[int], Optional[int]]:
     """Extract testcase and step ids from a fixed Playwright helper result."""
-    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    text = _tool_content_as_text(content)
     execution = re.findall(
         r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
         text,
@@ -2061,8 +2086,7 @@ def _latest_passed_helper_step_from_messages(messages, *, test_case_id=None) -> 
             continue
         if getattr(msg, "name", "") != "execute_skill_script":
             continue
-        content = getattr(msg, "content", "") or ""
-        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        text = _tool_content_as_text(getattr(msg, "content", "") or "")
         execution_markers = list(re.finditer(
             r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
             text,
@@ -2112,8 +2136,7 @@ def _explicitly_failed_helper_step_from_messages(messages, *, test_case_id=None)
             continue
         if getattr(msg, "name", "") != "execute_skill_script":
             continue
-        content = getattr(msg, "content", "") or ""
-        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        text = _tool_content_as_text(getattr(msg, "content", "") or "")
         boundaries = list(re.finditer(
             r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
             text,
@@ -2153,8 +2176,7 @@ def _testcase_step_was_attempted(messages, *, step: int, test_case_id=None) -> b
             continue
         if getattr(msg, "name", "") != "execute_skill_script":
             continue
-        content = getattr(msg, "content", "") or ""
-        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        text = _tool_content_as_text(getattr(msg, "content", "") or "")
         boundaries = re.findall(
             r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
             text,
@@ -4685,7 +4707,10 @@ class AgentLoopStreamAPIView(View):
                                             "step": next_step,
                                             "total_steps": int(total_case_steps),
                                             "state": "running",
-                                            "message": f"前序步骤已完成，AI 正在继续执行步骤 {next_step}～{total_case_steps}",
+                                            "message": (
+                                                f"已确认前序步骤 {done_step}/{total_case_steps}，"
+                                                f"正在续跑步骤 {next_step}～{total_case_steps}"
+                                            ),
                                         })
                                         try:
                                             if should_stop(session_id):
