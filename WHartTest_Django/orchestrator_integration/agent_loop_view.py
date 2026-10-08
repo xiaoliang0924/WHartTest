@@ -4086,6 +4086,22 @@ class AgentLoopStreamAPIView(View):
                                                     }
                                                 )
 
+                                                # A testcase-bound browser tool may return without
+                                                # the helper's RESULT/screenshot markers (for example,
+                                                # exploratory page inspection). In that case the UI
+                                                # otherwise remains stuck on "browser executing" while
+                                                # LangGraph waits for the next model decision.
+                                                if test_case_id:
+                                                    yield create_sse_data(
+                                                        {
+                                                            "type": "testcase_progress",
+                                                            "session_id": session_id,
+                                                            "test_case_id": int(test_case_id),
+                                                            "state": "waiting_llm",
+                                                            "message": "浏览器操作已返回，正在等待模型分析并安排下一步",
+                                                        }
+                                                    )
+
                                                 # Playwright helper 已给出确定失败时无需再等待
                                                 # 模型生成“下一步/总结”。否则所有步骤都已结束，
                                                 # 页面仍会长时间停在“正在准备下一步”。
