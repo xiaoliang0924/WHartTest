@@ -61,7 +61,7 @@ export function normalizeExecutionReportStatus(
 /** 从用例管理「执行」用户消息中解析用例 ID */
 export function parseTestCaseIdFromExecuteMessage(text: string): number | null {
   const match = (text || '').match(
-    /(?:执行\s*ID\s*为|测试用例\s*(?:ID|id)\s*[：:=])\s*(\d+)/
+    /(?:执行\s*ID\s*为|测试用例\s*(?:ID|id)\s*[：:=]|正在执行用例\s*|执行用例\s*(?:ID|id)?\s*[：:=]?\s*)(\d+)/
   );
   if (!match) return null;
   const id = parseInt(match[1], 10);

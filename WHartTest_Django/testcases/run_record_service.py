@@ -627,7 +627,7 @@ def build_step_results_from_execution_evidence(
         matches = list(
             re.finditer(
                 rf"(?:\[(?:CASE_SCREENSHOT|SCREENSHOT_SAVED)\].*?case[_-]{case_id}_step(\d+)|\b正在执行步骤\s*(\d+))"
-                rf"[\s\S]{{0,2500}}?RESULT=(PASS|FAIL)\b",
+                rf"(?:(?!\[CASE_STEP_EXECUTION\])[\s\S]){{0,2500}}?RESULT=(PASS|FAIL)\b[:：]?\s*([^\n\"}}]*)",
                 text,
                 flags=re.IGNORECASE | re.MULTILINE,
             )
@@ -706,9 +706,13 @@ def build_step_results_from_execution_evidence(
             if timeout_detail:
                 step_actuals[step_no] = timeout_detail.group(0).strip()
 
-    # Re-evaluate all calls associated with a step together. A screenshot-only
-    # follow-up has no assertion receipt and must not erase an earlier result.
+    # A tool-call boundary is the strongest attribution available. Re-evaluate
+    # it last so a trailing timeout in the same call cannot be hidden by a PASS,
+    # and a PASS printed before its screenshot remains associated with the step.
     for step_no, blocks in step_execution_blocks.items():
+        # A later screenshot-only call must not erase an earlier explicit
+        # PASS/FAIL from the same step. Use the latest explicit receipt across
+        # calls; only use a missing-receipt fallback if none exists anywhere.
         explicit_receipts = []
         trailing_timeouts = []
         for block in blocks:
@@ -785,7 +789,7 @@ def build_step_results_from_execution_evidence(
             text,
             flags=re.IGNORECASE,
         ))
-        step_output = step_execution_blocks.get(number, "")
+        step_output = "\n".join(step_execution_blocks.get(number, []))
         for marker_index in range(len(screenshot_markers) - 1, -1, -1):
             if step_output:
                 break
@@ -1062,6 +1066,7 @@ def ensure_execution_result_report(
 
     parsed = parse_execution_outcome(assistant_text) if already_has_report else None
     step_results = (parsed or {}).get("step_results") or []
+    has_authoritative_step_evidence = False
     if execution_mode == "ai_only":
         # A model-authored table is a claim, not proof that a browser action ran.
         # In AI-only mode derive every step exclusively from tool output.
@@ -1072,6 +1077,7 @@ def ensure_execution_result_report(
         )
         if evidence_results:
             step_results = evidence_results
+            has_authoritative_step_evidence = True
         else:
             step_results = [
                 {
@@ -1129,7 +1135,11 @@ def ensure_execution_result_report(
             fail_reason=fail_reason,
         )
 
-    if already_has_report and not all_steps_passed:
+    # A model-authored report is not authoritative when browser-tool evidence
+    # exists. Rebuild it from the same per-step evidence used for record.status;
+    # otherwise the chat summary can say "pass" while the testcase run record
+    # correctly says "fail" (for example, a screenshot without an assertion).
+    if already_has_report and not all_steps_passed and not has_authoritative_step_evidence:
         summary = assistant_text
         start = assistant_text.find("## 测试执行结果")
         if start < 0:

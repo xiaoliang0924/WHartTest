@@ -437,6 +437,45 @@ class ExecutionResultReportTests(SimpleTestCase):
         self.assertEqual(outcome["status"], "pass")
         self.assertTrue(outcome["report"].startswith("## 测试执行结果: 通过"))
 
+    def test_authoritative_ai_tool_evidence_replaces_contradictory_model_report(self):
+        case = _fake_case(id=1520)
+        model_report = build_execution_result_report(
+            case,
+            status="pass",
+            step_results=[
+                {
+                    "step_number": step.step_number,
+                    "description": step.description,
+                    "expected_result": step.expected_result,
+                    "actual_result": "符合预期",
+                    "status": "pass",
+                }
+                for step in case.steps
+            ],
+            fail_reason="",
+        )
+        tool_transcript = "\n".join(
+            f"[CASE_STEP_EXECUTION] case=1520 step={step}\n"
+            + ("[CASE_SCREENSHOT] /tmp/case_1520_step3.png" if step == 3
+               else f"RESULT=PASS: 步骤{step}符合预期")
+            for step in range(1, 5)
+        )
+
+        outcome = ensure_execution_result_report(
+            case,
+            transcript="",
+            assistant_transcript=model_report,
+            execution_mode="ai_only",
+            tool_transcript=tool_transcript,
+        )
+
+        self.assertEqual(outcome["status"], "fail")
+        self.assertTrue(outcome["injected"])
+        self.assertIn("## 测试执行结果: 不通过", outcome["summary"])
+        self.assertNotIn("## 测试执行结果: 通过", outcome["summary"])
+        self.assertEqual(outcome["step_results"][2]["status"], "fail")
+        self.assertIn("没有返回浏览器断言回执", outcome["summary"])
+
     def test_report_contains_basic_info_and_analysis_sections(self):
         report = build_execution_result_report(
             _fake_case(id=1436, name="移交审批按钮缺失提示"),
