@@ -1,16 +1,23 @@
 <template>
-  <a-alert v-if="visible" :type="alertType" show-icon>
+  <a-alert v-if="visible" class="generation-alert" :type="alertType" show-icon>
     <template #title>{{ isEnglish ? 'UI test generation' : 'UI 自动化用例生成' }}</template>
-    <div>{{ record.ui_generation?.message || (isEnglish ? 'No generation result has been saved.' : '本次尚未保存 UI 用例生成结果。') }}</div>
-    <div v-if="record.ui_generation?.reason" class="generation-reason">{{ record.ui_generation.reason }}</div>
-    <a-space class="generation-actions">
+    <div class="generation-summary-row">
+      <div class="generation-message">
+        {{ record.ui_generation?.message || (isEnglish ? 'No generation result has been saved.' : '本次尚未保存 UI 用例生成结果。') }}
+      </div>
+      <a-space class="generation-actions">
       <a-button v-if="canRetry" size="small" :loading="busy" @click="manage('retry')">
         {{ isEnglish ? 'Retry from execution record' : '使用执行记录重试生成' }}
       </a-button>
       <a-button v-if="active && record.ui_generation?.status !== 'stopping'" size="small" :loading="busy" @click="manage('stop')">
         {{ isEnglish ? 'Stop generation' : '停止生成' }}
       </a-button>
-    </a-space>
+      </a-space>
+    </div>
+    <details v-if="record.ui_generation?.reason" class="generation-details">
+      <summary>{{ isEnglish ? 'View technical details' : '查看详细日志' }}</summary>
+      <pre class="generation-reason">{{ record.ui_generation.reason }}</pre>
+    </details>
   </a-alert>
 </template>
 
@@ -46,6 +53,28 @@ const manage = async (action: 'retry' | 'stop') => {
 </script>
 
 <style scoped>
-.generation-reason { margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.generation-actions { margin-top: 8px; }
+.generation-summary-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.generation-message { min-width: 0; line-height: 1.45; overflow-wrap: anywhere; }
+.generation-actions { flex: 0 0 auto; }
+.generation-details { margin-top: 6px; font-size: 12px; color: var(--color-text-3); }
+.generation-details > summary { width: fit-content; cursor: pointer; user-select: none; }
+.generation-details[open] > summary { margin-bottom: 6px; }
+.generation-reason {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: rgba(29, 33, 41, 0.04);
+  color: var(--color-text-2);
+  font: inherit;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.generation-alert :deep(.arco-alert-content) { min-width: 0; }
+.generation-alert :deep(.arco-alert-title) { margin-bottom: 4px; }
+@media (max-width: 760px) {
+  .generation-summary-row { align-items: flex-start; flex-direction: column; gap: 8px; }
+}
 </style>
