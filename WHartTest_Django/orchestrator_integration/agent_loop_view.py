@@ -213,12 +213,14 @@ async def _complete_testcase_run_with_report(
     from testcases.run_record_service import (
         collect_assistant_transcript,
         collect_message_transcript,
+        collect_tool_execution_transcript,
         finalize_testcase_run_record,
         is_filled_execution_result_report,
     )
 
     transcript = collect_message_transcript(messages, exclude_human=True)
     assistant_transcript = collect_assistant_transcript(messages)
+    tool_transcript = collect_tool_execution_transcript(messages)
     record = await sync_to_async(finalize_testcase_run_record)(
         session_id=session_id,
         final_content=final_content or "",
@@ -226,6 +228,7 @@ async def _complete_testcase_run_with_report(
         error_message=error_message,
         transcript=transcript,
         assistant_transcript=assistant_transcript,
+        tool_transcript=tool_transcript,
     )
     injected = ""
     if (

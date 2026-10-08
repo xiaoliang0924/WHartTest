@@ -287,6 +287,28 @@ def collect_message_transcript(messages, *, exclude_human: bool = False) -> str:
     return "\n".join(parts)
 
 
+def collect_tool_execution_transcript(messages) -> str:
+    """Collect executable browser helper outputs, excluding assistant claims."""
+    parts: list[str] = []
+    for msg in messages or []:
+        if type(msg).__name__ not in ("ToolMessage", "ToolMessageChunk"):
+            continue
+        if getattr(msg, "name", "") != "execute_skill_script":
+            continue
+        content = getattr(msg, "content", None)
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and item.get("text"):
+                    parts.append(str(item["text"]))
+        elif content:
+            parts.append(str(content))
+    return "\n".join(parts)
+
+
 def collect_assistant_transcript(messages) -> str:
     parts: list[str] = []
     for msg in messages or []:
@@ -433,6 +455,7 @@ def collect_checkpoint_execution_transcript(
     user_id: int,
     project_id: int | str,
     session_id: str,
+    tools_only: bool = False,
 ) -> str:
     """Load tool/assistant execution text from the latest LangGraph checkpoint."""
     thread_id = f"{user_id}_{project_id}_{session_id}"
@@ -451,6 +474,8 @@ def collect_checkpoint_execution_transcript(
         messages = checkpoint_data.get("channel_values", {}).get("messages") or []
         if not messages:
             return ""
+        if tools_only:
+            return collect_tool_execution_transcript(messages)
         return collect_message_transcript(messages, exclude_human=True)
     except Exception as exc:
         logger.warning(
@@ -801,6 +826,8 @@ def ensure_execution_result_report(
     assistant_transcript: str = "",
     stopped: bool = False,
     error_message: Optional[str] = None,
+    execution_mode: str = "",
+    tool_transcript: str = "",
 ) -> dict[str, Any]:
     """Return a full 1436-style report even when the model ended silently."""
     combined = transcript or ""
@@ -830,7 +857,30 @@ def ensure_execution_result_report(
 
     parsed = parse_execution_outcome(assistant_text) if already_has_report else None
     step_results = (parsed or {}).get("step_results") or []
-    if not step_results:
+    if execution_mode == "ai_only":
+        # A model-authored table is a claim, not proof that a browser action ran.
+        # In AI-only mode derive every step exclusively from tool output.
+        evidence_results = build_step_results_from_execution_evidence(
+            testcase,
+            tool_transcript,
+            fail_reason=fail_reason,
+        )
+        if evidence_results:
+            step_results = evidence_results
+        else:
+            step_results = [
+                {
+                    "step_number": int(getattr(step, "step_number", 0) or 0),
+                    "description": getattr(step, "description", "") or "",
+                    "expected_result": getattr(step, "expected_result", "") or "",
+                    "actual_result": "没有浏览器工具执行证据",
+                    "status": "skip",
+                }
+                for step in _testcase_steps(testcase)
+            ]
+            fail_reason = error_message or "纯 AI 执行没有可核对的浏览器工具步骤证据"
+            status = "fail"
+    elif not step_results:
         step_results = build_step_results_from_execution_evidence(
             testcase,
             combined,
@@ -1219,6 +1269,7 @@ def finalize_testcase_run_record(
     error_message: Optional[str] = None,
     transcript: str = "",
     assistant_transcript: str = "",
+    tool_transcript: str = "",
 ) -> Optional[TestCaseRunRecord]:
     try:
         record = TestCaseRunRecord.objects.select_related("testcase", "data_generation_run").prefetch_related(
@@ -1238,6 +1289,15 @@ def finalize_testcase_run_record(
         project_id=record.testcase.project_id,
         session_id=session_id,
     )
+    checkpoint_tool_transcript = collect_checkpoint_execution_transcript(
+        user_id=int(record.executor_id),
+        project_id=record.testcase.project_id,
+        session_id=session_id,
+        tools_only=True,
+    )
+    tool_transcript = "\n".join(
+        part for part in (checkpoint_tool_transcript, tool_transcript) if part
+    )
     if checkpoint_transcript and checkpoint_transcript not in (transcript or ""):
         transcript = "\n".join(
             part for part in (checkpoint_transcript, transcript) if part
@@ -1253,6 +1313,8 @@ def finalize_testcase_run_record(
         assistant_transcript=assistant_text,
         stopped=stopped,
         error_message=error_message,
+        execution_mode=record.execution_mode,
+        tool_transcript=tool_transcript,
     )
     # A generated report may claim PASS after the wrong fixed helper completed
     # a different step. For this flow, only the detail-page button assertion is
