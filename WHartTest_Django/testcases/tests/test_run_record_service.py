@@ -21,6 +21,7 @@ from testcases.models import (
 )
 from testcases.run_record_service import (
     attach_testcase_step_screenshot,
+    append_testcase_tool_execution_output,
     build_execution_result_report,
     build_pre_data_usage,
     build_step_results_from_execution_evidence,
@@ -489,6 +490,51 @@ class FinalizeRunRecordReportTests(TestCase):
         self.assertEqual(len(record.step_results), 2)
         self.assertEqual(record.step_results[0]["status"], "fail")
         self.assertEqual(record.step_results[1]["status"], "skip")
+
+    def test_finalize_uses_durable_tool_output_when_checkpoint_misses_result(self):
+        session_id = "sess-tool-output-checkpoint-gap"
+        testcase = self._create_message_case(
+            "列表精确筛选",
+            [
+                ("登录", "登录成功"),
+                ("查询并核对列表工单号", "仅显示本次造数工单"),
+            ],
+        )
+        start_testcase_run_record(
+            testcase_id=testcase.id,
+            user_id=self.user.id,
+            session_id=session_id,
+            execution_mode="ai_only",
+        )
+        durable_output = (
+            f"[执行进度] 正在执行步骤 1/2\n"
+            f"[CASE_SCREENSHOT] /tmp/case_{testcase.id}_step1.png\n"
+            "RESULT=PASS: 步骤1登录成功\n"
+            f"[执行进度] 正在执行步骤 2/2\n"
+            f"[CASE_SCREENSHOT] /tmp/case_{testcase.id}_step2.png\n"
+            "RESULT=PASS: 步骤2列表仅显示匹配工单"
+        )
+        self.assertTrue(
+            append_testcase_tool_execution_output(
+                session_id=session_id,
+                testcase_id=testcase.id,
+                output=durable_output,
+            )
+        )
+        with (
+            patch(
+                "testcases.run_record_service.collect_checkpoint_execution_transcript",
+                return_value="",
+            ),
+            patch(
+                "testcases.run_record_service.backfill_missing_step_screenshots",
+                return_value=[],
+            ),
+        ):
+            record = finalize_testcase_run_record(session_id=session_id)
+
+        self.assertEqual(record.status, "pass")
+        self.assertTrue(all(step["status"] == "pass" for step in record.step_results))
 
     def test_finalize_keeps_hybrid_script_attempt_in_final_audit_log(self):
         record = start_testcase_run_record(

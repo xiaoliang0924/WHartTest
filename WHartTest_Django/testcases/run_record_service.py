@@ -309,6 +309,41 @@ def collect_tool_execution_transcript(messages) -> str:
     return "\n".join(parts)
 
 
+def append_testcase_tool_execution_output(
+    *, session_id: str, testcase_id: int, output: str
+) -> bool:
+    """Persist browser tool output before it is returned to LangGraph.
+
+    LangGraph checkpoints can lag a completed browser command during stream
+    shutdown. Keep a small durable copy on the run record so finalization can
+    still verify RESULT markers when the corresponding ToolMessage is absent.
+    """
+    from django.db import transaction
+    from testcases.models import TestCaseRunRecord
+
+    text = str(output or "").strip()
+    if not text:
+        return False
+    with transaction.atomic():
+        record = (
+            TestCaseRunRecord.objects.select_for_update()
+            .filter(
+                session_id=str(session_id),
+                testcase_id=int(testcase_id),
+                status=TestCaseRunRecord.STATUS_CHOICES[0][0],
+            )
+            .first()
+        )
+        if not record:
+            return False
+        marker = "\n[TESTCASE_TOOL_OUTPUT]\n"
+        record.execution_log = (
+            str(record.execution_log or "") + marker + text
+        )[-8000:]
+        record.save(update_fields=["execution_log"])
+    return True
+
+
 def collect_assistant_transcript(messages) -> str:
     parts: list[str] = []
     for msg in messages or []:
@@ -1366,8 +1401,21 @@ def finalize_testcase_run_record(
         session_id=session_id,
         tools_only=True,
     )
+    persisted_tool_transcript = "\n".join(
+        part.strip()
+        for part in str(record.execution_log or "").split(
+            "\n[TESTCASE_TOOL_OUTPUT]\n"
+        )[1:]
+        if part.strip()
+    )
     tool_transcript = "\n".join(
-        part for part in (checkpoint_tool_transcript, tool_transcript) if part
+        part
+        for part in (
+            checkpoint_tool_transcript,
+            tool_transcript,
+            persisted_tool_transcript,
+        )
+        if part
     )
     if checkpoint_transcript and checkpoint_transcript not in (transcript or ""):
         transcript = "\n".join(

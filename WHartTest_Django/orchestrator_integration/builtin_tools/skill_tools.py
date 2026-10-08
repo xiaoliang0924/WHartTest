@@ -1976,6 +1976,30 @@ def get_skill_tools(
             elif skill_name == "playwright-skill":
                 result_output = f"[SCREENSHOT_DIR] {screenshots_dir}\n{result_output}"
 
+            if (
+                skill_name == "playwright-skill"
+                and current_test_case_id
+                and current_chat_session_id
+            ):
+                try:
+                    from testcases.run_record_service import (
+                        append_testcase_tool_execution_output,
+                    )
+
+                    append_testcase_tool_execution_output(
+                        session_id=str(current_chat_session_id),
+                        testcase_id=int(current_test_case_id),
+                        output=result_output,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[execute_skill_script] Could not persist testcase output "
+                        "session=%s case=%s",
+                        current_chat_session_id,
+                        current_test_case_id,
+                        exc_info=True,
+                    )
+
             return _finalize_skill_result(
                 result_output,
                 skill_dir=skill_dir,
