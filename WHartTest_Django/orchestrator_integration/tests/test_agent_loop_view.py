@@ -21,6 +21,8 @@ from ..agent_loop_view import (
     _extract_helper_result_reason,
     _build_helper_step_commentary,
     _latest_passed_helper_step_from_messages,
+    _explicitly_failed_helper_step_from_messages,
+    _testcase_step_was_attempted,
     _build_incomplete_testcase_resume_prompt,
     _build_sanitized_messages,
     _extract_linked_image_urls,
@@ -533,6 +535,33 @@ class FinalTestcaseStepTests(SimpleTestCase):
         self.assertEqual(case_id, 1402)
         self.assertEqual(step, 7)
 
+    def test_progress_uses_explicit_step_execution_boundary_without_screenshot(self):
+        case_id, step = _extract_helper_testcase_progress(
+            "[CASE_STEP_EXECUTION] case=1402 step=5\n"
+            "RESULT=PASS: 列表已核对"
+        )
+        self.assertEqual(case_id, 1402)
+        self.assertEqual(step, 5)
+
+    def test_latest_passed_step_uses_result_in_same_tool_call_as_step_marker(self):
+        messages = [
+            ToolMessage(
+                content=(
+                    "[CASE_STEP_EXECUTION] case=1402 step=1\nRESULT=PASS: 登录成功\n"
+                    "[CASE_STEP_EXECUTION] case=1402 step=2\nRESULT=PASS: 已进入列表\n"
+                    "[CASE_STEP_EXECUTION] case=1402 step=3\n"
+                    "[CASE_SCREENSHOT] /tmp/case_1402_step3.png\n"
+                    "locator.getByText: Timeout 15000ms exceeded"
+                ),
+                tool_call_id="boundary-test",
+                name="execute_skill_script",
+            )
+        ]
+        self.assertEqual(
+            _latest_passed_helper_step_from_messages(messages, test_case_id=1402),
+            2,
+        )
+
     def test_latest_passed_helper_step_from_tool_messages(self):
         messages = [
             ToolMessage(
@@ -562,6 +591,76 @@ class FinalTestcaseStepTests(SimpleTestCase):
         shot_only = result(3)
         shot_only.content = "[CASE_SCREENSHOT] /tmp/case_1334_step3.png"
         self.assertEqual(_latest_passed_helper_step_from_messages(messages + [shot_only]), 2)
+
+    def test_detects_attempted_step_without_receipt_for_read_only_recovery(self):
+        attempted = ToolMessage(
+            content=(
+                "[CASE_STEP_EXECUTION] case=1245 step=5\n"
+                "[CASE_SCREENSHOT] /tmp/case_1245_step5.png"
+            ),
+            tool_call_id="attempted-step",
+            name="execute_skill_script",
+        )
+        messages = [attempted]
+        self.assertTrue(
+            _testcase_step_was_attempted(messages, step=5, test_case_id=1245)
+        )
+        self.assertIsNone(
+            _explicitly_failed_helper_step_from_messages(
+                messages, test_case_id=1245
+            )
+        )
+
+    def test_explicit_failure_is_not_auto_replayed(self):
+        failed = ToolMessage(
+            content=(
+                "[CASE_STEP_EXECUTION] case=1245 step=5\n"
+                "RESULT=FAIL: 未找到目标工单"
+            ),
+            tool_call_id="failed-step",
+            name="execute_skill_script",
+        )
+        self.assertEqual(
+            _explicitly_failed_helper_step_from_messages(
+                [failed], test_case_id=1245
+            ),
+            5,
+        )
+
+    def test_instructional_fail_sample_does_not_count_as_browser_failure(self):
+        passed_with_reminder = ToolMessage(
+            content=(
+                "[CASE_STEP_EXECUTION] case=1245 step=5\n"
+                "RESULT=PASS: 列表已核对\n"
+                "【脚本错误，请修正后重试】RESULT=FAIL 时禁止继续。"
+            ),
+            tool_call_id="instructional-marker",
+            name="execute_skill_script",
+        )
+        messages = [passed_with_reminder]
+        self.assertIsNone(
+            _explicitly_failed_helper_step_from_messages(
+                messages, test_case_id=1245
+            )
+        )
+        self.assertEqual(
+            _latest_passed_helper_step_from_messages(
+                messages, test_case_id=1245
+            ),
+            0,
+        )
+
+    def test_incomplete_ai_resume_verifies_attempted_step_without_replaying_actions(self):
+        prompt = _build_incomplete_ai_resume_prompt(
+            next_step=5,
+            total_steps=5,
+            step_details={5: {"description": "核对列表", "expected_result": "工单号匹配"}},
+            test_case_id=1245,
+            attempted_step=5,
+        )
+        self.assertIn("先只读检查当前页面", prompt)
+        self.assertIn("禁止重复点击、提交、创建、删除、发送、领取、审批", prompt)
+        self.assertIn("明确写 `RESULT=PASS", prompt)
 
     def test_incomplete_resume_prompt_forbids_report(self):
         prompt = _build_incomplete_testcase_resume_prompt(done_step=6, total_steps=7)

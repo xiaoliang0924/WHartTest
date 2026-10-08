@@ -2030,6 +2030,14 @@ def _build_helper_step_commentary(
 def _extract_helper_testcase_progress(content: Any) -> tuple[Optional[int], Optional[int]]:
     """Extract testcase and step ids from a fixed Playwright helper result."""
     text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    execution = re.findall(
+        r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if execution:
+        case_id, step = execution[-1]
+        return int(case_id), int(step)
     declared = re.findall(
         r"\[(?:CASE_SCREENSHOT|SCREENSHOT_SAVED)\]\s+\S*case[_-](\d+)_step(\d+)",
         text,
@@ -2055,10 +2063,38 @@ def _latest_passed_helper_step_from_messages(messages, *, test_case_id=None) -> 
             continue
         content = getattr(msg, "content", "") or ""
         text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        execution_markers = list(re.finditer(
+            r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
+            text,
+            flags=re.IGNORECASE,
+        ))
+        if execution_markers:
+            for index, marker in enumerate(execution_markers):
+                case_id = int(marker.group(1))
+                step = int(marker.group(2))
+                if test_case_id is not None and case_id != int(test_case_id):
+                    continue
+                end = (
+                    execution_markers[index + 1].start()
+                    if index + 1 < len(execution_markers)
+                    else len(text)
+                )
+                block = text[marker.end():end]
+                markers = re.findall(
+                    r"(?m)^\s*RESULT\s*=\s*(PASS|FAIL)\b",
+                    block,
+                    flags=re.IGNORECASE,
+                )
+                outcomes[step] = bool(markers) and markers[-1].upper() == "PASS"
+            continue
         case_id, step = _extract_helper_testcase_progress(text)
         if not step or (test_case_id is not None and case_id != int(test_case_id)):
             continue
-        markers = re.findall(r"RESULT\s*=\s*(PASS|FAIL)\b", text, flags=re.IGNORECASE)
+        markers = re.findall(
+            r"(?m)^\s*RESULT\s*=\s*(PASS|FAIL)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
         outcomes[step] = bool(markers) and markers[-1].upper() == "PASS"
     if not outcomes:
         return None
@@ -2066,6 +2102,76 @@ def _latest_passed_helper_step_from_messages(messages, *, test_case_id=None) -> 
     while outcomes.get(done + 1, False):
         done += 1
     return done
+
+
+def _explicitly_failed_helper_step_from_messages(messages, *, test_case_id=None) -> Optional[int]:
+    """Return the earliest step with an explicit browser FAIL receipt."""
+    failed = []
+    for msg in messages or []:
+        if type(msg).__name__ not in ("ToolMessage", "ToolMessageChunk"):
+            continue
+        if getattr(msg, "name", "") != "execute_skill_script":
+            continue
+        content = getattr(msg, "content", "") or ""
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        boundaries = list(re.finditer(
+            r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
+            text,
+            flags=re.IGNORECASE,
+        ))
+        if boundaries:
+            for index, marker in enumerate(boundaries):
+                case_id, step = int(marker.group(1)), int(marker.group(2))
+                if test_case_id is not None and case_id != int(test_case_id):
+                    continue
+                end = boundaries[index + 1].start() if index + 1 < len(boundaries) else len(text)
+                results = re.findall(
+                    r"(?m)^\s*RESULT\s*=\s*(PASS|FAIL)\b",
+                    text[marker.end():end],
+                    flags=re.IGNORECASE,
+                )
+                if results and results[-1].upper() == "FAIL":
+                    failed.append(step)
+            continue
+        case_id, step = _extract_helper_testcase_progress(text)
+        if not step or (test_case_id is not None and case_id != int(test_case_id)):
+            continue
+        results = re.findall(
+            r"(?m)^\s*RESULT\s*=\s*(PASS|FAIL)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if results and results[-1].upper() == "FAIL":
+            failed.append(step)
+    return min(failed) if failed else None
+
+
+def _testcase_step_was_attempted(messages, *, step: int, test_case_id=None) -> bool:
+    """Detect a tool call or screenshot for a step, regardless of its outcome."""
+    for msg in messages or []:
+        if type(msg).__name__ not in ("ToolMessage", "ToolMessageChunk"):
+            continue
+        if getattr(msg, "name", "") != "execute_skill_script":
+            continue
+        content = getattr(msg, "content", "") or ""
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        boundaries = re.findall(
+            r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if boundaries:
+            if any(
+                (test_case_id is None or int(case_id) == int(test_case_id))
+                and int(step_no) == int(step)
+                for case_id, step_no in boundaries
+            ):
+                return True
+            continue
+        case_id, step_no = _extract_helper_testcase_progress(text)
+        if step_no == int(step) and (test_case_id is None or case_id == int(test_case_id)):
+            return True
+    return False
 
 
 async def _run_and_stream_remaining_helper_steps(
@@ -2245,7 +2351,7 @@ async def _run_and_stream_remaining_helper_steps(
     }
 
 
-def _build_incomplete_ai_resume_prompt(*, next_step: int, total_steps: int, step_details: dict[int, dict[str, str]], test_case_id: int) -> str:
+def _build_incomplete_ai_resume_prompt(*, next_step: int, total_steps: int, step_details: dict[int, dict[str, str]], test_case_id: int, attempted_step: Optional[int] = None) -> str:
     remaining = "\n".join(
         (
             f"{number}. 用例原始步骤：{step_details.get(number, {}).get('description', f'步骤{number}')}\n"
@@ -2253,14 +2359,21 @@ def _build_incomplete_ai_resume_prompt(*, next_step: int, total_steps: int, step
         )
         for number in range(next_step, total_steps + 1)
     )
+    recovery_instruction = (
+        f"步骤 {next_step} 已有浏览器调用或截图，但没有断言回执。先只读检查当前页面并核对该步骤预期；"
+        "禁止重复点击、提交、创建、删除、发送、领取、审批等可能改变数据的动作。"
+        "确认符合预期后，在这次浏览器工具输出中明确写 `RESULT=PASS: 步骤N...`；不符合或无法核实时写 `RESULT=FAIL: 步骤N...` 并说明实际状态。"
+        if attempted_step == next_step
+        else f"从第一条尚未尝试的步骤 {next_step} 开始按顺序实际操作；每步确认页面状态并保存该步截图。"
+    )
     return (
-        "【用例步骤续跑指令】上一轮提前结束，以下步骤尚无浏览器工具执行证据。\n"
+        "【用例步骤续跑指令】上一轮提前结束，以下步骤尚未取得通过回执。\n"
         f"请在现有浏览器会话 session_id=case_{test_case_id} 中继续，不要重新登录或新建浏览器。\n"
-        "从第一条未完成步骤开始，严格按顺序实际操作；每步操作后确认页面状态，并按执行技能要求保存该步截图。\n"
+        f"{recovery_instruction}\n"
         "以下步骤原文和预期结果来自测试用例，是本次执行的唯一数据来源。工单号、账号、筛选值、名称等字面值必须逐字照用；禁止根据日期、历史会话或模型推测替换/编造。\n"
         "执行输入步骤后，必须读取对应输入框的实际 value 并与用例原文核对；不能只因 fill helper 没报错就判通过。\n"
         "不要依据之前的文字报告推断步骤已经完成，不要编造操作结果、截图或通过标记。\n"
-        "所有列出的步骤都有对应工具执行结果后，才可以输出最终测试报告；遇到操作失败就停止并报告真实错误。\n"
+        "每一步必须由浏览器工具输出明确的 RESULT=PASS 或 RESULT=FAIL 回执；截图和助手文字不能代替回执。所有列出的步骤都有对应工具执行结果后，才可以输出最终测试报告；遇到操作失败就停止并报告真实错误。\n"
         f"尚待执行步骤（共 {total_steps} 步）：\n{remaining}"
     )
 
@@ -4479,6 +4592,9 @@ class AgentLoopStreamAPIView(View):
                                 done_step = _latest_passed_helper_step_from_messages(
                                     current_messages, test_case_id=test_case_id
                                 )
+                                explicit_failed_step = _explicitly_failed_helper_step_from_messages(
+                                    current_messages, test_case_id=test_case_id
+                                )
                                 # No tool evidence means no step is proven complete; resume from step 1.
                                 if done_step is None:
                                     done_step = 0
@@ -4493,6 +4609,7 @@ class AgentLoopStreamAPIView(View):
                                 if (
                                     total_case_steps
                                     and done_step < total_case_steps
+                                    and explicit_failed_step is None
                                 ):
                                     next_step = done_step + 1
                                     logger.warning(
@@ -4535,6 +4652,15 @@ class AgentLoopStreamAPIView(View):
                                             total_steps=int(total_case_steps),
                                             step_details=step_details,
                                             test_case_id=int(test_case_id),
+                                            attempted_step=(
+                                                next_step
+                                                if _testcase_step_was_attempted(
+                                                    current_messages,
+                                                    step=next_step,
+                                                    test_case_id=test_case_id,
+                                                )
+                                                else None
+                                            ),
                                         )
                                         yield create_sse_data({
                                             "type": "testcase_progress",
@@ -4624,6 +4750,13 @@ class AgentLoopStreamAPIView(View):
                                                 "message": "自动补跑步骤完成，正在校验结果",
                                             }
                                         )
+                                elif explicit_failed_step is not None:
+                                    logger.info(
+                                        "AgentLoopStreamAPI: explicit step failure; "
+                                        "skip automatic replay case=%s step=%s",
+                                        test_case_id,
+                                        explicit_failed_step,
+                                    )
                             except Exception as resume_err:
                                 logger.warning(
                                     "AgentLoopStreamAPI: incomplete-step auto-resume failed: %s",

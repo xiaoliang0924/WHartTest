@@ -546,8 +546,61 @@ def build_step_results_from_execution_evidence(
 
     case_id = int(getattr(testcase, "id", 0) or 0)
     step_outcomes: dict[int, str] = {}
+    step_actuals: dict[int, str] = {}
+    step_execution_blocks: dict[int, str] = {}
+
+    # The browser tool emits a boundary marker for each single-step command.
+    # Use that boundary instead of relying on screenshots being printed before
+    # RESULT (or on a model-generated progress line).
+    execution_markers = list(re.finditer(
+        r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
+        text,
+        flags=re.IGNORECASE,
+    ))
+    for index, marker in enumerate(execution_markers):
+        if int(marker.group(1)) != case_id:
+            continue
+        step_no = int(marker.group(2))
+        end = (
+            execution_markers[index + 1].start()
+            if index + 1 < len(execution_markers)
+            else len(text)
+        )
+        block = text[marker.end():end]
+        step_execution_blocks[step_no] = block
+        result_matches = list(re.finditer(
+            r"^RESULT=(PASS|FAIL)\b[:：]?([^\n]*)",
+            block,
+            flags=re.IGNORECASE | re.MULTILINE,
+        ))
+        if result_matches:
+            last_result = result_matches[-1]
+            step_outcomes[step_no] = last_result.group(1).lower()
+            if last_result.group(1).lower() == "fail":
+                step_actuals[step_no] = (last_result.group(2) or "").strip()
+            continue
+
+        # A screenshot is useful evidence, but it cannot stand in for a browser
+        # assertion. Preserve an uncaught tool error when available so the report
+        # explains what interrupted the step instead of showing a generic receipt
+        # warning.
+        step_outcomes[step_no] = "fail"
+        timeout = _TIMEOUT_RE.search(block)
+        error_line = re.search(
+            r"(?m)^\s*((?:Error|TypeError|ReferenceError|SyntaxError|locator\.[\w]+):[^\n]{1,500})",
+            block,
+        )
+        if timeout:
+            step_actuals[step_no] = timeout.group(0).strip()
+        elif error_line:
+            step_actuals[step_no] = error_line.group(1).strip()
+        else:
+            step_actuals[step_no] = "步骤已执行，但工具没有返回浏览器断言回执，无法确认预期结果"
+
     for match in _HELPER_STEP_RESULT_RE.finditer(text):
-        step_outcomes[int(match.group(2))] = match.group(1).lower()
+        step_no = int(match.group(2))
+        if step_no not in step_execution_blocks:
+            step_outcomes[step_no] = match.group(1).lower()
 
     auto_parts = re.split(r"\[AUTO_RESUME\]\s*强制执行步骤\s*(\d+)\s*/\d+", text)
     auto_idx = 1
@@ -643,6 +696,39 @@ def build_step_results_from_execution_evidence(
         last_timeout = timeout_matches[-1] if timeout_matches else None
         if last_timeout and (not last_result or last_timeout.start() > last_result.start()):
             step_outcomes[step_no] = "fail"
+            timeout_detail = _TIMEOUT_RE.search(window)
+            if timeout_detail:
+                step_actuals[step_no] = timeout_detail.group(0).strip()
+
+    # A tool-call boundary is the strongest attribution available. Re-evaluate
+    # it last so a trailing timeout in the same call cannot be hidden by a PASS,
+    # and a PASS printed before its screenshot remains associated with the step.
+    for step_no, block in step_execution_blocks.items():
+        result_matches = list(re.finditer(
+            r"^RESULT=(PASS|FAIL)\b[:：]?([^\n]*)",
+            block,
+            flags=re.IGNORECASE | re.MULTILINE,
+        ))
+        last_result = result_matches[-1] if result_matches else None
+        if last_result:
+            step_outcomes[step_no] = last_result.group(1).lower()
+            if last_result.group(1).lower() == "fail":
+                step_actuals[step_no] = (last_result.group(2) or "").strip()
+        timeout_matches = list(re.finditer(
+            r"(?:Timeout\s+\d+ms\s+exceeded|Playwright exec timed out|"
+            r"locator\.[\w]+:\s*Timeout|浏览器已重置)",
+            block,
+            flags=re.IGNORECASE,
+        ))
+        last_timeout = timeout_matches[-1] if timeout_matches else None
+        if last_timeout and (not last_result or last_timeout.start() > last_result.start()):
+            step_outcomes[step_no] = "fail"
+            timeout_detail = _TIMEOUT_RE.search(block)
+            step_actuals[step_no] = (
+                timeout_detail.group(0).strip()
+                if timeout_detail
+                else last_timeout.group(0).strip()
+            )
 
     if not step_outcomes:
         return []
@@ -683,8 +769,10 @@ def build_step_results_from_execution_evidence(
             text,
             flags=re.IGNORECASE,
         ))
-        step_output = ""
+        step_output = step_execution_blocks.get(number, "")
         for marker_index in range(len(screenshot_markers) - 1, -1, -1):
+            if step_output:
+                break
             marker = screenshot_markers[marker_index]
             marker_step = re.search(
                 r"case[_-]" + str(case_id) + r"_step(\d+)\.png",
@@ -710,10 +798,17 @@ def build_step_results_from_execution_evidence(
         if outcome == "pass":
             step_status, actual = "pass", "通过"
         elif outcome == "fail":
-            step_status, actual = "fail", actual or fail_reason or "步骤执行失败"
+            step_status, actual = (
+                "fail",
+                actual or step_actuals.get(number) or fail_reason or "步骤执行失败",
+            )
         elif number in screenshot_steps:
             step_status = "fail"
-            actual = "该步骤已有截图，但缺少对应的浏览器断言回执，无法确认通过"
+            step_status = "fail"
+            actual = step_actuals.get(
+                number,
+                "该步骤已有截图，但缺少对应的浏览器断言回执，无法确认通过",
+            )
         else:
             step_status, actual = "skip", "未执行"
         results.append(

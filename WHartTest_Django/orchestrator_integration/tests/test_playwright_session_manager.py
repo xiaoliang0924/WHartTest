@@ -11,10 +11,51 @@ from orchestrator_integration.builtin_tools.persistent_playwright import (
 )
 from orchestrator_integration.builtin_tools.skill_tools import (
     _ensure_testcase_playwright_session_id,
+    _requested_testcase_step,
+    _tag_testcase_step_execution,
 )
 
 
 class TestcasePlaywrightSessionRoutingTests(SimpleTestCase):
+    def test_extracts_one_explicit_step_from_browser_command(self):
+        self.assertEqual(
+            _requested_testcase_step(
+                "await helpers.fillFilterField(page, '工单号', '123'); "
+                "await helpers.screenshotCaseStep(page, 5);"
+            ),
+            5,
+        )
+
+    def test_extracts_login_as_step_one(self):
+        self.assertEqual(
+            _requested_testcase_step("await helpers.loginStep1(page);"),
+            1,
+        )
+
+    def test_does_not_guess_when_command_targets_multiple_steps(self):
+        self.assertIsNone(
+            _requested_testcase_step(
+                "await helpers.screenshotCaseStep(page, 2); "
+                "await helpers.screenshotCaseStep(page, 3);"
+            )
+        )
+
+    def test_tags_output_with_case_step_boundary(self):
+        output = _tag_testcase_step_execution(
+            "RESULT=PASS: 列表已核对\n[CASE_SCREENSHOT] /tmp/case_42_step5.png",
+            "await helpers.screenshotCaseStep(page, 5);",
+            42,
+        )
+        self.assertTrue(output.startswith("[CASE_STEP_EXECUTION] case=42 step=5\n"))
+
+    def test_does_not_duplicate_existing_step_boundary(self):
+        output = _tag_testcase_step_execution(
+            "[CASE_STEP_EXECUTION] case=42 step=5\nRESULT=PASS",
+            "await helpers.screenshotCaseStep(page, 5);",
+            42,
+        )
+        self.assertEqual(output.count("[CASE_STEP_EXECUTION]"), 1)
+
     def test_missing_session_id_uses_testcase_persistent_session(self):
         self.assertEqual(
             _ensure_testcase_playwright_session_id(

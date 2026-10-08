@@ -59,6 +59,70 @@ def _fake_case(**kwargs):
 
 
 class ExecutionResultReportTests(SimpleTestCase):
+    def test_structured_tool_boundary_associates_result_before_screenshot(self):
+        case = _fake_case(id=1777)
+        transcript = (
+            "[CASE_STEP_EXECUTION] case=1777 step=2\n"
+            "RESULT=PASS: 页面列表已核对工单号\n"
+            "[CASE_SCREENSHOT] /tmp/case_1777_step2.png\n"
+        )
+        results = build_step_results_from_execution_evidence(
+            case, transcript, fail_reason=""
+        )
+        by_step = {item["step_number"]: item for item in results}
+        self.assertEqual(by_step[2]["status"], "pass")
+
+    def test_structured_tool_boundary_keeps_identifier_evidence_before_screenshot(self):
+        ticket_no = "2026100858033021"
+        case = _fake_case(
+            id=1780,
+            steps=[
+                SimpleNamespace(step_number=1, description="登录", expected_result="成功"),
+                SimpleNamespace(
+                    step_number=2,
+                    description=f"核对本次造数工单号 {ticket_no}",
+                    expected_result="列表显示匹配工单",
+                ),
+            ],
+        )
+        transcript = (
+            "[CASE_STEP_EXECUTION] case=1780 step=2\n"
+            f"RESULT=PASS: 列表显示并核对工单号 {ticket_no}\n"
+            "[CASE_SCREENSHOT] /tmp/case_1780_step2.png\n"
+        )
+        results = build_step_results_from_execution_evidence(
+            case, transcript, fail_reason=""
+        )
+        by_step = {item["step_number"]: item for item in results}
+        self.assertEqual(by_step[2]["status"], "pass")
+
+    def test_structured_tool_boundary_preserves_step_timeout_without_receipt(self):
+        case = _fake_case(id=1778)
+        transcript = (
+            "[CASE_STEP_EXECUTION] case=1778 step=2\n"
+            "locator.getByText: Timeout 15000ms exceeded.\n"
+            "[CASE_SCREENSHOT] /tmp/case_1778_step2.png\n"
+        )
+        results = build_step_results_from_execution_evidence(
+            case, transcript, fail_reason=""
+        )
+        by_step = {item["step_number"]: item for item in results}
+        self.assertEqual(by_step[2]["status"], "fail")
+        self.assertIn("Timeout 15000ms exceeded", by_step[2]["actual_result"])
+
+    def test_structured_tool_boundary_reports_missing_assertion_without_inventing_pass(self):
+        case = _fake_case(id=1779)
+        transcript = (
+            "[CASE_STEP_EXECUTION] case=1779 step=2\n"
+            "[CASE_SCREENSHOT] /tmp/case_1779_step2.png\n"
+        )
+        results = build_step_results_from_execution_evidence(
+            case, transcript, fail_reason=""
+        )
+        by_step = {item["step_number"]: item for item in results}
+        self.assertEqual(by_step[2]["status"], "fail")
+        self.assertIn("没有返回浏览器断言回执", by_step[2]["actual_result"])
+
     def test_missing_ai_steps_do_not_pass_without_fixed_helper(self):
         outcome = ensure_execution_result_report(
             _fake_case(),

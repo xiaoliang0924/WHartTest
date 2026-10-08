@@ -97,6 +97,26 @@ _ARTIFACT_TOKEN_RE = re.compile(
     r"(?P<path>(?:[A-Za-z]:)?[^\s<>\"'`|]+?\.(?:drawio|png|jpe?g|gif|svg|pdf|html?|txt|json|csv|xml|zip|docx?|xlsx?|pptx?))",
     re.IGNORECASE,
 )
+_TESTCASE_STEP_CALL_RE = re.compile(
+    r"(?:screenshotCaseStep|screenshotNavStep|run[A-Za-z0-9_]*CaseStep)\s*\(\s*page\s*,\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _requested_testcase_step(code: str) -> Optional[int]:
+    """Return a step only when a browser command unambiguously targets one step."""
+    if re.search(r"\bhelpers\.loginStep1\s*\(", code or "", re.IGNORECASE):
+        return 1
+    numbers = {int(value) for value in _TESTCASE_STEP_CALL_RE.findall(code or "")}
+    return next(iter(numbers)) if len(numbers) == 1 else None
+
+
+def _tag_testcase_step_execution(output: str, code: str, testcase_id: Optional[int]) -> str:
+    """Attach an explicit tool-call boundary to one-step browser executions."""
+    step = _requested_testcase_step(code)
+    if not testcase_id or not step or "[CASE_STEP_EXECUTION]" in (output or ""):
+        return output
+    return f"[CASE_STEP_EXECUTION] case={int(testcase_id)} step={step}\n{output}"
 
 
 def _get_skill_runtime_env() -> dict[str, str]:
@@ -1853,6 +1873,12 @@ def get_skill_tools(
                         cleaned_output = _with_failure_reminder(
                             cleaned_output, skill_name=skill_name
                         )
+                        # Preserve the tool-call boundary in the durable transcript.
+                        # Screenshot and RESULT lines can be emitted in either order;
+                        # the report parser must associate them with this exact step.
+                        cleaned_output = _tag_testcase_step_execution(
+                            cleaned_output, helper_code, current_test_case_id
+                        )
                         # 固定用例 helper 的每一步都只执行一行
                         # runClaimableTicketCaseStep(page, N)。在此统一写入进度，
                         # 让页面无需依赖 helper 内部 console 或额外 SSE 事件也能显示。
@@ -1948,6 +1974,13 @@ def get_skill_tools(
             result_output = _with_failure_reminder(
                 result_output, skill_name=skill_name
             )
+            if skill_name == "playwright-skill" and current_test_case_id:
+                code_for_step = "\n".join(str(part) for part in (run_js_args or []) if part)
+                if not code_for_step:
+                    code_for_step = inline_code or command
+                result_output = _tag_testcase_step_execution(
+                    result_output, code_for_step, current_test_case_id
+                )
             auto_upload_notes = ""
             if skill_name == "playwright-skill" and current_test_case_id:
                 auto_upload_notes = _auto_upload_case_screenshots(
