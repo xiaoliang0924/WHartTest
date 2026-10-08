@@ -1956,33 +1956,27 @@ def _extract_helper_testcase_progress(content: Any) -> tuple[Optional[int], Opti
     return int(last.group(1)), int(last.group(2))
 
 
-def _latest_passed_helper_step_from_messages(messages) -> Optional[int]:
-    """Highest helper step that produced CASE_SCREENSHOT / RESULT=PASS evidence."""
-    max_step: Optional[int] = None
+def _latest_passed_helper_step_from_messages(messages, *, test_case_id=None) -> Optional[int]:
+    """Return the contiguous PASS prefix; screenshots alone do not prove success."""
+    outcomes = {}
     for msg in messages or []:
-        msg_type = type(msg).__name__
-        if msg_type not in ("ToolMessage", "ToolMessageChunk"):
-            # Tool outputs may also be stored as plain strings on AI tool traces.
-            name = str(getattr(msg, "name", "") or "")
-            if name != "execute_skill_script" and msg_type != "AIMessage":
-                continue
+        if type(msg).__name__ not in ("ToolMessage", "ToolMessageChunk"):
+            continue
+        if getattr(msg, "name", "") != "execute_skill_script":
+            continue
         content = getattr(msg, "content", "") or ""
         text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-        _, step = _extract_helper_testcase_progress(text)
-        if not step:
+        case_id, step = _extract_helper_testcase_progress(text)
+        if not step or (test_case_id is not None and case_id != int(test_case_id)):
             continue
-        has_shot = bool(
-            re.search(
-                rf"\[(?:CASE_SCREENSHOT|SCREENSHOT_SAVED)\]\s+\S*case[_-]\d+_step{step}\b",
-                text,
-                flags=re.IGNORECASE,
-            )
-        )
         markers = re.findall(r"RESULT\s*=\s*(PASS|FAIL)\b", text, flags=re.IGNORECASE)
-        passed = bool(markers) and markers[-1].upper() == "PASS"
-        if has_shot or passed:
-            max_step = step if max_step is None else max(max_step, step)
-    return max_step
+        outcomes[step] = bool(markers) and markers[-1].upper() == "PASS"
+    if not outcomes:
+        return None
+    done = 0
+    while outcomes.get(done + 1, False):
+        done += 1
+    return done
 
 
 async def _run_and_stream_remaining_helper_steps(
@@ -3931,7 +3925,18 @@ class AgentLoopStreamAPIView(View):
                                                             }
                                                         )
                                                         return
-                                                if test_case_id and _is_final_testcase_step_pass(
+                                                coverage_messages = []
+                                                contiguous_step = None
+                                                if test_case_id and tool_name == "execute_skill_script":
+                                                    coverage_messages = list(await _get_agent_state_messages(agent, invoke_config) or [])
+                                                    coverage_messages.append(ToolMessage(
+                                                        content=str(content), tool_call_id="coverage-current",
+                                                        name="execute_skill_script",
+                                                    ))
+                                                    contiguous_step = _latest_passed_helper_step_from_messages(
+                                                        coverage_messages, test_case_id=test_case_id,
+                                                    )
+                                                if test_case_id and contiguous_step == total_steps and _is_final_testcase_step_pass(
                                                     tool_name=tool_name,
                                                     content=str(content),
                                                     helper_step=helper_step,
@@ -3990,13 +3995,14 @@ class AgentLoopStreamAPIView(View):
                                                     and tool_name == "execute_skill_script"
                                                     and helper_step is not None
                                                     and total_steps
-                                                    and helper_step < total_steps
+                                                    and contiguous_step is not None
+                                                    and contiguous_step < total_steps
                                                     and result_markers
                                                     and result_markers[-1].upper() == "PASS"
                                                 ):
                                                     # 固定 helper 用例：模型常在非末步 PASS 后直接出报告。
                                                     # 非末步 PASS 后立刻按步补跑，并推送进度，不再等 LLM。
-                                                    next_step = int(helper_step) + 1
+                                                    next_step = int(contiguous_step) + 1
                                                     logger.warning(
                                                         "AgentLoopStreamAPI: non-final PASS "
                                                         "case=%s step=%s/%s, auto-running %s..%s",
@@ -4016,11 +4022,7 @@ class AgentLoopStreamAPIView(View):
                                                         session_id=str(session_id),
                                                         from_step=next_step,
                                                         to_step=int(total_steps),
-                                                        messages=(
-                                                            all_messages
-                                                            if "all_messages" in locals()
-                                                            else []
-                                                        ),
+                                                        messages=coverage_messages,
                                                         previous_output=content,
                                                         agent=agent if "agent" in locals() else None,
                                                         invoke_config=invoke_config if "invoke_config" in locals() else None,
@@ -4366,7 +4368,7 @@ class AgentLoopStreamAPIView(View):
                                     except Exception:
                                         current_messages = []
                                 done_step = _latest_passed_helper_step_from_messages(
-                                    current_messages
+                                    current_messages, test_case_id=test_case_id
                                 )
                                 logger.warning(
                                     "AgentLoopStreamAPI: step coverage check "
@@ -4378,7 +4380,7 @@ class AgentLoopStreamAPIView(View):
                                 )
                                 if (
                                     total_case_steps
-                                    and done_step
+                                    and done_step is not None
                                     and done_step < total_case_steps
                                 ):
                                     next_step = done_step + 1

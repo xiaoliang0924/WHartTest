@@ -545,7 +545,23 @@ class FinalTestcaseStepTests(SimpleTestCase):
             ),
             AIMessage(content="接下来执行步骤7并输出报告"),
         ]
-        self.assertEqual(_latest_passed_helper_step_from_messages(messages), 6)
+        self.assertEqual(_latest_passed_helper_step_from_messages(messages), 0)
+
+    def test_helper_coverage_requires_contiguous_passes(self):
+        def result(step, outcome="PASS", case=1334):
+            return ToolMessage(
+                content=f"[CASE_SCREENSHOT] /tmp/case_{case}_step{step}.png\nRESULT={outcome}",
+                tool_call_id=str(step), name="execute_skill_script",
+            )
+        messages = [result(step) for step in (1, 2, 4, 5, 6, 7)]
+        self.assertEqual(_latest_passed_helper_step_from_messages(messages, test_case_id=1334), 2)
+        self.assertEqual(_latest_passed_helper_step_from_messages(messages + [result(3)], test_case_id=1334), 7)
+        self.assertEqual(_latest_passed_helper_step_from_messages(messages + [result(3, "FAIL")], test_case_id=1334), 2)
+        self.assertEqual(_latest_passed_helper_step_from_messages(messages + [result(3, case=999)], test_case_id=1334), 2)
+        self.assertEqual(_latest_passed_helper_step_from_messages([result(1), result(1, "FAIL")]), 0)
+        shot_only = result(3)
+        shot_only.content = "[CASE_SCREENSHOT] /tmp/case_1334_step3.png"
+        self.assertEqual(_latest_passed_helper_step_from_messages(messages + [shot_only]), 2)
 
     def test_incomplete_resume_prompt_forbids_report(self):
         prompt = _build_incomplete_testcase_resume_prompt(done_step=6, total_steps=7)
