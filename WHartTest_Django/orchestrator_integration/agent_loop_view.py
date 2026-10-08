@@ -1859,22 +1859,32 @@ def _get_testcase_step_count(testcase_id: int) -> int:
     return testcase.steps.count() if testcase else 0
 
 
-def _get_testcase_step_names(testcase_id: int) -> dict[int, str]:
-    """Map step_number -> description for live '步骤 N: ...' chat lines."""
+def _get_testcase_step_details(testcase_id: int) -> dict[int, dict[str, str]]:
+    """Return canonical descriptions and expectations for AI step continuation."""
     from testcases.models import TestCaseStep
 
     rows = TestCaseStep.objects.filter(test_case_id=int(testcase_id)).values_list(
-        "step_number", "description"
+        "step_number", "description", "expected_result"
     )
-    names: dict[int, str] = {}
-    for number, description in rows:
+    details: dict[int, dict[str, str]] = {}
+    for number, description, expected_result in rows:
         try:
             step_no = int(number)
         except (TypeError, ValueError):
             continue
-        text = (description or "").strip() or f"步骤{step_no}"
-        names[step_no] = text
-    return names
+        details[step_no] = {
+            "description": (description or "").strip() or f"步骤{step_no}",
+            "expected_result": (expected_result or "").strip(),
+        }
+    return details
+
+
+def _get_testcase_step_names(testcase_id: int) -> dict[int, str]:
+    """Map step_number -> description for helper-runner progress messages."""
+    return {
+        number: detail["description"]
+        for number, detail in _get_testcase_step_details(testcase_id).items()
+    }
 
 
 def _extract_helper_result_reason(content: Any) -> tuple[str, str]:
@@ -2159,15 +2169,20 @@ async def _run_and_stream_remaining_helper_steps(
     }
 
 
-def _build_incomplete_ai_resume_prompt(*, next_step: int, total_steps: int, step_names: dict[int, str], test_case_id: int) -> str:
+def _build_incomplete_ai_resume_prompt(*, next_step: int, total_steps: int, step_details: dict[int, dict[str, str]], test_case_id: int) -> str:
     remaining = "\n".join(
-        f"{number}. {step_names.get(number, f'步骤{number}')}"
+        (
+            f"{number}. 用例原始步骤：{step_details.get(number, {}).get('description', f'步骤{number}')}\n"
+            f"   预期结果：{step_details.get(number, {}).get('expected_result') or '未填写'}"
+        )
         for number in range(next_step, total_steps + 1)
     )
     return (
         "【用例步骤续跑指令】上一轮提前结束，以下步骤尚无浏览器工具执行证据。\n"
         f"请在现有浏览器会话 session_id=case_{test_case_id} 中继续，不要重新登录或新建浏览器。\n"
         "从第一条未完成步骤开始，严格按顺序实际操作；每步操作后确认页面状态，并按执行技能要求保存该步截图。\n"
+        "以下步骤原文和预期结果来自测试用例，是本次执行的唯一数据来源。工单号、账号、筛选值、名称等字面值必须逐字照用；禁止根据日期、历史会话或模型推测替换/编造。\n"
+        "执行输入步骤后，必须读取对应输入框的实际 value 并与用例原文核对；不能只因 fill helper 没报错就判通过。\n"
         "不要依据之前的文字报告推断步骤已经完成，不要编造操作结果、截图或通过标记。\n"
         "所有列出的步骤都有对应工具执行结果后，才可以输出最终测试报告；遇到操作失败就停止并报告真实错误。\n"
         f"尚待执行步骤（共 {total_steps} 步）：\n{remaining}"
@@ -4436,13 +4451,13 @@ class AgentLoopStreamAPIView(View):
                                                 continue
                                             yield create_flushed_sse(event)
                                     if auto_no_template and execution_mode != "script_only":
-                                        step_names = await sync_to_async(_get_testcase_step_names)(
+                                        step_details = await sync_to_async(_get_testcase_step_details)(
                                             int(test_case_id)
                                         )
                                         resume_prompt = _build_incomplete_ai_resume_prompt(
                                             next_step=next_step,
                                             total_steps=int(total_case_steps),
-                                            step_names=step_names,
+                                            step_details=step_details,
                                             test_case_id=int(test_case_id),
                                         )
                                         yield create_sse_data({

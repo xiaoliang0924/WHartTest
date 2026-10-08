@@ -619,10 +619,45 @@ def build_step_results_from_execution_evidence(
         description = getattr(step, "description", "") or ""
         expected = getattr(step, "expected_result", "") or ""
         outcome = step_outcomes.get(number)
+        actual = ""
+        # Long numeric identifiers in a step (for example an order number) are
+        # exact test data, not values the model may synthesize from today's date.
+        # Bind them to the output attached to this step's screenshot so that a
+        # plausible RESULT=PASS for a different identifier cannot pass the case.
+        required_identifiers = re.findall(r"(?<!\d)\d{8,}(?!\d)", description)
+        screenshot_markers = list(re.finditer(
+            rf"\[(?:CASE_SCREENSHOT|SCREENSHOT_SAVED)\][^\n]*case[_-]{case_id}_step\d+\.png",
+            text,
+            flags=re.IGNORECASE,
+        ))
+        step_output = ""
+        for marker_index in range(len(screenshot_markers) - 1, -1, -1):
+            marker = screenshot_markers[marker_index]
+            marker_step = re.search(
+                r"case[_-]" + str(case_id) + r"_step(\d+)\.png",
+                marker.group(0),
+                re.IGNORECASE,
+            )
+            if not marker_step or int(marker_step.group(1)) != number:
+                continue
+            end = (
+                screenshot_markers[marker_index + 1].start()
+                if marker_index + 1 < len(screenshot_markers)
+                else len(text)
+            )
+            step_output = text[marker.end():end]
+            break
+        missing_identifiers = [value for value in required_identifiers if value not in step_output]
+        if outcome == "pass" and missing_identifiers:
+            outcome = "fail"
+            actual = (
+                "执行证据中的数据与用例步骤不一致，缺少原始值："
+                + ", ".join(missing_identifiers)
+            )
         if outcome == "pass":
             step_status, actual = "pass", "通过"
         elif outcome == "fail":
-            step_status, actual = "fail", fail_reason or "步骤执行失败"
+            step_status, actual = "fail", actual or fail_reason or "步骤执行失败"
         else:
             step_status, actual = "skip", "未执行"
         results.append(
@@ -901,12 +936,24 @@ def ensure_execution_result_report(
             status = "pass"
             fail_reason = ""
             extra_note = ""
+        elif any(item.get("status") == "fail" for item in step_results):
+            status = "fail"
+            if not fail_reason or fail_reason in (
+                "执行中途结束，未输出完整测试报告",
+                "仍有步骤未执行完成",
+            ):
+                first_failed = next(
+                    (item for item in step_results if item.get("status") == "fail"),
+                    None,
+                )
+                fail_reason = (
+                    (first_failed or {}).get("actual_result")
+                    or "步骤执行失败"
+                )
         elif any(item.get("status") == "skip" for item in step_results):
             status = "fail"
             if not fail_reason or fail_reason == "执行中途结束，未输出完整测试报告":
                 fail_reason = "仍有步骤未执行完成"
-        elif any(item.get("status") == "fail" for item in step_results):
-            status = "fail"
     if not step_results:
         step_results = build_step_results(
             testcase,
