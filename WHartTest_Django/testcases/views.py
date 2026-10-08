@@ -47,7 +47,7 @@ from .permissions import (
 from .filters import TestCaseFilter, TestCaseSearchFilter  # 导入自定义过滤器
 from wharttest_django.pagination import StandardPagination
 from projects.models import ProjectMember
-from ui_automation.models import UiElement, UiTestCase
+from ui_automation.models import UiCaseStepsDetailed, UiElement, UiTestCase
 from .ai_diagnosis_service import diagnose_execution_failure, apply_healing_to_element
 
 # 确保导入项目自定义的权限类
@@ -159,6 +159,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     def bind_ui_testcase(self, request, project_pk=None, pk=None):
         """绑定或解绑当前项目中的 UI 自动化用例。"""
         testcase = self.get_object()
+        previous_ui_test_case_id = testcase.ui_test_case_id
         ui_test_case_id = request.data.get("ui_test_case_id")
         if ui_test_case_id in (None, ""):
             testcase.ui_test_case = None
@@ -174,6 +175,10 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 )
             testcase.ui_test_case = ui_test_case
 
+        if testcase.ui_test_case_id != previous_ui_test_case_id:
+            # A mapping belongs to a specific functional/UI-case binding.
+            testcase.ui_step_mapping = {}
+
         execution_mode = request.data.get("execution_mode")
         if execution_mode is not None:
             allowed_modes = {value for value, _ in TestCase._meta.get_field("execution_mode").choices}
@@ -183,7 +188,63 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             testcase.execution_mode = execution_mode
-        testcase.save(update_fields=["ui_test_case", "execution_mode", "updated_at"])
+
+        if "ui_step_mapping" in request.data:
+            mapping = request.data.get("ui_step_mapping")
+            if testcase.ui_test_case_id is None or not isinstance(mapping, dict):
+                return Response(
+                    {"ui_step_mapping": "请先绑定 UI 用例，并提供有效的步骤映射对象"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            ui_groups = list(
+                UiCaseStepsDetailed.objects.filter(test_case_id=testcase.ui_test_case_id)
+                .order_by("case_sort")
+                .values_list("id", flat=True)
+            )
+            functional_steps = set(testcase.steps.values_list("step_number", flat=True))
+            mapped_group_ids = set()
+            covered_steps = set()
+            normalized_groups = []
+            try:
+                entries = mapping.get("groups")
+                if not isinstance(entries, list):
+                    raise ValueError
+                for entry in entries:
+                    group_id = int(entry.get("ui_case_step_id"))
+                    numbers = entry.get("functional_step_numbers")
+                    if group_id not in ui_groups or group_id in mapped_group_ids:
+                        raise ValueError
+                    if not isinstance(numbers, list) or not numbers:
+                        raise ValueError
+                    normalized_numbers = []
+                    for raw_number in numbers:
+                        if isinstance(raw_number, bool):
+                            raise ValueError
+                        number = int(raw_number)
+                        if number not in functional_steps or number in normalized_numbers:
+                            raise ValueError
+                        normalized_numbers.append(number)
+                        covered_steps.add(number)
+                    mapped_group_ids.add(group_id)
+                    normalized_groups.append({
+                        "ui_case_step_id": group_id,
+                        "functional_step_numbers": normalized_numbers,
+                    })
+                if mapped_group_ids != set(ui_groups) or covered_steps != functional_steps:
+                    raise ValueError
+            except (AttributeError, TypeError, ValueError):
+                return Response(
+                    {"ui_step_mapping": "映射必须覆盖全部 UI 步骤组和功能步骤，且编号必须有效"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            testcase.ui_step_mapping = {
+                "version": 1,
+                "ui_test_case_id": testcase.ui_test_case_id,
+                "groups": normalized_groups,
+            }
+        testcase.save(update_fields=[
+            "ui_test_case", "ui_step_mapping", "execution_mode", "updated_at"
+        ])
         return Response(self.get_serializer(testcase).data)
 
     @action(detail=True, methods=["post"], url_path="diagnose-failure")

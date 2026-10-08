@@ -17,7 +17,7 @@ from ui_automation.models import (
 )
 from ui_automation.serializers import UiPageStepsExecuteSerializer
 from ui_automation.generated_case_service import persist_generated_ui_testcase
-from testcases.models import TestCase as FunctionalTestCase, TestCaseModule
+from testcases.models import TestCase as FunctionalTestCase, TestCaseModule, TestCaseStep
 from file_management.models import FileAsset, FileManagementSetting, FileReference
 
 
@@ -37,12 +37,20 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
             creator=self.user,
             level='P1',
         )
+        TestCaseStep.objects.create(
+            test_case=self.testcase,
+            step_number=1,
+            description='使用观察到的步骤完成登录',
+            expected_result='登录成功',
+            creator=self.user,
+        )
         self.payload = {
             'name': 'Observed workflow',
             'url': 'https://example.test/login',
             'steps': [{
                 'name': 'Login and open dashboard',
                 'description': '使用本次观察到的控件登录并进入首页',
+                'functional_step_numbers': [1],
                 'url': 'https://example.test/login',
                 'actions': [
                     {
@@ -79,6 +87,10 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
         self.assertTrue(result['ui_test_case_id'])
         self.testcase.refresh_from_db()
         self.assertEqual(self.testcase.ui_test_case_id, result['ui_test_case_id'])
+        self.assertEqual(
+            self.testcase.ui_step_mapping['groups'][0]['functional_step_numbers'],
+            [1],
+        )
         ui_case = UiTestCase.objects.get(pk=result['ui_test_case_id'])
         self.assertEqual(ui_case.case_steps.count(), 1)
         password_detail = UiPageStepsDetailed.objects.get(ope_key='fill')
@@ -105,6 +117,26 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
         self.assertFalse(UiTestCase.objects.exists())
         self.assertFalse(UiPage.objects.exists())
         self.assertFalse(UiPageSteps.objects.exists())
+
+    def test_generation_rejects_unmapped_functional_steps_before_saving(self):
+        TestCaseStep.objects.create(
+            test_case=self.testcase,
+            step_number=2,
+            description='检查列表行数',
+            expected_result='行数符合预期',
+            creator=self.user,
+        )
+
+        with self.assertRaisesRegex(ValueError, '未覆盖功能步骤：2'):
+            persist_generated_ui_testcase(
+                testcase_id=self.testcase.id,
+                project_id=self.project.id,
+                user_id=self.user.id,
+                payload=self.payload,
+            )
+
+        self.assertFalse(UiTestCase.objects.exists())
+        self.assertFalse(UiPage.objects.exists())
 
     def test_repeated_call_does_not_create_duplicate_ui_case(self):
         first = persist_generated_ui_testcase(

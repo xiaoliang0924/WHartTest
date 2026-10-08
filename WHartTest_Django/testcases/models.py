@@ -106,6 +106,12 @@ class TestCase(models.Model):
         related_name='bound_testcases',
         verbose_name=_('绑定的UI自动化用例'),
     )
+    ui_step_mapping = models.JSONField(
+        _('UI步骤映射'),
+        default=dict,
+        blank=True,
+        help_text=_('当前功能用例绑定的 UI 步骤组到功能步骤编号的显式映射'),
+    )
     execution_mode = models.CharField(
         _('默认执行模式'),
         max_length=20,

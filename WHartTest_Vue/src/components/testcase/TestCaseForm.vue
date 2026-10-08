@@ -28,7 +28,7 @@
             <a-divider direction="vertical" />
           </template>
           <a-button @click="handleBackToList">{{ text.cancel }}</a-button>
-          <a-button type="primary" :loading="formLoading" @click="handleSubmit">
+          <a-button type="primary" :loading="formLoading" :disabled="loadingUiCaseSteps" @click="handleSubmit">
             {{ text.save }}
           </a-button>
         </a-space>
@@ -94,6 +94,7 @@
               :placeholder="tl('请选择关联的 UI 自动化用例（可选）')"
               allow-clear
               :loading="loadingUiTestCases"
+              @change="handleUiTestCaseChange"
             >
               <a-option
                 v-for="item in availableUiCases"
@@ -112,6 +113,44 @@
               <a-option value="ai_only">{{ tl('纯 AI 探索执行') }}</a-option>
             </a-select>
           </a-form-item>
+        </a-col>
+      </a-row>
+      <a-alert
+        v-if="formState.ui_test_case && uiCaseSteps.length"
+        type="info"
+        class="ui-step-mapping-alert"
+      >
+        {{ tl('逐组选择该 UI 步骤覆盖的功能步骤。每个 UI 步骤组和每个功能步骤都必须至少映射一次；旧绑定未映射时可在这里补齐。') }}
+      </a-alert>
+      <a-spin v-if="loadingUiCaseSteps" :loading="loadingUiCaseSteps" class="ui-step-mapping-spin">
+        <div />
+      </a-spin>
+      <a-row
+        v-for="group in uiCaseSteps"
+        :key="group.id"
+        :gutter="12"
+        class="ui-step-mapping-row"
+      >
+        <a-col :span="8">
+          <div class="ui-step-mapping-label">
+            UI 组 {{ group.case_sort }}：{{ group.page_step_name || `步骤 ${group.case_sort}` }}
+          </div>
+        </a-col>
+        <a-col :span="16">
+          <a-select
+            v-model="uiStepNumbersByGroup[group.id || 0]"
+            multiple
+            allow-clear
+            :placeholder="tl('选择此 UI 组覆盖的功能步骤')"
+            @change="uiMappingTouched = true"
+          >
+            <a-option
+              v-for="step in formState.steps.filter(item => item.description.trim() || item.expected_result.trim())"
+              :key="step.step_number"
+              :value="step.step_number"
+              :label="`步骤 ${step.step_number}：${step.description || step.expected_result}`"
+            />
+          </a-select>
         </a-col>
       </a-row>
       <a-form-item field="precondition" :label="text.precondition">
@@ -410,17 +449,19 @@ import {
   getTestCaseDetail,
   uploadTestCaseScreenshot,
   deleteTestCaseScreenshot,
+  bindTestCaseUiTestCase,
   type TestCaseStep,
   type TestCaseScreenshot,
   type CreateTestCaseRequest,
   type UpdateTestCaseRequest,
+  type UiFunctionalStepMapping,
 } from '@/services/testcaseService';
 import { formatDate, REVIEW_STATUS_OPTIONS, TEST_TYPE_OPTIONS } from '@/utils/formatters';
 import type { ReviewStatus } from '@/services/testcaseService';
 import { useAppI18n } from '@/composables/useAppI18n';
 import { testCaseApi } from '@/features/ui-automation/api';
-import type { UiTestCase } from '@/features/ui-automation/types';
-import { extractPaginationData } from '@/features/ui-automation/types';
+import type { UiTestCase, UiTestCaseDetail, UiCaseStepsDetailed } from '@/features/ui-automation/types';
+import { extractPaginationData, extractResponseData } from '@/features/ui-automation/types';
 
 interface StepWithError extends TestCaseStep {
   temp_id?: string; // 用于表格 row-key
@@ -434,6 +475,11 @@ interface FormState extends CreateTestCaseRequest {
   review_status?: ReviewStatus;
   test_type?: string;
   ui_test_case?: number | null;
+  ui_step_mapping?: {
+    version?: number;
+    ui_test_case_id?: number;
+    groups?: UiFunctionalStepMapping['groups'];
+  };
   execution_mode?: 'hybrid' | 'script_only' | 'ai_only';
 }
 
@@ -461,6 +507,10 @@ const formLoading = ref(false);
 const testCaseFormRef = ref<FormInstance>();
 const availableUiCases = ref<UiTestCase[]>([]);
 const loadingUiTestCases = ref(false);
+const uiCaseSteps = ref<UiCaseStepsDetailed[]>([]);
+const uiStepNumbersByGroup = reactive<Record<number, number[]>>({});
+const loadingUiCaseSteps = ref(false);
+const uiMappingTouched = ref(false);
 
 const formState = reactive<FormState>({
   id: undefined,
@@ -488,6 +538,40 @@ const loadUiTestCases = async () => {
   } finally {
     loadingUiTestCases.value = false;
   }
+};
+
+const loadUiCaseStepGroups = async (
+  uiTestCaseId?: number | null,
+  mapping?: FormState['ui_step_mapping'],
+  markTouched = false,
+) => {
+  uiCaseSteps.value = [];
+  Object.keys(uiStepNumbersByGroup).forEach((key) => delete uiStepNumbersByGroup[Number(key)]);
+  uiMappingTouched.value = markTouched;
+  if (!uiTestCaseId) return;
+
+  loadingUiCaseSteps.value = true;
+  try {
+    const response = await testCaseApi.get(uiTestCaseId);
+    const detail = extractResponseData<UiTestCaseDetail>(response);
+    uiCaseSteps.value = (detail?.case_steps || []).filter((group) => Number.isInteger(group.id));
+    const mappingMatches = mapping?.ui_test_case_id === uiTestCaseId;
+    const savedGroups = mappingMatches ? (mapping?.groups || []) : [];
+    uiCaseSteps.value.forEach((group) => {
+      const saved = savedGroups.find((item) => item.ui_case_step_id === group.id);
+      uiStepNumbersByGroup[group.id!] = saved ? [...saved.functional_step_numbers] : [];
+    });
+  } catch (error) {
+    console.error('加载 UI 步骤映射信息失败', error);
+    Message.error(tl('加载 UI 步骤组失败，请刷新后重试'));
+  } finally {
+    loadingUiCaseSteps.value = false;
+  }
+};
+
+const handleUiTestCaseChange = async (value?: number) => {
+  formState.ui_step_mapping = undefined;
+  await loadUiCaseStepGroups(value, undefined, true);
 };
 
 // 保存原始数据用于变更追踪
@@ -811,12 +895,16 @@ const resetForm = () => {
   formState.test_type = 'functional';
   formState.module_id = initialSelectedModuleId?.value || undefined;
   formState.ui_test_case = undefined;
+  formState.ui_step_mapping = undefined;
   formState.execution_mode = 'hybrid';
   formState.steps = [{ step_number: 1, description: '', expected_result: '', temp_id: Date.now().toString() }];
   formState.notes = '';
   formState.review_status = 'pending_review';
   stepErrors.value = [];
   existingScreenshots.value = [];
+  uiCaseSteps.value = [];
+  Object.keys(uiStepNumbersByGroup).forEach((key) => delete uiStepNumbersByGroup[Number(key)]);
+  uiMappingTouched.value = false;
   newScreenshots.value = [];
   testCaseFormRef.value?.clearValidate();
 };
@@ -835,11 +923,17 @@ const fetchDetailsAndSetForm = async (id: number) => {
       formState.test_type = data.test_type || 'functional';
       formState.module_id = data.module_id;
       formState.ui_test_case = data.ui_test_case || undefined;
+      formState.ui_step_mapping = data.ui_step_mapping || undefined;
       formState.execution_mode = data.execution_mode || 'hybrid';
       formState.notes = data.notes || ''; // 设置备注信息
       formState.review_status = data.review_status || 'pending_review'; // 设置审核状态
       formState.steps = data.steps.map((step, index) => ({ ...step, temp_id: `${Date.now()}-${index}` }));
       stepErrors.value = Array(data.steps.length).fill({});
+      await loadUiCaseStepGroups(
+        data.ui_test_case,
+        data.ui_step_mapping,
+        false,
+      );
 
       // 保存原始数据的深拷贝，用于后续比较变更
       originalFormData.value = JSON.parse(JSON.stringify({
@@ -849,6 +943,7 @@ const fetchDetailsAndSetForm = async (id: number) => {
         level: data.level,
         module_id: data.module_id,
         ui_test_case: data.ui_test_case,
+        ui_step_mapping: data.ui_step_mapping,
         execution_mode: data.execution_mode || 'hybrid',
         notes: data.notes || '',
         review_status: data.review_status || 'pending_review',
@@ -950,12 +1045,57 @@ const handleSubmit = async () => {
     // 过滤掉描述和预期结果都为空的步骤
     const payloadSteps = formState.steps
       .filter(s => s.description.trim() !== '' || s.expected_result.trim() !== '')
-      .map(s => ({
-        step_number: s.step_number,
+      .map((s, index) => ({
+        step_number: index + 1,
         description: s.description,
         expected_result: s.expected_result,
         id: s.id // 编辑时需要传id
       }));
+
+    const originalStepSignature = (originalFormData.value?.steps || []).map((step) =>
+      `${step.description}\u0000${step.expected_result || ''}`,
+    );
+    const nextStepSignature = payloadSteps.map((step) =>
+      `${step.description}\u0000${step.expected_result || ''}`,
+    );
+    const functionalStepsChanged = !isEditing.value
+      || JSON.stringify(originalStepSignature) !== JSON.stringify(nextStepSignature);
+    const selectedUiCaseChanged = !isEditing.value
+      || formState.ui_test_case !== originalFormData.value?.ui_test_case;
+    const shouldSaveUiMapping = Boolean(formState.ui_test_case)
+      && (uiMappingTouched.value || functionalStepsChanged || selectedUiCaseChanged);
+    let uiStepMappingPayload: UiFunctionalStepMapping | undefined;
+
+    if (shouldSaveUiMapping) {
+      const selectedSteps = new Set<number>();
+      const mappingGroups: UiFunctionalStepMapping['groups'] = [];
+      const unmappedGroups: number[] = [];
+      uiCaseSteps.value.forEach((group) => {
+        if (!group.id) return;
+        const numbers = [...new Set(uiStepNumbersByGroup[group.id] || [])]
+          .filter((number) => number >= 1 && number <= payloadSteps.length);
+        if (!numbers.length) unmappedGroups.push(group.case_sort);
+        numbers.forEach((number) => selectedSteps.add(number));
+        mappingGroups.push({
+          ui_case_step_id: group.id,
+          functional_step_numbers: numbers,
+        });
+      });
+      const unmappedFunctionalSteps = payloadSteps
+        .map((step) => step.step_number)
+        .filter((number) => !selectedSteps.has(number));
+      if (!uiCaseSteps.value.length || unmappedGroups.length || unmappedFunctionalSteps.length) {
+        const detail = [
+          unmappedGroups.length ? `未映射 UI 步骤组：${unmappedGroups.join('、')}` : '',
+          unmappedFunctionalSteps.length ? `未覆盖功能步骤：${unmappedFunctionalSteps.join('、')}` : '',
+          !uiCaseSteps.value.length ? '未读取到绑定 UI 脚本的步骤组' : '',
+        ].filter(Boolean).join('；');
+        Message.error(detail || tl('步骤映射未完成'));
+        formLoading.value = false;
+        return;
+      }
+      uiStepMappingPayload = { groups: mappingGroups };
+    }
 
     let response;
     let reviewStatusChanged = false; // 标记审核状态是否变更
@@ -1020,7 +1160,7 @@ const handleSubmit = async () => {
       }
       
       // 检查是否有任何变更
-      if (Object.keys(updatePayload).length === 0) {
+      if (Object.keys(updatePayload).length === 0 && !shouldSaveUiMapping) {
         Message.info(text.value.noChangesDetected);
         formLoading.value = false;
         return;
@@ -1049,6 +1189,21 @@ const handleSubmit = async () => {
     }
 
     if (response.success) {
+      const savedTestCaseId = response.data?.id || formState.id;
+      if (formState.ui_test_case && uiStepMappingPayload && savedTestCaseId) {
+        const mappingResponse = await bindTestCaseUiTestCase(
+          currentProjectId.value,
+          savedTestCaseId,
+          formState.ui_test_case,
+          uiStepMappingPayload,
+        );
+        if (!mappingResponse.success) {
+          Message.error(mappingResponse.error || tl('功能用例已保存，但 UI 步骤映射未保存'));
+          formLoading.value = false;
+          return;
+        }
+      }
+
       // 如果有新截图需要上传，先上传截图
       if (newScreenshots.value.length > 0 && response.data?.id) {
         await uploadNewScreenshots(response.data.id);
@@ -1293,6 +1448,25 @@ const handleImageError = (_event: Event) => {
 </script>
 
 <style scoped>
+.ui-step-mapping-alert {
+  margin: 0 0 12px;
+}
+
+.ui-step-mapping-spin {
+  width: 100%;
+}
+
+.ui-step-mapping-row {
+  margin-bottom: 8px;
+}
+
+.ui-step-mapping-label {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  color: var(--color-text-2);
+}
+
 .testcase-form-container {
   background-color: var(--theme-card-bg);
   color: var(--theme-page-text);

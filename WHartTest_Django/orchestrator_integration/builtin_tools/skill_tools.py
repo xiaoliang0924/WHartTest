@@ -2130,6 +2130,7 @@ def get_skill_tools(
             仅在功能测试的所有步骤均通过后调用一次。payload_json 必须是 JSON 对象，格式：
             {"name":"用例名称","description":"简述","url":"观察到的页面 URL",
              "steps":[{"name":"步骤名称","description":"步骤说明","url":"页面 URL",
+             "functional_step_numbers":[1],
              "actions":[{"type":"click|fill|check|uncheck|press","selector":
              {"name":"语义名称","locator_type":"role|text|label|placeholder|test_id|id|name|css|xpath",
              "locator_value":"实际观察到的定位表达式"}},
@@ -2142,6 +2143,8 @@ def get_skill_tools(
              {"type":"assert","mode":"visible|hidden|enabled|disabled|checked|text|contain_text|value|count|url|title",
              "selector":{"name":"语义名称","locator_type":"text","locator_value":"实际定位"},
              "value":"期望值","match":"exact|path|contains","timeout":10}]}]}。
+
+             每个 UI steps 项必须提供 functional_step_numbers：功能用例步骤编号的数组。该映射按本次真实执行证据填写；一个 UI 组可以覆盖多个功能步骤，一个功能步骤也可以由多个 UI 组共同覆盖。所有功能步骤必须至少映射到一组，不能仅为满足数量而猜测或遗漏；证据不足时不要调用保存工具，并说明哪些功能步骤尚未被真实浏览器操作覆盖。
 
              页面 URL 断言默认使用 exact；只有观察到同一路由仅 query/hash 动态变化时才使用 match=path。
              URL 断言的 value 必须是执行该断言时浏览器实际观察到的当前 URL；禁止根据菜单名称、常见首页或猜测填写 dashboard 等目标路由。若实际落地路由与业务预期不同，应如实记录观察结果并说明差异，不得伪造 URL 断言。

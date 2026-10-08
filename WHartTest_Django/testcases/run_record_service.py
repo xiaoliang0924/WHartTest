@@ -679,7 +679,7 @@ def build_execution_result_report(
             if not failed_number:
                 failed_number = number
         else:
-            result = "—"
+            result = item.get("actual_result") or "未执行"
             status_col = "⏭ 未执行"
         rows.append(f"| {number} | {description} | {result} | {status_col} |")
     if not rows:
@@ -694,7 +694,18 @@ def build_execution_result_report(
     conclusion = (
         f"本次测试执行全部 {len(step_results) or '-'} 个步骤均通过，测试通过。"
         if passed
-        else f"本次测试执行在步骤 {failed_number or '?'} 失败，未完成全部步骤，测试不通过。"
+        else (
+            "本次 UI 步骤映射未对齐，未完成全部功能步骤验证，测试不通过。"
+            if not failed_number and "映射" in str(fail_reason or "")
+            else f"本次测试执行在步骤 {failed_number or '?'} 失败，未完成全部步骤，测试不通过。"
+        )
+    )
+    failed_step_label = failed_desc or (
+        "无" if passed else (
+            "UI 步骤映射未对齐"
+            if "映射" in str(fail_reason or "")
+            else "执行中途结束"
+        )
     )
     return (
         f"## 测试执行结果: {title}\n\n"
@@ -708,7 +719,7 @@ def build_execution_result_report(
         + "\n".join(rows)
         + "\n\n"
         f"### 问题分析\n"
-        f"- 失败步骤：{failed_desc or ('无' if passed else '执行中途结束')}\n"
+        f"- 失败步骤：{failed_step_label}\n"
         f"- 失败原因：{analysis_reason}\n"
         f"- 建议：{suggestion}\n\n"
         f"### 结论\n{conclusion}"

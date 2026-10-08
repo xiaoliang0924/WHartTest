@@ -265,6 +265,42 @@ def persist_generated_ui_testcase(
             "message": "功能用例已绑定 UI 自动化用例，未重复创建。",
             "created": False,
         }
+    functional_steps = list(testcase.steps.all().order_by("step_number"))
+    if not functional_steps:
+        raise ValueError("功能用例没有步骤，无法建立 UI 步骤映射。")
+
+    valid_step_numbers = {int(step.step_number) for step in functional_steps}
+    covered_step_numbers: set[int] = set()
+    mapping_by_payload_step: list[list[int]] = []
+    for index, step in enumerate(data["steps"], 1):
+        raw_numbers = step.get("functional_step_numbers")
+        if not isinstance(raw_numbers, list) or not raw_numbers:
+            raise ValueError(
+                f"UI 第 {index} 组缺少 functional_step_numbers，不能确认它覆盖的功能步骤。"
+            )
+        numbers: list[int] = []
+        for raw_number in raw_numbers:
+            if isinstance(raw_number, bool):
+                raise ValueError(f"UI 第 {index} 组的功能步骤编号无效。")
+            try:
+                number = int(raw_number)
+            except (TypeError, ValueError):
+                raise ValueError(f"UI 第 {index} 组的功能步骤编号无效。")
+            if number not in valid_step_numbers:
+                raise ValueError(
+                    f"UI 第 {index} 组引用了不存在的功能步骤 {number}。"
+                )
+            if number in numbers:
+                raise ValueError(f"UI 第 {index} 组重复映射了功能步骤 {number}。")
+            numbers.append(number)
+            covered_step_numbers.add(number)
+        mapping_by_payload_step.append(numbers)
+
+    missing_step_numbers = sorted(valid_step_numbers - covered_step_numbers)
+    if missing_step_numbers:
+        missing = "、".join(str(number) for number in missing_step_numbers)
+        raise ValueError(f"UI 自动化未覆盖功能步骤：{missing}。请补录或重新映射后保存。")
+
     user = get_user_model().objects.get(pk=user_id)
     module, _ = UiModule.objects.get_or_create(
         project_id=project_id,
@@ -300,6 +336,7 @@ def persist_generated_ui_testcase(
         observed_urls=observed_urls,
     )
     total_actions = 0
+    saved_step_mapping = []
     for index, step in enumerate(data["steps"], 1):
         url = str(step.get("url") or data.get("url") or "").strip()
         actions = _safe_actions(step["actions"])
@@ -339,16 +376,25 @@ def persist_generated_ui_testcase(
         if not stats["steps_created"]:
             raise ValueError(f"第 {index} 步没有生成可执行的 UI 步骤。")
         total_actions += stats["steps_created"]
-        UiCaseStepsDetailed.objects.create(
+        ui_case_step = UiCaseStepsDetailed.objects.create(
             test_case=ui_case,
             page_step=page_step,
             case_sort=index,
         )
+        saved_step_mapping.append({
+            "ui_case_step_id": ui_case_step.id,
+            "functional_step_numbers": mapping_by_payload_step[index - 1],
+        })
 
     if not total_actions or not ui_case.case_steps.exists():
         raise ValueError("没有生成可执行的 UI 自动化步骤，已取消保存。")
     testcase.ui_test_case = ui_case
-    testcase.save(update_fields=["ui_test_case", "updated_at"])
+    testcase.ui_step_mapping = {
+        "version": 1,
+        "ui_test_case_id": ui_case.id,
+        "groups": saved_step_mapping,
+    }
+    testcase.save(update_fields=["ui_test_case", "ui_step_mapping", "updated_at"])
     return {
         "status": "success",
         "ui_test_case_id": ui_case.id,
@@ -358,4 +404,5 @@ def persist_generated_ui_testcase(
         "actions": total_actions,
         "auth_state_id": generated_auth_state.id if generated_auth_state else None,
         "auth_state_bound": bool(generated_auth_state),
+        "mapped_functional_steps": sorted(covered_step_numbers),
     }

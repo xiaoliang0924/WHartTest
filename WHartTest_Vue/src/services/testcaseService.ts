@@ -66,6 +66,14 @@ export interface TestCase {
   screenshots?: TestCaseScreenshot[]; // 新的多截图字段
   review_status?: ReviewStatus; // 审核状态
   ui_test_case?: number | null;
+  ui_step_mapping?: {
+    version?: number;
+    ui_test_case_id?: number;
+    groups?: Array<{
+      ui_case_step_id: number;
+      functional_step_numbers: number[];
+    }>;
+  };
   ui_test_case_detail?: {
     id: number;
     name: string;
@@ -229,6 +237,13 @@ export interface UpdateTestCaseRequest {
   review_status?: ReviewStatus; // 审核状态
   ui_test_case?: number | null;
   execution_mode?: 'hybrid' | 'script_only' | 'ai_only';
+}
+
+export interface UiFunctionalStepMapping {
+  groups: Array<{
+    ui_case_step_id: number;
+    functional_step_numbers: number[];
+  }>;
 }
 
 // 分页参数接口
@@ -541,6 +556,48 @@ export const updateTestCase = async (
     return {
       success: false,
       error: error.response?.data?.message || error.message || '更新测试用例时发生错误',
+      statusCode: error.response?.status,
+    };
+  }
+};
+
+export const bindTestCaseUiTestCase = async (
+  projectId: number,
+  testCaseId: number,
+  uiTestCaseId: number | null,
+  uiStepMapping?: UiFunctionalStepMapping,
+): Promise<TestCaseResponse> => {
+  const authStore = useAuthStore();
+  const accessToken = authStore.getAccessToken;
+  if (!accessToken) return { success: false, error: '未登录或会话已过期' };
+
+  try {
+    const response = await axios.post(
+      `${API_BASE_URL}/projects/${projectId}/testcases/${testCaseId}/bind-ui-testcase/`,
+      {
+        ui_test_case_id: uiTestCaseId,
+        ...(uiStepMapping ? { ui_step_mapping: uiStepMapping } : {}),
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+      },
+    );
+    if (response.data?.status === 'success' && response.data?.data) {
+      return { success: true, data: response.data.data, statusCode: response.data.code };
+    }
+    return {
+      success: false,
+      error: response.data?.message || response.data?.ui_step_mapping || '保存 UI 步骤映射失败',
+      statusCode: response.data?.code,
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      error: error.response?.data?.ui_step_mapping || error.response?.data?.message || error.message || '保存 UI 步骤映射失败',
       statusCode: error.response?.status,
     };
   }

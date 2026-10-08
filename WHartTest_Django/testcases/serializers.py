@@ -167,6 +167,7 @@ class TestCaseSerializer(UiTestCaseDetailMixin, serializers.ModelSerializer):
             "test_type",
             "ui_test_case",
             "ui_test_case_detail",
+            "ui_step_mapping",
             "execution_mode",
             "sort_order",
             "latest_run",
@@ -176,6 +177,7 @@ class TestCaseSerializer(UiTestCaseDetailMixin, serializers.ModelSerializer):
             "project",
             "module_detail",  # module_detail 仅用于展示
             "ui_test_case_detail",
+            "ui_step_mapping",
             "creator",
             "creator_detail",
             "created_at",
@@ -235,6 +237,18 @@ class TestCaseSerializer(UiTestCaseDetailMixin, serializers.ModelSerializer):
     @transaction.atomic
     def update(self, instance, validated_data):
         steps_data = validated_data.pop("steps", None)
+        functional_steps_changed = False
+        if steps_data is not None:
+            previous_signature = list(
+                instance.steps.order_by("step_number").values_list(
+                    "description", "expected_result"
+                )
+            )
+            next_signature = [
+                (item.get("description", ""), item.get("expected_result") or "")
+                for item in steps_data
+            ]
+            functional_steps_changed = previous_signature != next_signature
 
         # 更新 TestCase 实例的字段
         if "name" in validated_data:
@@ -252,9 +266,14 @@ class TestCaseSerializer(UiTestCaseDetailMixin, serializers.ModelSerializer):
         if "test_type" in validated_data:
             instance.test_type = validated_data["test_type"]
         if "ui_test_case" in validated_data:
+            if instance.ui_test_case_id != getattr(validated_data["ui_test_case"], "id", None):
+                instance.ui_step_mapping = {}
             instance.ui_test_case = validated_data["ui_test_case"]
         if "execution_mode" in validated_data:
             instance.execution_mode = validated_data["execution_mode"]
+        if functional_steps_changed:
+            # Functional step edits invalidate the binding-specific mapping.
+            instance.ui_step_mapping = {}
 
         # project 和 creator 通常不允许通过此接口更新
         instance.save()

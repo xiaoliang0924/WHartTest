@@ -106,6 +106,46 @@ class HybridExecutionAndBindingTests(APITestCase):
         self.assertIsNotNone(response.data.get("ui_test_case_detail"))
         self.assertEqual(response.data["ui_test_case_detail"]["id"], self.ui_testcase.id)
 
+    def test_bind_ui_testcase_accepts_complete_explicit_step_mapping(self):
+        ui_group = self.ui_testcase.case_steps.get()
+        url = f"/api/projects/{self.project.id}/testcases/{self.testcase.id}/bind-ui-testcase/"
+        response = self.client.post(
+            url,
+            {
+                "ui_test_case_id": self.ui_testcase.id,
+                "execution_mode": "hybrid",
+                "ui_step_mapping": {
+                    "groups": [{
+                        "ui_case_step_id": ui_group.id,
+                        "functional_step_numbers": [1],
+                    }],
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.testcase.refresh_from_db()
+        self.assertEqual(
+            self.testcase.ui_step_mapping["groups"][0]["functional_step_numbers"],
+            [1],
+        )
+
+    def test_bind_ui_testcase_rejects_incomplete_explicit_step_mapping(self):
+        url = f"/api/projects/{self.project.id}/testcases/{self.testcase.id}/bind-ui-testcase/"
+        response = self.client.post(
+            url,
+            {
+                "ui_test_case_id": self.ui_testcase.id,
+                "ui_step_mapping": {"groups": []},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.testcase.refresh_from_db()
+        self.assertIsNone(self.testcase.ui_test_case_id)
+
     def test_unbind_ui_testcase_success(self):
         """测试解绑 UI 自动化用例"""
         self.testcase.ui_test_case = self.ui_testcase

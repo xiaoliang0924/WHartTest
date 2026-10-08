@@ -250,13 +250,21 @@ async def _complete_testcase_run_with_report(
 
 
 def _map_ui_script_results_to_testcase_steps(
-    case_steps, raw_results, *, ui_status: int, ui_error: str = "", ui_case_groups=None
+    case_steps,
+    raw_results,
+    *,
+    ui_status: int,
+    ui_error: str = "",
+    ui_case_groups=None,
+    ui_step_mapping=None,
+    ui_test_case_id=None,
 ):
-    """Map recorder actions to functional steps using their recorded group IDs.
+    """Map recorder actions to functional steps using binding-specific metadata.
 
-    Recorder results are flattened for display and identify page groups through
-    ``step_id=groupN_index``. Treating every flattened action as a page group
-    produced misleading step-count mismatch errors, especially on failed runs.
+    New bindings carry explicit UI-case-step IDs -> functional step numbers.
+    Legacy bindings may use positional mapping only when the saved group count
+    exactly matches the functional step count. A mismatch is reported as an
+    alignment issue and never assigned as a failure to unrelated steps.
     """
     groups: dict[int, list[dict]] = {}
     for index, item in enumerate(raw_results or [], start=1):
@@ -279,99 +287,136 @@ def _map_ui_script_results_to_testcase_steps(
             continue
         groups.setdefault(group_no, []).append(item)
 
-    expected_count = len(case_steps)
-    actual_count = len(groups)
+    ordered_steps = list(case_steps)
+    expected_numbers = {int(step.step_number) for step in ordered_steps}
+    ui_case_groups = list(ui_case_groups or [])
+    # Saved case-step metadata is authoritative for group IDs and case_sort;
+    # runtime groupN identifiers use the same case_sort numbering.
+    group_number_by_id = {}
+    group_ids = set()
+    for index, item in enumerate(ui_case_groups, start=1):
+        if not isinstance(item, dict):
+            continue
+        try:
+            case_step_id = int(item.get("id"))
+            group_no = int(item.get("case_sort") or index)
+        except (TypeError, ValueError):
+            continue
+        group_number_by_id[case_step_id] = group_no
+        group_ids.add(case_step_id)
+
+    step_groups: dict[int, list[int]] = {number: [] for number in expected_numbers}
     alignment_error = ""
-    combined_trailing_group = False
-    if ui_status == 2 and expected_count == actual_count + 1 and ui_case_groups:
-        # A generated UI page step may deliberately contain both the final
-        # business action and its following assertion (for example, search and
-        # verify the matching row). Accept that one-to-two mapping only when
-        # the functional steps and saved UI group explicitly support both acts.
-        previous = case_steps[-2] if expected_count >= 2 else None
-        final = case_steps[-1] if expected_count >= 1 else None
-        final_group = ui_case_groups[-1] if len(ui_case_groups) == actual_count else {}
-        previous_text = f"{getattr(previous, 'description', '')} {getattr(previous, 'expected_result', '')}"
-        final_text = f"{getattr(final, 'description', '')} {getattr(final, 'expected_result', '')}"
-        group_text = " ".join([
-            str(final_group.get("name") or ""),
-            str(final_group.get("description") or ""),
-            " ".join(str(value) for value in final_group.get("elements", [])),
-        ])
-        operations = {str(value or "").lower() for value in final_group.get("operations", [])}
-
-        def cjk_bigrams(value):
-            return {
-                run[index:index + 2]
-                for run in re.findall(r"[\u4e00-\u9fff]+", str(value))
-                for index in range(len(run) - 1)
-            }
-
-        shared_topic = (
-            cjk_bigrams(previous_text)
-            & cjk_bigrams(final_text)
-            & cjk_bigrams(group_text)
-        )
-        action_ops = {"click", "fill", "type", "select", "select_option", "check"}
-        assertion_ops = {"assert_visible", "assert_text", "contain_text", "assert_count"}
-        has_action_semantics = bool(re.search(r"输入|点击|查询|筛选|搜索|选择", previous_text))
-        has_assertion_semantics = bool(re.search(r"检查|验证|确认|是否|存在|显示|可见|包含", final_text))
-        group_has_action = bool(operations & action_ops) and bool(
-            re.search(r"输入|点击|查询|筛选|搜索|选择", group_text)
-        )
-        group_has_assertion = bool(operations & assertion_ops) and bool(
-            re.search(r"检查|验证|确认|断言|存在|显示|可见|包含", group_text)
-        )
-        combined_trailing_group = bool(
-            previous
-            and final
-            and shared_topic
-            and has_action_semantics
-            and has_assertion_semantics
-            and group_has_action
-            and group_has_assertion
-        )
-
-    # 对失败执行优先呈现执行器返回的真实错误；步骤数不一致只对“脚本
-    # 已通过、但无法证明功能步骤均被覆盖”的情况作为安全失败原因。
-    if ui_status == 2 and expected_count != actual_count and not combined_trailing_group:
+    if ui_step_mapping:
+        try:
+            mapping_case_id = int(ui_step_mapping.get("ui_test_case_id"))
+        except (AttributeError, TypeError, ValueError):
+            mapping_case_id = None
+        if mapping_case_id is None or (
+            ui_test_case_id is not None and mapping_case_id != int(ui_test_case_id)
+        ):
+            alignment_error = "UI 步骤映射与当前绑定的 UI 用例不一致。"
+        elif not group_number_by_id:
+            alignment_error = "缺少 UI 步骤组信息，无法校验已保存的步骤映射。"
+        else:
+            mapped_group_ids = set()
+            try:
+                entries = ui_step_mapping.get("groups")
+                if not isinstance(entries, list):
+                    raise ValueError
+                for entry in entries:
+                    group_id = int(entry.get("ui_case_step_id"))
+                    step_numbers = entry.get("functional_step_numbers")
+                    if group_id not in group_ids or group_id in mapped_group_ids:
+                        raise ValueError
+                    if not isinstance(step_numbers, list) or not step_numbers:
+                        raise ValueError
+                    mapped_group_ids.add(group_id)
+                    group_no = group_number_by_id[group_id]
+                    for raw_number in step_numbers:
+                        if isinstance(raw_number, bool):
+                            raise ValueError
+                        step_number = int(raw_number)
+                        if step_number not in expected_numbers:
+                            raise ValueError
+                        step_groups[step_number].append(group_no)
+                if mapped_group_ids != group_ids or any(not values for values in step_groups.values()):
+                    raise ValueError
+            except (AttributeError, TypeError, ValueError):
+                alignment_error = "UI 步骤映射不完整或引用了已变更的功能/UI步骤，请重新对齐。"
+    elif len(ui_case_groups) == len(ordered_steps) and len(ui_case_groups) > 0:
+        # Backward-compatible behavior for legacy bindings with a one-to-one
+        # structure. New generated bindings always persist explicit mappings.
+        for index, step in enumerate(ordered_steps, start=1):
+            group = ui_case_groups[index - 1]
+            try:
+                group_no = int(group.get("case_sort") or index)
+            except (AttributeError, TypeError, ValueError):
+                group_no = index
+            step_groups[int(step.step_number)].append(group_no)
+    elif ui_status != 2 and groups and len(groups) <= len(ordered_steps):
+        # For legacy failed runs without saved group metadata, retain the
+        # executor's actual ordered failure evidence; the unexecuted tail is
+        # reported as skipped. Successful mismatched runs still fail closed.
+        for step, group_no in zip(ordered_steps, sorted(groups)):
+            step_groups[int(step.step_number)].append(group_no)
+    elif len(ordered_steps) == len(groups) and len(ordered_steps) > 0:
+        # Compatibility for isolated callers that provide recorder evidence
+        # but no persisted case-group metadata.
+        for index, step in enumerate(ordered_steps, start=1):
+            step_groups[int(step.step_number)].append(index)
+    else:
         alignment_error = (
-            f"绑定 UI 用例包含 {actual_count} 组页面步骤，功能用例有 {expected_count} 步，"
-            "无法逐步对应；为避免误报通过，本次按未对齐处理。"
+            f"旧绑定缺少明确步骤映射：UI 执行记录包含 {len(groups)} 组页面步骤，"
+            f"功能用例有 {len(ordered_steps)} 步。请补充映射或重新生成绑定。"
         )
 
+    if alignment_error:
+        reason = alignment_error
+        if ui_status != 2 and ui_error:
+            reason = f"{ui_error}；同时，{alignment_error}"
+        step_results = [{
+            "step_number": step.step_number,
+            "description": step.description or "",
+            "expected_result": step.expected_result or "",
+            "actual_result": reason,
+            "status": "skip",
+        } for step in ordered_steps]
+        return step_results, "fail", reason
+
+    last_executed_group = max(groups, default=0)
     step_results = []
-    for index, step in enumerate(case_steps, start=1):
-        group_no = index
-        if combined_trailing_group and index == expected_count:
-            group_no = actual_count
-        elif combined_trailing_group and index == expected_count - 1:
-            group_no = actual_count
-        group_items = groups.get(group_no, [])
-        group_failed = any(
+    for step in ordered_steps:
+        mapped_group_numbers = step_groups[int(step.step_number)]
+        mapped_items_by_group = [groups.get(group_no, []) for group_no in mapped_group_numbers]
+        group_items = [item for items in mapped_items_by_group for item in items]
+        missing_group_numbers = [
+            group_no
+            for group_no, items in zip(mapped_group_numbers, mapped_items_by_group)
+            if not items
+        ]
+        failed = any(
             str(item.get("status") or "").lower() not in {"success", "pass", "passed"}
             for item in group_items
         )
-        if (
-            ui_status != 2
-            and index == actual_count
-            and group_items
-            and not group_failed
-        ):
-            # 执行器可能在动作日志写入后才报告组级失败（例如截图/收尾异常）。
-            # 将最后一组标失败，避免把“有动作日志”误当成整组通过。
-            group_failed = True
-        if alignment_error:
-            if index <= actual_count:
-                status, actual = "fail", alignment_error
+        if ui_status != 2 and last_executed_group in mapped_group_numbers and group_items and not failed:
+            # The executor can fail after recording successful actions (for
+            # example during screenshot/finalization); fail only the mapped
+            # functional step instead of guessing by its ordinal position.
+            failed = True
+        if not mapped_group_numbers:
+            status, actual = "skip", "该功能步骤没有对应的 UI 步骤组，未执行"
+        elif failed:
+            status, actual = "fail", ui_error or "对应 UI 自动化步骤未全部通过"
+        elif ui_status != 2 and last_executed_group in mapped_group_numbers and group_items:
+            status, actual = "fail", ui_error or "UI 自动化步骤组未完整执行"
+        elif missing_group_numbers:
+            if ui_status == 2:
+                status, actual = "fail", "映射到的 UI 步骤组没有完整执行记录"
             else:
-                status, actual = "skip", "无对应的 UI 自动化步骤"
-        elif not group_items and ui_status != 2 and index > actual_count:
-            status, actual = "skip", "UI 自动化执行在此步骤前已失败，未执行"
-        elif group_failed or not group_items:
-            status, actual = "fail", ui_error or alignment_error or "对应 UI 自动化步骤未全部通过"
+                status, actual = "skip", "对应 UI 步骤组尚未执行"
         else:
-            status, actual = "pass", "绑定 UI 自动化脚本步骤通过"
+            status, actual = "pass", f"映射的 {len(mapped_group_numbers)} 组 UI 步骤通过"
         step_results.append({
             "step_number": step.step_number,
             "description": step.description or "",
@@ -382,12 +427,11 @@ def _map_ui_script_results_to_testcase_steps(
 
     passed = (
         ui_status == 2
-        and not alignment_error
-        and bool(case_steps)
-        and len(step_results) == expected_count
+        and bool(ordered_steps)
+        and len(step_results) == len(ordered_steps)
         and all(item["status"] == "pass" for item in step_results)
     )
-    failure_reason = alignment_error or ui_error or "UI 自动化脚本存在失败或未执行步骤"
+    failure_reason = ui_error or "UI 自动化脚本存在失败或未执行步骤"
     return step_results, ("pass" if passed else "fail"), ("" if passed else failure_reason)
 
 
@@ -481,6 +525,8 @@ async def _run_testcase_with_bound_ui_script(
                 page_step = case_group.page_step
                 details = list(page_step.step_details.all())
                 ui_case_groups.append({
+                    "id": case_group.id,
+                    "case_sort": case_group.case_sort,
                     "name": page_step.name,
                     "description": page_step.description or "",
                     "operations": [detail.ope_key or "" for detail in details],
@@ -493,6 +539,8 @@ async def _run_testcase_with_bound_ui_script(
                 ui_status=ui_record.status,
                 ui_error=ui_record.error_message or "",
                 ui_case_groups=ui_case_groups,
+                ui_step_mapping=case.ui_step_mapping,
+                ui_test_case_id=ui_test_case_id,
             )
             summary = build_execution_result_report(
                 case,

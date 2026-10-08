@@ -258,7 +258,7 @@ class ScriptOnlyResultMappingTests(SimpleTestCase):
         self.assertEqual(status, "pass")
         self.assertEqual([item["status"] for item in results], ["pass", "pass"])
 
-    def test_authentication_prestep_group_zero_is_excluded_from_business_mapping(self):
+    def test_authentication_prestep_does_not_count_as_a_business_group(self):
         steps = [
             SimpleNamespace(step_number=index, description=f"业务步骤{index}", expected_result="通过")
             for index in range(1, 5)
@@ -298,9 +298,11 @@ class ScriptOnlyResultMappingTests(SimpleTestCase):
             {"step_id": "group3_4", "status": "success", "description": "断言工单可见"},
         ]
         ui_case_groups = [
-            {"name": "登录并进入我的工单", "description": "登录", "operations": ["assert_url"]},
-            {"name": "进入我的工单", "description": "打开菜单", "operations": ["click"]},
+            {"id": 101, "case_sort": 1, "name": "登录并进入我的工单", "description": "登录", "operations": ["assert_url"]},
+            {"id": 102, "case_sort": 2, "name": "进入我的工单", "description": "打开菜单", "operations": ["click"]},
             {
+                "id": 103,
+                "case_sort": 3,
                 "name": "按工单号查询并确认列表可见",
                 "description": "输入工单号并点击查询，页面文本可见该工单号",
                 "operations": ["fill", "click", "wait_for_visible", "assert_visible"],
@@ -313,6 +315,16 @@ class ScriptOnlyResultMappingTests(SimpleTestCase):
             raw_results,
             ui_status=2,
             ui_case_groups=ui_case_groups,
+            ui_test_case_id=55,
+            ui_step_mapping={
+                "version": 1,
+                "ui_test_case_id": 55,
+                "groups": [
+                    {"ui_case_step_id": 101, "functional_step_numbers": [1]},
+                    {"ui_case_step_id": 102, "functional_step_numbers": [2]},
+                    {"ui_case_step_id": 103, "functional_step_numbers": [3, 4]},
+                ],
+            },
         )
 
         self.assertEqual(status, "pass")
@@ -342,8 +354,71 @@ class ScriptOnlyResultMappingTests(SimpleTestCase):
         )
 
         self.assertEqual(status, "fail")
-        self.assertIn("无法逐步对应", reason)
-        self.assertEqual([item["status"] for item in results], ["fail", "skip"])
+        self.assertIn("缺少明确步骤映射", reason)
+        self.assertEqual([item["status"] for item in results], ["skip", "skip"])
+        self.assertTrue(all("映射" in item["actual_result"] for item in results))
+
+    def test_explicit_mapping_allows_different_group_and_functional_step_counts(self):
+        steps = [
+            SimpleNamespace(step_number=1, description="登录", expected_result="完成"),
+            SimpleNamespace(step_number=2, description="进入列表", expected_result="打开"),
+            SimpleNamespace(step_number=3, description="滚动并核对行数", expected_result="行数正确"),
+        ]
+        ui_case_groups = [
+            {"id": 201, "case_sort": 1},
+            {"id": 202, "case_sort": 2},
+        ]
+        mapping = {
+            "version": 1,
+            "ui_test_case_id": 90,
+            "groups": [
+                {"ui_case_step_id": 201, "functional_step_numbers": [1]},
+                {"ui_case_step_id": 202, "functional_step_numbers": [2, 3]},
+            ],
+        }
+        results, status, reason = _map_ui_script_results_to_testcase_steps(
+            steps,
+            [
+                {"step_id": "group1_1", "status": "success"},
+                {"step_id": "group2_1", "status": "success"},
+                {"step_id": "group2_2", "status": "success"},
+            ],
+            ui_status=2,
+            ui_case_groups=ui_case_groups,
+            ui_step_mapping=mapping,
+            ui_test_case_id=90,
+        )
+
+        self.assertEqual(status, "pass")
+        self.assertEqual(reason, "")
+        self.assertEqual([item["status"] for item in results], ["pass", "pass", "pass"])
+
+    def test_incomplete_explicit_mapping_marks_all_steps_uncovered(self):
+        ui_case_groups = [
+            {"id": 301, "case_sort": 1},
+            {"id": 302, "case_sort": 2},
+        ]
+        results, status, reason = _map_ui_script_results_to_testcase_steps(
+            self.steps,
+            [
+                {"step_id": "group1_1", "status": "success"},
+                {"step_id": "group2_1", "status": "success"},
+            ],
+            ui_status=2,
+            ui_case_groups=ui_case_groups,
+            ui_step_mapping={
+                "version": 1,
+                "ui_test_case_id": 91,
+                "groups": [
+                    {"ui_case_step_id": 301, "functional_step_numbers": [1]},
+                ],
+            },
+            ui_test_case_id=91,
+        )
+
+        self.assertEqual(status, "fail")
+        self.assertIn("映射不完整", reason)
+        self.assertEqual([item["status"] for item in results], ["skip", "skip"])
 
     def test_recorder_flattened_actions_are_grouped_by_step_id(self):
         results, status, reason = _map_ui_script_results_to_testcase_steps(
@@ -375,6 +450,26 @@ class ScriptOnlyResultMappingTests(SimpleTestCase):
         self.assertEqual(reason, "URL 断言失败")
         self.assertNotIn("无法逐步对应", reason)
         self.assertEqual([item["status"] for item in results], ["fail", "skip"])
+
+    def test_failed_run_does_not_mark_unmapped_tail_as_passed(self):
+        steps = [
+            SimpleNamespace(step_number=1, description="登录", expected_result="完成"),
+            SimpleNamespace(step_number=2, description="进入列表", expected_result="打开"),
+            SimpleNamespace(step_number=3, description="滚动列表", expected_result="完成"),
+        ]
+        results, status, reason = _map_ui_script_results_to_testcase_steps(
+            steps,
+            [
+                {"step_id": "group1_1", "status": "success"},
+                {"step_id": "group2_1", "status": "failed", "message": "页面超时"},
+            ],
+            ui_status=3,
+            ui_error="页面超时",
+        )
+
+        self.assertEqual(status, "fail")
+        self.assertEqual(reason, "页面超时")
+        self.assertEqual([item["status"] for item in results], ["pass", "fail", "skip"])
 
 
 class CompletionHelperProgressTests(SimpleTestCase):
