@@ -42,6 +42,22 @@ export function parseExecutionReportStatus(content: string): 'pass' | 'fail' | n
   return match[1] === '通过' ? 'pass' : 'fail';
 }
 
+/**
+ * Make the rendered report title agree with the structured run-record status.
+ * The model-authored markdown can contradict the executor's final status.
+ */
+export function normalizeExecutionReportStatus(
+  report: string,
+  status: 'pass' | 'fail'
+): string {
+  const title = status === 'pass' ? '通过' : '不通过';
+  return (report || '').replace(
+    /(^|\n)(\s*#{1,6}\s*)?测试执行结果[:：]\s*(通过|不通过|通过\/不通过)/,
+    (_match, lineBreak: string, heading: string | undefined) =>
+      `${lineBreak}${heading || ''}测试执行结果: ${title}`
+  );
+}
+
 /** 从用例管理「执行」用户消息中解析用例 ID */
 export function parseTestCaseIdFromExecuteMessage(text: string): number | null {
   const match = (text || '').match(

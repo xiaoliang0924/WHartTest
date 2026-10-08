@@ -200,6 +200,7 @@ import UiGenerationStatus from '@/components/testcase/UiGenerationStatus.vue';
 import { listLlmConfigs, partialUpdateLlmConfig } from '@/features/langgraph/services/llmConfigService';
 import { getUserPrompts } from '@/features/prompts/services/promptService';
 import type { ChatRequest, ChatHistoryMessage, ChatHistoryResponseData, ChatSessionDetail } from '@/features/langgraph/types/chat';
+import { normalizeExecutionReportStatus } from '@/features/langgraph/utils/executionReport';
 import type { LlmConfig } from '@/features/langgraph/types/llmConfig';
 import { useProjectStore } from '@/store/projectStore';
 import { useLlmConfigRefresh } from '@/composables/useLlmConfigRefresh';
@@ -1273,7 +1274,7 @@ const appendExecutionReportMessage = (summary: string, status: 'pass' | 'fail') 
   // 并将卡片移动到所有步骤输出之后。
   messages.value = messages.value.filter((m) => m.messageType !== 'execution_report');
   messages.value.push({
-    content: summary,
+    content: normalizeExecutionReportStatus(summary, status),
     isUser: false,
     time: getCurrentTime(),
     messageType: 'execution_report',
@@ -1396,9 +1397,9 @@ const attachExecutionReportIfMissing = async (chatSessionId: string) => {
         return false;
       }
 
-      const status = record.status === 'pass' || parseExecutionReportStatus(summary) === 'pass'
-        ? 'pass'
-        : 'fail';
+      const status = record.status === 'pass' || record.status === 'fail'
+        ? record.status
+        : parseExecutionReportStatus(summary) === 'pass' ? 'pass' : 'fail';
 
       if (stream) {
         applyTestCaseRunReportToStream(stream, record);
@@ -1482,13 +1483,15 @@ const startTestcaseResultPolling = (chatSessionId: string, caseId: number) => {
 
       const summary = extractFirstExecutionReport(record.summary);
       if (!isExecutionReportContent(summary)) return;
+      const reportStatus = record.status === 'pass' ? 'pass' : 'fail';
+      const canonicalSummary = normalizeExecutionReportStatus(summary, reportStatus);
       if (stream) {
         applyTestCaseRunReportToStream(stream, record);
         stream.isComplete = true;
       }
       if (reportChanged || !messages.value.some((message) =>
-        message.messageType === 'execution_report' && message.content === summary)) {
-        appendExecutionReportMessage(summary, record.status === 'pass' ? 'pass' : 'fail');
+        message.messageType === 'execution_report' && message.content === canonicalSummary)) {
+        appendExecutionReportMessage(canonicalSummary, reportStatus);
       }
       clearSessionRunning(chatSessionId);
       if (!isUiGenerationActive(record.ui_generation)) stopTestcaseResultPolling();

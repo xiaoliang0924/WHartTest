@@ -507,6 +507,8 @@ const agentStepLabel = computed(() => {
 });
 
 const executionReportTitle = computed(() => {
+  if (props.message.executionStatus === 'pass') return '测试执行结果：测试通过';
+  if (props.message.executionStatus === 'fail') return '测试执行结果：测试不通过';
   const match = props.message.content.match(/测试执行结果[:：]\s*(通过|不通过)/);
   if (match?.[1] === '通过') return '测试执行结果：测试通过';
   if (match?.[1] === '不通过') return '测试执行结果：测试不通过';

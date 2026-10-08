@@ -19,6 +19,7 @@ import {
 import {
   extractFirstExecutionReport,
   isExecutionReportContent,
+  normalizeExecutionReportStatus,
   parseExecutionReportStatus,
   stripExecutionReportFromText,
 } from '@/features/langgraph/utils/executionReport';
@@ -119,12 +120,15 @@ export function applyTestCaseRunReportToStream(
   const summary = extractFirstExecutionReport(rawSummary);
   if (!summary || !isExecutionReportContent(summary)) return;
 
-  const status = (testCaseRun as TestCaseRunPayload).status === 'pass'
-    || parseExecutionReportStatus(summary) === 'pass'
-    ? 'pass'
-    : 'fail';
+  const recordedStatus = (testCaseRun as TestCaseRunPayload).status;
+  const status = recordedStatus === 'pass' || recordedStatus === 'fail'
+    ? recordedStatus
+    : parseExecutionReportStatus(summary) === 'pass' ? 'pass' : 'fail';
 
-  stream.executionReport = { status, content: summary };
+  stream.executionReport = {
+    status,
+    content: normalizeExecutionReportStatus(summary, status),
+  };
   stream.content = stripExecutionReportFromText(stream.content || '');
   stream.messages = stream.messages.filter(
     (msg) => !(msg.type === 'ai' && isExecutionReportContent(msg.content))
