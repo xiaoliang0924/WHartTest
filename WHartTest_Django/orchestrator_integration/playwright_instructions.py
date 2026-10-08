@@ -75,6 +75,7 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
    - 禁止 `getByPlaceholder('请选择工单状态')`：Element Plus 下拉通常没有这个 placeholder。
 3. **筛选后验收**：列表列值必须符合该步预期；否则 `RESULT=FAIL` 并停止。
    断言区块/字段用 `helpers.assertPageShows(page, ['基本信息', '工单类型'])`。
+   **列表校验必须依据当前页面真实可见内容**：禁止猜测或硬编码 `.el-table__body`、`tbody tr` 等组件内部 CSS 结构；优先用工单号精确文本出现次数，并核对页面显示的结果总数/空结果提示。调用 `assertPageShows` 时必须检查其返回值，不能无条件输出 `RESULT=PASS`。
    禁止 `getByText('工单类型*')`：必填星号是独立节点，整段匹配会误判缺失。
    断言用 `.first()` / `getByRole`，避免 `getByText` 命中多个节点。
    「xx标签」以页面徽章文案为准（如高/中/低），不要只搜字段名本身。
