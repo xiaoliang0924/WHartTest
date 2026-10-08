@@ -613,6 +613,24 @@ def build_step_results_from_execution_evidence(
         return []
 
     steps = _testcase_steps(testcase)
+    screenshot_steps: set[int] = set()
+    try:
+        from testcases.models import TestCaseScreenshot
+
+        screenshot_steps = {
+            int(number)
+            for number in TestCaseScreenshot.objects.filter(
+                test_case_id=case_id,
+                step_number__isnull=False,
+            ).values_list("step_number", flat=True)
+        }
+    except Exception:
+        logger.debug(
+            "Could not load saved screenshot evidence for testcase %s",
+            case_id,
+            exc_info=True,
+        )
+
     results: list[dict[str, Any]] = []
     for step in steps:
         number = int(getattr(step, "step_number", 0) or 0)
@@ -658,6 +676,9 @@ def build_step_results_from_execution_evidence(
             step_status, actual = "pass", "通过"
         elif outcome == "fail":
             step_status, actual = "fail", actual or fail_reason or "步骤执行失败"
+        elif number in screenshot_steps:
+            step_status = "fail"
+            actual = "该步骤已有截图，但缺少对应的浏览器断言回执，无法确认通过"
         else:
             step_status, actual = "skip", "未执行"
         results.append(

@@ -2424,6 +2424,35 @@ def run_testcase_pre_data(
         resolution.input_params,
     )
     env_id = resolution.default_environment_id or plan.default_environment_id
+    if (
+        resolution.template_key == 'biz_create_and_assign'
+        and str(exec_params.get('assigneeName') or '').strip()
+    ):
+        # A testcase can infer an assignee name from its login precondition while
+        # the reusable template still contributes its default user ID. Resolve
+        # the pair together so we never create a ticket for one user and then
+        # search for it in another user's "My Tickets" page.
+        from .assignee_resolver import AssigneeResolutionError, resolve_assignee_params
+
+        try:
+            exec_params = resolve_assignee_params(
+                exec_params,
+                project_id=testcase.project_id,
+                environment_id=env_id,
+            )
+        except AssigneeResolutionError as exc:
+            if resolution.fail_fast:
+                return TestcasePreDataResult(
+                    run=None,
+                    resolution=resolution,
+                    blocked=True,
+                    block_message=f'前置数据准备失败: 处理人姓名与用户 ID 无法确认：{exc}',
+                )
+            logger.warning(
+                'Could not resolve assigned-user identity for testcase_id=%s: %s',
+                testcase.id,
+                exc,
+            )
     if exec_params.get('creatorUserId') not in (None, ''):
         try:
             exec_params = _inject_case_creator_token(
