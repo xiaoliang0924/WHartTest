@@ -2156,6 +2156,21 @@ async def _run_and_stream_remaining_helper_steps(
     }
 
 
+def _build_incomplete_ai_resume_prompt(*, next_step: int, total_steps: int, step_names: dict[int, str], test_case_id: int) -> str:
+    remaining = "\n".join(
+        f"{number}. {step_names.get(number, f'步骤{number}')}"
+        for number in range(next_step, total_steps + 1)
+    )
+    return (
+        "【用例步骤续跑指令】上一轮提前结束，以下步骤尚无浏览器工具执行证据。\n"
+        f"请在现有浏览器会话 session_id=case_{test_case_id} 中继续，不要重新登录或新建浏览器。\n"
+        "从第一条未完成步骤开始，严格按顺序实际操作；每步操作后确认页面状态，并按执行技能要求保存该步截图。\n"
+        "不要依据之前的文字报告推断步骤已经完成，不要编造操作结果、截图或通过标记。\n"
+        "所有列出的步骤都有对应工具执行结果后，才可以输出最终测试报告；遇到操作失败就停止并报告真实错误。\n"
+        f"尚待执行步骤（共 {total_steps} 步）：\n{remaining}"
+    )
+
+
 def _build_incomplete_testcase_resume_prompt(*, done_step: int, total_steps: int) -> str:
     next_step = done_step + 1
     return (
@@ -4370,6 +4385,9 @@ class AgentLoopStreamAPIView(View):
                                 done_step = _latest_passed_helper_step_from_messages(
                                     current_messages, test_case_id=test_case_id
                                 )
+                                # No tool evidence means no step is proven complete; resume from step 1.
+                                if done_step is None:
+                                    done_step = 0
                                 logger.warning(
                                     "AgentLoopStreamAPI: step coverage check "
                                     "case=%s done=%s total=%s msgs=%s",
@@ -4380,7 +4398,6 @@ class AgentLoopStreamAPIView(View):
                                 )
                                 if (
                                     total_case_steps
-                                    and done_step is not None
                                     and done_step < total_case_steps
                                 ):
                                     next_step = done_step + 1
@@ -4395,29 +4412,108 @@ class AgentLoopStreamAPIView(View):
                                     )
                                     auto_output = ""
                                     helper_step = done_step
-                                    auto_no_template = False
-                                    async for event in _run_and_stream_remaining_helper_steps(
-                                        test_case_id=int(test_case_id),
-                                        user_id=int(request.user.id),
-                                        project_id=int(project_id),
-                                        session_id=str(session_id),
-                                        from_step=next_step,
-                                        to_step=int(total_case_steps),
-                                        messages=current_messages,
-                                        previous_output=str(final_content or streamed_assistant_content or ""),
-                                        agent=agent if "agent" in locals() else None,
-                                        invoke_config=invoke_config if "invoke_config" in locals() else None,
-                                    ):
-                                        if event.get("type") == "_auto_run_bundle":
-                                            auto_output = event.get("output") or ""
-                                            helper_step = event.get("last_step") or helper_step
-                                            auto_no_template = bool(event.get("no_template"))
-                                            continue
-                                        yield create_flushed_sse(event)
-                                    if auto_no_template:
+                                    auto_no_template = execution_mode == "ai_only"
+                                    if not auto_no_template:
+                                        async for event in _run_and_stream_remaining_helper_steps(
+                                            test_case_id=int(test_case_id),
+                                            user_id=int(request.user.id),
+                                            project_id=int(project_id),
+                                            session_id=str(session_id),
+                                            from_step=next_step,
+                                            to_step=int(total_case_steps),
+                                            messages=current_messages,
+                                            previous_output=str(final_content or streamed_assistant_content or ""),
+                                            agent=agent if "agent" in locals() else None,
+                                            invoke_config=invoke_config if "invoke_config" in locals() else None,
+                                        ):
+                                            if event.get("type") == "_auto_run_bundle":
+                                                auto_output = event.get("output") or ""
+                                                helper_step = event.get("last_step") or helper_step
+                                                auto_no_template = bool(event.get("no_template"))
+                                                continue
+                                            yield create_flushed_sse(event)
+                                    if auto_no_template and execution_mode != "script_only":
+                                        step_names = await sync_to_async(_get_testcase_step_names)(
+                                            int(test_case_id)
+                                        )
+                                        resume_prompt = _build_incomplete_ai_resume_prompt(
+                                            next_step=next_step,
+                                            total_steps=int(total_case_steps),
+                                            step_names=step_names,
+                                            test_case_id=int(test_case_id),
+                                        )
+                                        yield create_sse_data({
+                                            "type": "testcase_progress",
+                                            "session_id": session_id,
+                                            "test_case_id": int(test_case_id),
+                                            "step": next_step,
+                                            "total_steps": int(total_case_steps),
+                                            "state": "running",
+                                            "message": f"前序步骤已完成，AI 正在继续执行步骤 {next_step}～{total_case_steps}",
+                                        })
+                                        try:
+                                            if should_stop(session_id):
+                                                incomplete_without_helper = (
+                                                    f"用户停止执行，步骤 {next_step}～{total_case_steps} 尚未完成"
+                                                )
+                                            else:
+                                                resume_config = dict(invoke_config)
+                                                resume_config["recursion_limit"] = min(
+                                                    int(resume_config.get("recursion_limit", 1000)), 48
+                                                )
+                                                await asyncio.wait_for(
+                                                    agent.ainvoke(
+                                                        {"messages": [SystemMessage(content=resume_prompt)]},
+                                                        config=resume_config,
+                                                    ),
+                                                    timeout=180,
+                                                )
+                                                resumed_messages = await _get_agent_state_messages(
+                                                    agent, invoke_config
+                                                )
+                                                resumed_done = _latest_passed_helper_step_from_messages(
+                                                    resumed_messages, test_case_id=test_case_id
+                                                )
+                                                if resumed_messages:
+                                                    all_messages = resumed_messages
+                                                if resumed_done is not None and resumed_done >= total_case_steps:
+                                                    done_step = resumed_done
+                                                    for msg in reversed(resumed_messages):
+                                                        if type(msg).__name__ != "AIMessage":
+                                                            continue
+                                                        if getattr(msg, "tool_calls", None):
+                                                            continue
+                                                        body = getattr(msg, "content", "") or ""
+                                                        if body:
+                                                            final_content = body if isinstance(body, str) else str(body)
+                                                            break
+                                                    yield create_sse_data({
+                                                        "type": "testcase_progress",
+                                                        "session_id": session_id,
+                                                        "test_case_id": int(test_case_id),
+                                                        "step": int(total_case_steps),
+                                                        "total_steps": int(total_case_steps),
+                                                        "state": "completed",
+                                                        "message": "剩余步骤已完成，正在核对执行证据",
+                                                    })
+                                                else:
+                                                    first_missing = (resumed_done or 0) + 1
+                                                    incomplete_without_helper = (
+                                                        f"纯 AI 续跑后仍缺少步骤 {first_missing}～{total_case_steps} 的工具执行证据"
+                                                    )
+                                        except asyncio.CancelledError:
+                                            raise
+                                        except Exception as ai_resume_err:
+                                            logger.warning(
+                                                "AgentLoopStreamAPI: AI step continuation failed case=%s: %s",
+                                                test_case_id, ai_resume_err, exc_info=True,
+                                            )
+                                            incomplete_without_helper = (
+                                                f"纯 AI 续跑失败，步骤 {next_step}～{total_case_steps} 未完成：{ai_resume_err}"
+                                            )
+                                    elif auto_no_template:
                                         incomplete_without_helper = (
-                                            f"步骤 {next_step}～{total_case_steps} 尚未完成；"
-                                            "纯 AI 执行不能以缺少固定脚本代替实际步骤"
+                                            f"步骤 {next_step}～{total_case_steps} 尚未完成；当前为仅脚本模式且没有可用固定脚本"
                                         )
                                     if auto_output:
                                         final_content = (
