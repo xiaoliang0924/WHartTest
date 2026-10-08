@@ -837,10 +837,13 @@ def ensure_execution_result_report(
     if stopped and "用户停止" not in combined:
         combined = f"{combined}\n执行已被用户停止".strip()
 
-    status = _infer_run_status(
-        transcript=combined, stopped=stopped, error_message=error_message
+    diagnostic_transcript = (
+        tool_transcript if execution_mode == "ai_only" else combined
     )
-    fail_ctx = _extract_fail_context(combined)
+    status = _infer_run_status(
+        transcript=diagnostic_transcript, stopped=stopped, error_message=error_message
+    )
+    fail_ctx = _extract_fail_context(diagnostic_transcript)
     fail_reason = error_message or fail_ctx["reason"]
     if stopped:
         fail_reason = "执行已被用户停止"
