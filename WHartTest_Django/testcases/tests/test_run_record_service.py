@@ -19,6 +19,7 @@ from testcases.models import (
     TestCaseRunRecord,
     TestCaseStep,
 )
+from testcases.serializers import TestCaseRunRecordSerializer
 from testcases.run_record_service import (
     attach_testcase_step_screenshot,
     append_testcase_tool_execution_output,
@@ -59,6 +60,47 @@ def _fake_case(**kwargs):
 
 
 class ExecutionResultReportTests(SimpleTestCase):
+    def test_run_record_serializer_rebuilds_summary_when_status_conflicts(self):
+        case = _fake_case(id=1313)
+        stale_summary = build_execution_result_report(
+            case,
+            status="pass",
+            step_results=[
+                {
+                    "step_number": step.step_number,
+                    "description": step.description,
+                    "expected_result": step.expected_result,
+                    "actual_result": "符合预期",
+                    "status": "pass",
+                }
+                for step in case.steps
+            ],
+            fail_reason="",
+        )
+        record = SimpleNamespace(
+            status="fail",
+            summary=stale_summary,
+            testcase=case,
+            step_results=[
+                {
+                    "step_number": step.step_number,
+                    "description": step.description,
+                    "expected_result": step.expected_result,
+                    "actual_result": "步骤已有浏览器执行记录，但没有返回明确断言回执"
+                    if step.step_number == 3
+                    else "通过",
+                    "status": "fail" if step.step_number == 3 else "pass",
+                }
+                for step in case.steps
+            ],
+        )
+
+        summary = TestCaseRunRecordSerializer().get_summary(record)
+
+        self.assertIn("## 测试执行结果: 不通过", summary)
+        self.assertIn("| 3 | 点击处理 | 失败：步骤已有浏览器执行记录", summary)
+        self.assertIn("步骤 3 失败", summary)
+
     def test_structured_tool_boundary_associates_result_before_screenshot(self):
         case = _fake_case(id=1777)
         transcript = (

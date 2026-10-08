@@ -1,3 +1,5 @@
+import re
+
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from .models import (
@@ -766,6 +768,39 @@ from urllib.parse import urlparse
 
 class TestCaseRunRecordSerializer(serializers.ModelSerializer):
     executor_detail = UserDetailSerializer(source="executor", read_only=True)
+    summary = serializers.SerializerMethodField()
+
+    def get_summary(self, obj):
+        """Repair stale model-authored summaries from the persisted run status."""
+        report_status = "通过" if obj.status == "pass" else "不通过"
+        if obj.status not in ("pass", "fail") or not obj.step_results:
+            return obj.summary
+        if re.search(
+            r"##\s*测试执行结果[:：]\s*" + report_status,
+            obj.summary or "",
+        ):
+            return obj.summary
+
+        from .run_record_service import build_execution_result_report
+
+        step_results = obj.step_results
+        first_failed = next(
+            (step for step in step_results if step.get("status") == "fail"),
+            None,
+        )
+        fail_reason = ""
+        if obj.status == "fail":
+            fail_reason = (
+                (first_failed or {}).get("actual_result")
+                or (first_failed or {}).get("error")
+                or "仍有步骤未执行完成"
+            )
+        return build_execution_result_report(
+            obj.testcase,
+            status=obj.status,
+            step_results=step_results,
+            fail_reason=fail_reason,
+        )
 
     class Meta:
         model = TestCaseRunRecord
