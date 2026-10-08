@@ -939,8 +939,8 @@ def _auto_upload_case_screenshots(
 
 
 _HELPER_STEP_CALL_RE = re.compile(
-    r"helpers\.(run(?:ClaimableTicket|TransferTicket|ProcessingHandover|CompleteTicket|TicketDetail|Overview|Notification)CaseStep|"
-    r"screenshotCaseStep)\s*\(\s*page\s*,\s*(\d+)",
+    r"helpers\.(run(?:ClaimableTicket|TransferTicket|ProcessingHandover|CompleteTicket|TicketDetail|Overview|Notification)CaseStep)"
+    r"\s*\(\s*page\s*,\s*(\d+)",
     re.IGNORECASE,
 )
 
