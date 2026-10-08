@@ -108,7 +108,25 @@ def _requested_testcase_step(code: str) -> Optional[int]:
     if re.search(r"\bhelpers\.loginStep1\s*\(", code or "", re.IGNORECASE):
         return 1
     numbers = {int(value) for value in _TESTCASE_STEP_CALL_RE.findall(code or "")}
-    return next(iter(numbers)) if len(numbers) == 1 else None
+    if len(numbers) != 1:
+        return None
+
+    # A screenshot call records evidence for a step; by itself it is not an
+    # execution attempt and cannot produce a browser assertion receipt. Avoid
+    # creating a tool-call boundary around screenshot-only follow-ups, which
+    # would otherwise replace an earlier navigation/result receipt with an
+    # artificial "missing receipt" failure.
+    executable_code = re.sub(
+        r"(?:await\s+)?helpers\.(?:screenshotCaseStep|screenshotNavStep)"
+        r"\s*\(\s*page\s*,\s*\d+\s*\)\s*;?",
+        "",
+        code or "",
+        flags=re.IGNORECASE,
+    )
+    executable_code = re.sub(r"[\s;]+", "", executable_code)
+    if not executable_code:
+        return None
+    return next(iter(numbers))
 
 
 def _tag_testcase_step_execution(output: str, code: str, testcase_id: Optional[int]) -> str:

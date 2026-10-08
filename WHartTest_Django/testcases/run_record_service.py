@@ -547,7 +547,7 @@ def build_step_results_from_execution_evidence(
     case_id = int(getattr(testcase, "id", 0) or 0)
     step_outcomes: dict[int, str] = {}
     step_actuals: dict[int, str] = {}
-    step_execution_blocks: dict[int, str] = {}
+    step_execution_blocks: dict[int, list[str]] = {}
 
     # The browser tool emits a boundary marker for each single-step command.
     # Use that boundary instead of relying on screenshots being printed before
@@ -567,7 +567,7 @@ def build_step_results_from_execution_evidence(
             else len(text)
         )
         block = text[marker.end():end]
-        step_execution_blocks[step_no] = block
+        step_execution_blocks.setdefault(step_no, []).append(block)
         result_matches = list(re.finditer(
             r"^RESULT=(PASS|FAIL)\b[:：]?([^\n]*)",
             block,
@@ -661,16 +661,22 @@ def build_step_results_from_execution_evidence(
         block = progress_blocks.get(step_no) or ""
         if block:
             last_in_block = None
+            last_reason = ""
             for result_match in re.finditer(
-                r"^RESULT=(PASS|FAIL)\b",
+                r"RESULT=(PASS|FAIL)\b[:：]?\s*([^\n\"}]*)",
                 block,
                 flags=re.IGNORECASE | re.MULTILINE,
             ):
                 last_in_block = result_match.group(1).lower()
+                last_reason = (result_match.group(2) or "").strip().rstrip(",")
             if last_in_block:
                 step_outcomes[step_no] = last_in_block
-                continue
+                if last_in_block == "fail" and last_reason:
+                    step_actuals[step_no] = last_reason
+            continue
         step_outcomes[step_no] = match.group(3).lower()
+        if match.group(4) and match.group(3).lower() == "fail":
+            step_actuals[step_no] = match.group(4).strip().rstrip(',"')
 
     # Authoritative per-step outcome: compare the final result marker with the final
     # Playwright timeout in that step. A helper may print RESULT=PASS and a later
@@ -700,35 +706,45 @@ def build_step_results_from_execution_evidence(
             if timeout_detail:
                 step_actuals[step_no] = timeout_detail.group(0).strip()
 
-    # A tool-call boundary is the strongest attribution available. Re-evaluate
-    # it last so a trailing timeout in the same call cannot be hidden by a PASS,
-    # and a PASS printed before its screenshot remains associated with the step.
-    for step_no, block in step_execution_blocks.items():
-        result_matches = list(re.finditer(
-            r"^RESULT=(PASS|FAIL)\b[:：]?([^\n]*)",
-            block,
-            flags=re.IGNORECASE | re.MULTILINE,
-        ))
-        last_result = result_matches[-1] if result_matches else None
-        if last_result:
+    # Re-evaluate all calls associated with a step together. A screenshot-only
+    # follow-up has no assertion receipt and must not erase an earlier result.
+    for step_no, blocks in step_execution_blocks.items():
+        explicit_receipts = []
+        trailing_timeouts = []
+        for block in blocks:
+            explicit_receipts.extend(re.finditer(
+                r"RESULT=(PASS|FAIL)\b[:：]?([^\n\"}]*)",
+                block,
+                flags=re.IGNORECASE | re.MULTILINE,
+            ))
+            trailing_timeouts.extend(
+                (block, match)
+                for match in re.finditer(
+                    r"(?:Timeout\s+\d+ms\s+exceeded|Playwright exec timed out|"
+                    r"locator\.[\w]+:\s*Timeout|浏览器已重置)",
+                    block,
+                    flags=re.IGNORECASE,
+                )
+            )
+        if explicit_receipts:
+            last_result = explicit_receipts[-1]
             step_outcomes[step_no] = last_result.group(1).lower()
             if last_result.group(1).lower() == "fail":
-                step_actuals[step_no] = (last_result.group(2) or "").strip()
-        timeout_matches = list(re.finditer(
-            r"(?:Timeout\s+\d+ms\s+exceeded|Playwright exec timed out|"
-            r"locator\.[\w]+:\s*Timeout|浏览器已重置)",
-            block,
-            flags=re.IGNORECASE,
-        ))
-        last_timeout = timeout_matches[-1] if timeout_matches else None
-        if last_timeout and (not last_result or last_timeout.start() > last_result.start()):
+                reason = (last_result.group(2) or "").strip().rstrip(',"')
+                if reason:
+                    step_actuals[step_no] = reason
+        elif trailing_timeouts:
+            timeout_block, last_timeout = trailing_timeouts[-1]
             step_outcomes[step_no] = "fail"
-            timeout_detail = _TIMEOUT_RE.search(block)
+            timeout_detail = _TIMEOUT_RE.search(timeout_block)
             step_actuals[step_no] = (
                 timeout_detail.group(0).strip()
                 if timeout_detail
                 else last_timeout.group(0).strip()
             )
+        elif step_no not in step_outcomes:
+            step_outcomes[step_no] = "fail"
+            step_actuals[step_no] = "步骤已有浏览器执行记录，但没有返回明确断言回执"
 
     if not step_outcomes:
         return []

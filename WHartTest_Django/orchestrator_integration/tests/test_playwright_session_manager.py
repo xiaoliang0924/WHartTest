@@ -43,10 +43,19 @@ class TestcasePlaywrightSessionRoutingTests(SimpleTestCase):
     def test_tags_output_with_case_step_boundary(self):
         output = _tag_testcase_step_execution(
             "RESULT=PASS: 列表已核对\n[CASE_SCREENSHOT] /tmp/case_42_step5.png",
+            "await helpers.fillFilterField(page, '工单号', '123'); "
             "await helpers.screenshotCaseStep(page, 5);",
             42,
         )
         self.assertTrue(output.startswith("[CASE_STEP_EXECUTION] case=42 step=5\n"))
+
+    def test_screenshot_only_call_does_not_create_step_execution_boundary(self):
+        output = _tag_testcase_step_execution(
+            "[CASE_SCREENSHOT] /tmp/case_42_step5.png",
+            "await helpers.screenshotCaseStep(page, 5);",
+            42,
+        )
+        self.assertEqual(output, "[CASE_SCREENSHOT] /tmp/case_42_step5.png")
 
     def test_does_not_duplicate_existing_step_boundary(self):
         output = _tag_testcase_step_execution(

@@ -123,6 +123,23 @@ class ExecutionResultReportTests(SimpleTestCase):
         self.assertEqual(by_step[2]["status"], "fail")
         self.assertIn("没有返回浏览器断言回执", by_step[2]["actual_result"])
 
+    def test_screenshot_only_followup_does_not_overwrite_navigation_failure_receipt(self):
+        case = _fake_case(id=1781)
+        transcript = (
+            "[执行进度] 正在执行步骤 2/4\n"
+            '{"command":"navigateByMenu(...)",'
+            '"result":"RESULT=FAIL: 导航菜单后页面未变化，当前=/work-order/my-tickets"}\n'
+            "[CASE_STEP_EXECUTION] case=1781 step=2\n"
+            "[CASE_SCREENSHOT] /tmp/case_1781_step2.png\n"
+        )
+        results = build_step_results_from_execution_evidence(
+            case, transcript, fail_reason=""
+        )
+        by_step = {item["step_number"]: item for item in results}
+        self.assertEqual(by_step[2]["status"], "fail")
+        self.assertIn("导航菜单后页面未变化", by_step[2]["actual_result"])
+        self.assertNotIn("缺少对应的浏览器断言回执", by_step[2]["actual_result"])
+
     def test_missing_ai_steps_do_not_pass_without_fixed_helper(self):
         outcome = ensure_execution_result_report(
             _fake_case(),

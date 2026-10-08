@@ -2719,7 +2719,7 @@ async function finishMenuNavigation(
     );
   } else if (pattern && !pattern.test(currentUrl)) {
     console.log(`RESULT=FAIL: 导航失败，期望菜单「${menuLabel}」URL 含 ${urlPattern}，当前=${page.url()}`);
-  } else if (!active && !changed) {
+  } else if (!active && !changed && !(pattern && pattern.test(currentUrl))) {
     console.log(
       `RESULT=FAIL: 导航菜单「${menuLabel}」后页面未变化，当前=${currentUrl}`,
     );
@@ -2759,7 +2759,10 @@ async function navigateByMenuPath(page, menuPath, urlPattern, fallbackPath) {
   const path = Array.isArray(menuPath) ? menuPath : [menuPath];
   const menuLabel = path.join(' > ');
   const leafName = path[path.length - 1];
-  const pattern = toUrlPattern(urlPattern);
+  // A route fallback is also concrete target-page evidence. If the current
+  // URL already matches it, verify page content and treat navigation as done
+  // instead of clicking a parent menu and reporting "page unchanged".
+  const pattern = toUrlPattern(urlPattern) || toUrlPattern(fallbackPath);
   for (let i = 0; i < 3; i += 1) {
     await dismissBlockingDialogs(page);
   }
@@ -2770,8 +2773,18 @@ async function navigateByMenuPath(page, menuPath, urlPattern, fallbackPath) {
     );
     return startUrl;
   }
-  if ((!pattern || pattern.test(startUrl)) && await isLeafMenuActive(page, leafName)) {
-    return page.url();
+  if (pattern && pattern.test(startUrl)) {
+    return finishMenuNavigation(
+      page,
+      menuLabel,
+      leafName,
+      urlPattern || fallbackPath,
+      pattern,
+      startUrl,
+    );
+  }
+  if (!pattern && await isLeafMenuActive(page, leafName)) {
+    return finishMenuNavigation(page, menuLabel, leafName, urlPattern, pattern, startUrl);
   }
 
   let origin = '';
@@ -2823,7 +2836,7 @@ async function navigateByMenuPath(page, menuPath, urlPattern, fallbackPath) {
     page,
     menuLabel,
     leafName,
-    urlPattern,
+    urlPattern || fallbackPath,
     pattern,
     startUrl,
   );
