@@ -22,6 +22,7 @@ from testcases.models import (
 from testcases.serializers import TestCaseRunRecordSerializer
 from testcases.run_record_service import (
     _append_bounded_tool_output,
+    _truncate_execution_log,
     attach_testcase_step_screenshot,
     append_testcase_tool_execution_output,
     build_execution_result_report,
@@ -175,6 +176,26 @@ class ExecutionResultReportTests(SimpleTestCase):
         self.assertLessEqual(len(bounded), 8000)
         self.assertTrue(bounded.startswith(marker))
         self.assertIn("CASE_STEP_EXECUTION", bounded)
+
+    def test_final_execution_log_truncation_keeps_latest_browser_error(self):
+        bounded = _truncate_execution_log("old context\n" + "x" * 9000 + "locator.click: Timeout 5000ms exceeded")
+        self.assertLessEqual(len(bounded), 8000)
+        self.assertIn("[OUTPUT_TRUNCATED: middle of execution transcript omitted]", bounded)
+        self.assertTrue(bounded.endswith("locator.click: Timeout 5000ms exceeded"))
+
+    def test_unmarked_browser_timeout_replaces_generic_missing_receipt(self):
+        case = _fake_case(id=1783)
+        transcript = (
+            "[CASE_STEP_EXECUTION] case=1783 step=2\n"
+            "locator.click: Timeout 5000ms exceeded.\n"
+            "Call log: waiting for getByRole('button', { name: '查询' })\n"
+        )
+        results = build_step_results_from_execution_evidence(
+            case, transcript, fail_reason=""
+        )
+        by_step = {item["step_number"]: item for item in results}
+        self.assertEqual(by_step[2]["status"], "fail")
+        self.assertIn("Timeout 5000ms exceeded", by_step[2]["actual_result"])
 
     def test_structured_tool_boundary_reports_missing_assertion_without_inventing_pass(self):
         case = _fake_case(id=1779)

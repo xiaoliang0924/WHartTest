@@ -376,6 +376,17 @@ def _append_bounded_tool_output(
     return prefix + "".join(marker + chunk for chunk in chunks)
 
 
+def _truncate_execution_log(text: str, *, max_chars: int = 8000) -> str:
+    """Keep the run context and latest browser error within the database field limit."""
+    value = str(text or "")
+    if len(value) <= max_chars:
+        return value
+    marker = "\n[OUTPUT_TRUNCATED: middle of execution transcript omitted]\n"
+    head_size = min(1800, max(0, (max_chars - len(marker)) // 3))
+    tail_size = max(0, max_chars - head_size - len(marker))
+    return value[:head_size] + marker + (value[-tail_size:] if tail_size else "")
+
+
 def collect_assistant_transcript(messages) -> str:
     parts: list[str] = []
     for msg in messages or []:
@@ -872,6 +883,26 @@ def build_step_results_from_execution_evidence(
                 "status": step_status,
             }
         )
+
+    # Legacy/browser calls can return a screenshot and then a Playwright
+    # exception without a CASE_STEP_EXECUTION marker. Keep the concrete error
+    # visible instead of reducing that failure to a generic receipt warning.
+    unexplained = [
+        item for item in results
+        if item.get("status") == "fail"
+        and any(token in str(item.get("actual_result") or "") for token in (
+            "没有返回浏览器断言回执",
+            "没有返回明确断言回执",
+            "缺少对应的浏览器断言回执",
+        ))
+    ]
+    timeout_matches = list(_TIMEOUT_RE.finditer(text))
+    if unexplained and timeout_matches:
+        if len(unexplained) == 1:
+            unexplained[0]["actual_result"] = timeout_matches[-1].group(0).strip()
+        elif len(timeout_matches) >= len(unexplained):
+            for item, match in zip(unexplained, timeout_matches[-len(unexplained):]):
+                item["actual_result"] = match.group(0).strip()
     return results
 
 
@@ -1743,7 +1774,7 @@ def finalize_testcase_run_record(
     final_execution_log = "\n\n[HYBRID_AGENT_FALLBACK]\n".join(
         part for part in (hybrid_script_trace, combined or error_message or "") if part
     )
-    record.execution_log = final_execution_log[:8000]
+    record.execution_log = _truncate_execution_log(final_execution_log)
     record.injected_report = outcome["injected"]
     record.data_usage = build_pre_data_usage(
         record.data_generation_run,

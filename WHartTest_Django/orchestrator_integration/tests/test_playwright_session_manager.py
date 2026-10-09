@@ -10,7 +10,9 @@ from orchestrator_integration.builtin_tools.persistent_playwright import (
     _SessionEntry,
 )
 from orchestrator_integration.builtin_tools.skill_tools import (
+    _cross_step_click_mismatch,
     _ensure_testcase_playwright_session_id,
+    _infer_pending_testcase_step,
     _requested_testcase_step,
     _tag_testcase_step_execution,
 )
@@ -48,6 +50,47 @@ class TestcasePlaywrightSessionRoutingTests(SimpleTestCase):
             42,
         )
         self.assertTrue(output.startswith("[CASE_STEP_EXECUTION] case=42 step=5\n"))
+
+    def test_inferred_step_override_tags_action_that_failed_before_screenshot(self):
+        output = _tag_testcase_step_execution(
+            "locator.click: Timeout 5000ms exceeded",
+            "await helpers.clickPageButton(page, '查询');",
+            42,
+            step_override=4,
+        )
+        self.assertTrue(output.startswith("[CASE_STEP_EXECUTION] case=42 step=4\n"))
+
+    def test_pending_step_follows_contiguous_persisted_pass_receipts(self):
+        record = MagicMock()
+        record.execution_log = (
+            "[CASE_STEP_EXECUTION] case=42 step=1\nRESULT=PASS: login\n"
+            "[CASE_STEP_EXECUTION] case=42 step=2\nRESULT=PASS: page\n"
+            "[CASE_STEP_EXECUTION] case=42 step=3\nRESULT=PASS: filtered\n"
+        )
+        record.testcase.steps.count.return_value = 4
+        queryset = MagicMock()
+        queryset.only.return_value.first.return_value = record
+        with patch("testcases.models.TestCaseRunRecord.objects.filter", return_value=queryset):
+            pending = _infer_pending_testcase_step(42, "session-42")
+        self.assertEqual(pending, 4)
+
+    def test_blocks_click_repeated_from_a_different_step(self):
+        case = MagicMock()
+        case.steps.filter.return_value.values_list.return_value.first.return_value = (
+            "点击查询按钮",
+            "列表筛选成功",
+        )
+        case.steps.exclude.return_value.values_list.return_value = [
+            (2, '点击筛选区"工单类型"'),
+        ]
+        queryset = MagicMock()
+        queryset.prefetch_related.return_value.first.return_value = case
+        with patch("testcases.models.TestCase.objects.filter", return_value=queryset):
+            mismatch = _cross_step_click_mismatch(
+                1379, 4, "await helpers.clickPageButton(page, '工单类型');"
+            )
+        self.assertIn("该控件属于步骤2", mismatch)
+        self.assertIn("已拦截", mismatch)
 
     def test_screenshot_only_call_does_not_create_step_execution_boundary(self):
         output = _tag_testcase_step_execution(

@@ -155,6 +155,16 @@ _TESTCASE_STEP_CALL_RE = re.compile(
     r"(?:screenshotCaseStep|screenshotNavStep|run[A-Za-z0-9_]*CaseStep)\s*\(\s*page\s*,\s*(\d+)",
     re.IGNORECASE,
 )
+_TESTCASE_BROWSER_ACTION_RE = re.compile(
+    r"(?:helpers\.(?:clickPageButton|navigateByMenu(?:Path)?|selectFormDropdownOption|"
+    r"selectDialogMultiSelect|fillFilterField|queryTicketInList|run[A-Za-z0-9_]*CaseStep|"
+    r"assertPageShows)|\.\s*(?:click|fill|check|uncheck|selectOption|press)\s*\()",
+    re.IGNORECASE,
+)
+_CLICK_PAGE_BUTTON_RE = re.compile(
+    r"helpers\.clickPageButton\s*\(\s*page\s*,\s*(['\"])(.*?)\1",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _requested_testcase_step(code: str) -> Optional[int]:
@@ -183,12 +193,106 @@ def _requested_testcase_step(code: str) -> Optional[int]:
     return next(iter(numbers))
 
 
-def _tag_testcase_step_execution(output: str, code: str, testcase_id: Optional[int]) -> str:
+def _tag_testcase_step_execution(
+    output: str,
+    code: str,
+    testcase_id: Optional[int],
+    *,
+    step_override: Optional[int] = None,
+) -> str:
     """Attach an explicit tool-call boundary to one-step browser executions."""
-    step = _requested_testcase_step(code)
+    step = _requested_testcase_step(code) or step_override
     if not testcase_id or not step or "[CASE_STEP_EXECUTION]" in (output or ""):
         return output
     return f"[CASE_STEP_EXECUTION] case={int(testcase_id)} step={step}\n{output}"
+
+
+def _infer_pending_testcase_step(
+    testcase_id: int,
+    chat_session_id: Optional[str],
+) -> Optional[int]:
+    """Infer the next unreceipted step from this run's already persisted tool outputs."""
+    if not chat_session_id:
+        return None
+    try:
+        from testcases.models import TestCaseRunRecord
+
+        record = TestCaseRunRecord.objects.filter(
+            session_id=str(chat_session_id), testcase_id=int(testcase_id), status="running"
+        ).only("execution_log").first()
+        if not record:
+            return None
+        case = record.testcase
+        total = case.steps.count()
+        if not total:
+            return None
+        text = str(record.execution_log or "").replace("\\n", "\n")
+        markers = list(re.finditer(
+            r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
+            text,
+            flags=re.IGNORECASE,
+        ))
+        outcomes: dict[int, str] = {}
+        for index, marker in enumerate(markers):
+            if int(marker.group(1)) != int(testcase_id):
+                continue
+            end = markers[index + 1].start() if index + 1 < len(markers) else len(text)
+            receipts = re.findall(
+                r"(?m)^\s*RESULT\s*=\s*(PASS|FAIL)\b",
+                text[marker.end():end],
+                flags=re.IGNORECASE,
+            )
+            if receipts:
+                outcomes[int(marker.group(2))] = receipts[-1].upper()
+        for step in range(1, total + 1):
+            if outcomes.get(step) != "PASS":
+                return step
+        return None
+    except Exception:
+        logger.debug("Could not infer pending testcase step case=%s", testcase_id, exc_info=True)
+        return None
+
+
+def _cross_step_click_mismatch(
+    testcase_id: Optional[int],
+    step: Optional[int],
+    code: str,
+) -> Optional[str]:
+    """Block an obvious repeat of a button that belongs to another testcase step."""
+    if not testcase_id or not step:
+        return None
+    match = _CLICK_PAGE_BUTTON_RE.search(code or "")
+    if not match:
+        return None
+    target = re.sub(r"\s+", " ", match.group(2)).strip()
+    if not target:
+        return None
+    try:
+        from testcases.models import TestCase
+
+        case = TestCase.objects.filter(pk=int(testcase_id)).prefetch_related("steps").first()
+        if not case:
+            return None
+        current_step_data = case.steps.filter(step_number=int(step)).values_list(
+            "description", "expected_result"
+        ).first() or ()
+        current_description = str(current_step_data[0] or "") if current_step_data else ""
+        current_text = " ".join(str(value or "") for value in current_step_data)
+        if target in current_description:
+            return None
+        other_steps = case.steps.exclude(step_number=int(step)).values_list(
+            "step_number", "description"
+        )
+        for other_step, description in other_steps:
+            if target in str(description or ""):
+                return (
+                    f"RESULT=FAIL: 当前是用例步骤{step}，脚本尝试点击「{target}」，"
+                    f"但该控件属于步骤{other_step}。已拦截重复/错步点击；"
+                    f"当前步骤要求：{current_text.strip()}"
+                )
+    except Exception:
+        logger.debug("Could not validate testcase click target case=%s", testcase_id, exc_info=True)
+    return None
 
 
 def _get_skill_runtime_env() -> dict[str, str]:
@@ -1537,6 +1641,7 @@ def get_skill_tools(
         skill_name: str,
         command: str,
         session_id: Optional[str] = None,
+        testcase_step: Optional[int] = None,
     ) -> str:
         """内部函数：执行单条 Skill 命令"""
         from skills.models import Skill
@@ -1952,7 +2057,10 @@ def get_skill_tools(
                         # Screenshot and RESULT lines can be emitted in either order;
                         # the report parser must associate them with this exact step.
                         cleaned_output = _tag_testcase_step_execution(
-                            cleaned_output, helper_code, current_test_case_id
+                            cleaned_output,
+                            helper_code,
+                            current_test_case_id,
+                            step_override=testcase_step,
                         )
                         # 固定用例 helper 的每一步都只执行一行
                         # runClaimableTicketCaseStep(page, N)。在此统一写入进度，
@@ -2054,7 +2162,10 @@ def get_skill_tools(
                 if not code_for_step:
                     code_for_step = inline_code or command
                 result_output = _tag_testcase_step_execution(
-                    result_output, code_for_step, current_test_case_id
+                    result_output,
+                    code_for_step,
+                    current_test_case_id,
+                    step_override=testcase_step,
                 )
             auto_upload_notes = ""
             if skill_name == "playwright-skill" and current_test_case_id:
@@ -2179,8 +2290,49 @@ def get_skill_tools(
                 if testcase_terminal_failure:
                     return testcase_terminal_failure
 
+            case_step = _requested_testcase_step(requested_command)
+            if (
+                current_test_case_id
+                and not case_step
+                and resolved_skill == "playwright-skill"
+                and _TESTCASE_BROWSER_ACTION_RE.search(requested_command or "")
+            ):
+                case_step = _infer_pending_testcase_step(
+                    int(current_test_case_id), current_chat_session_id
+                )
+            if resolved_skill == "playwright-skill" and case_step:
+                mismatch = _cross_step_click_mismatch(
+                    current_test_case_id, case_step, requested_command or ""
+                )
+                if mismatch:
+                    output = _tag_testcase_step_execution(
+                        mismatch,
+                        requested_command or "",
+                        current_test_case_id,
+                        step_override=case_step,
+                    )
+                    try:
+                        from testcases.run_record_service import append_testcase_tool_execution_output
+
+                        append_testcase_tool_execution_output(
+                            session_id=str(current_chat_session_id),
+                            testcase_id=int(current_test_case_id),
+                            output=output,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Could not persist blocked testcase action case=%s step=%s",
+                            current_test_case_id,
+                            case_step,
+                            exc_info=True,
+                        )
+                    return output
+
             output = _execute_single_skill_script(
-                resolved_skill, requested_command, resolved_session
+                resolved_skill,
+                requested_command,
+                resolved_session,
+                testcase_step=case_step,
             )
             if (
                 not current_test_case_id
@@ -2188,7 +2340,7 @@ def get_skill_tools(
             ):
                 return output
 
-            step = _requested_testcase_step(requested_command)
+            step = case_step
             if not step:
                 return output
 
