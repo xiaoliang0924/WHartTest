@@ -25,6 +25,7 @@ from asgiref.sync import sync_to_async
 from langchain_core.tools import tool as langchain_tool
 from django.conf import settings
 
+from ..testcase_receipts import normalize_testcase_receipts
 from .output_sanitizer import strip_terminal_control_sequences
 from .persistent_playwright import PlaywrightSessionManager, extract_runjs_args
 
@@ -201,10 +202,20 @@ def _tag_testcase_step_execution(
     step_override: Optional[int] = None,
 ) -> str:
     """Attach an explicit tool-call boundary to one-step browser executions."""
+    output = normalize_testcase_receipts(output, testcase_id)
     step = _requested_testcase_step(code) or step_override
-    if not testcase_id or not step or "[CASE_STEP_EXECUTION]" in (output or ""):
+    if not testcase_id or not step:
         return output
-    return f"[CASE_STEP_EXECUTION] case={int(testcase_id)} step={step}\n{output}"
+    if "[CASE_STEP_EXECUTION]" not in (output or ""):
+        output = f"[CASE_STEP_EXECUTION] case={int(testcase_id)} step={step}\n{output}"
+    if not re.search(r"(?m)^[ \t]*RESULT[ \t]*=[ \t]*(PASS|FAIL)\b", output):
+        output += (
+            f"\n【缺少步骤断言】步骤{step}的操作已返回，但还未核验预期。"
+            f"请保持当前浏览器会话，使用 step_number={step} 只读检查实际页面状态，"
+            "在工具 stdout 输出带步骤号的 RESULT=PASS/FAIL 回执。"
+            "不要重放已执行的提交、创建、删除等操作；无法核验时说明实际原因。"
+        )
+    return output
 
 
 def _infer_pending_testcase_step(
@@ -2300,6 +2311,7 @@ def get_skill_tools(
         commands: Optional[list[dict[str, str]]] = None,
         parallel: bool = True,
         max_workers: int = 5,
+        step_number: Optional[int] = None,
     ) -> str:
         """
         执行 Skill 命令，支持单个执行或批量并发执行。
@@ -2310,6 +2322,7 @@ def get_skill_tools(
         Args:
             skill_name: Skill 名称（单个执行时必填）
             command: Playwright 必须使用 node run.js "一行 JS 代码"；不要把 const/await 直接当 shell 命令。其他 Skill 传对应脚本命令，如 "python whart_tools.py --action get_projects"
+            step_number: 当前测试用例的步骤编号（含只读补验）；必须核验预期结果并在 stdout 输出 RESULT=PASS/FAIL: 步骤N...，操作成功或截图不能代替断言。
             session_id: playwright-skill 多步骤/用例执行时必填，全程使用相同值（建议 case_<用例ID>）以保持浏览器会话
             commands: 批量命令列表，每个元素包含 skill_name、command、session_id（可选）
                 示例: [
@@ -2346,7 +2359,9 @@ def get_skill_tools(
                 if testcase_terminal_failure:
                     return testcase_terminal_failure
 
-            case_step = _requested_testcase_step(requested_command)
+            case_step = _requested_testcase_step(requested_command) or (
+                step_number if isinstance(step_number, int) and step_number > 0 else None
+            )
             if (
                 current_test_case_id
                 and not case_step

@@ -307,7 +307,8 @@ def collect_tool_execution_transcript(messages) -> str:
                     parts.append(str(item["text"]))
         elif content:
             parts.append(str(content))
-    return "\n".join(parts)
+    from orchestrator_integration.testcase_receipts import normalize_testcase_receipts
+    return "\n".join(normalize_testcase_receipts(part) for part in parts)
 
 
 def append_testcase_tool_execution_output(
@@ -612,7 +613,7 @@ def build_step_results_from_execution_evidence(
         block = text[marker.end():end]
         step_execution_blocks.setdefault(step_no, []).append(block)
         result_matches = list(re.finditer(
-            r"^RESULT=(PASS|FAIL)\b[:：]?([^\n]*)",
+            r"^[ \t]*RESULT[ \t]*=[ \t]*(PASS|FAIL)\b[:：]?([^\n]*)",
             block,
             flags=re.IGNORECASE | re.MULTILINE,
         ))

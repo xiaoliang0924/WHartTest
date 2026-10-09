@@ -2150,7 +2150,10 @@ def _latest_passed_helper_step_from_messages(messages, *, test_case_id=None) -> 
             continue
         if getattr(msg, "name", "") != "execute_skill_script":
             continue
-        text = _tool_content_as_text(getattr(msg, "content", "") or "")
+        from .testcase_receipts import normalize_testcase_receipts
+        text = normalize_testcase_receipts(
+            _tool_content_as_text(getattr(msg, "content", "") or ""), test_case_id
+        )
         execution_markers = list(re.finditer(
             r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
             text,
@@ -2200,7 +2203,10 @@ def _explicitly_failed_helper_step_from_messages(messages, *, test_case_id=None)
             continue
         if getattr(msg, "name", "") != "execute_skill_script":
             continue
-        text = _tool_content_as_text(getattr(msg, "content", "") or "")
+        from .testcase_receipts import normalize_testcase_receipts
+        text = normalize_testcase_receipts(
+            _tool_content_as_text(getattr(msg, "content", "") or ""), test_case_id
+        )
         boundaries = list(re.finditer(
             r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
             text,
@@ -2240,7 +2246,10 @@ def _testcase_step_was_attempted(messages, *, step: int, test_case_id=None) -> b
             continue
         if getattr(msg, "name", "") != "execute_skill_script":
             continue
-        text = _tool_content_as_text(getattr(msg, "content", "") or "")
+        from .testcase_receipts import normalize_testcase_receipts
+        text = normalize_testcase_receipts(
+            _tool_content_as_text(getattr(msg, "content", "") or ""), test_case_id
+        )
         boundaries = re.findall(
             r"\[CASE_STEP_EXECUTION\]\s*case=(\d+)\s+step=(\d+)",
             text,
@@ -2496,6 +2505,7 @@ def _build_incomplete_ai_resume_prompt(*, next_step: int, total_steps: int, step
         "以下步骤原文和预期结果来自测试用例，是本次执行的唯一数据来源。工单号、账号、筛选值、名称等字面值必须逐字照用；禁止根据日期、历史会话或模型推测替换/编造。\n"
         "执行输入步骤后，必须读取对应输入框的实际 value 并与用例原文核对；不能只因 fill helper 没报错就判通过。\n"
         "不要依据之前的文字报告推断步骤已经完成，不要编造操作结果、截图或通过标记。\n"
+        "每次 execute_skill_script 必须传 step_number=当前用例步骤编号，包含只读补验调用。回执格式为 RESULT=PASS/FAIL: 步骤N...，N 必须是当前步骤号。"
         "每一步必须由浏览器工具输出明确的 RESULT=PASS 或 RESULT=FAIL 回执；截图和助手文字不能代替回执。所有列出的步骤都有对应工具执行结果后，才可以输出最终测试报告；遇到操作失败就停止并报告真实错误。\n"
         f"尚待执行步骤（共 {total_steps} 步）：\n{remaining}"
     )
@@ -2531,6 +2541,9 @@ def _extract_testcase_step_from_tool_call(tool_call: Any) -> Optional[int]:
     if isinstance(args, str):
         command = args
     elif isinstance(args, dict):
+        declared_step = args.get("step_number")
+        if isinstance(declared_step, int) and declared_step > 0:
+            return declared_step
         command = str(args.get("command") or "")
     else:
         command = ""
