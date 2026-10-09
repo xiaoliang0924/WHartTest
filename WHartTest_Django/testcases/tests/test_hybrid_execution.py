@@ -6,7 +6,7 @@ from unittest.mock import patch
 from projects.models import Project
 from testcases.models import TestCase as TestCaseModel, TestCaseModule, TestCaseStep
 from ui_automation.models import UiModule, UiPage, UiElement, UiPageSteps, UiPageStepsDetailed, UiTestCase, UiCaseStepsDetailed, UiExecutionRecord
-from testcases.ai_diagnosis_service import diagnose_execution_failure
+from testcases.ai_diagnosis_service import diagnose_execution_failure, extract_failure_context
 
 
 class HybridExecutionAndBindingTests(APITransactionTestCase):
@@ -231,6 +231,67 @@ class HybridExecutionAndBindingTests(APITransactionTestCase):
         self.assertEqual(diagnosis["healing_suggestion"]["repair_type"], "navigation_assertion")
         self.assertTrue(diagnosis["healing_suggestion"]["can_self_heal"])
         self.assertEqual(diagnosis["evidence"]["page_url"], self.ui_page.url)
+
+    def test_recorder_group_failure_maps_exact_operation_and_page_route(self):
+        """Runtime group/index evidence must map to the actual failed click."""
+        self.testcase.ui_test_case = self.ui_testcase
+        self.testcase.save()
+        self.ui_page.url = "https://example.test/work-order/tickets"
+        self.ui_page.save(update_fields=["url"])
+        self.ui_element.locator_value = "//li[@role='menuitem' and normalize-space()='工单中心']"
+        self.ui_element.save(update_fields=["locator_value"])
+        failed_menu_item = UiElement.objects.create(
+            page=self.ui_page,
+            name="工单列表菜单项",
+            locator_type="text",
+            locator_value="工单列表",
+            creator=self.user,
+        )
+        UiPageStepsDetailed.objects.create(
+            page_step=self.ui_page_step,
+            step_type=0,
+            element=failed_menu_item,
+            ope_key="click",
+            step_sort=2,
+        )
+        record = UiExecutionRecord.objects.create(
+            test_case=self.ui_testcase,
+            executor=self.user,
+            status=3,
+            error_message="locator.click: Timeout 15000ms exceeded; element is not visible",
+            step_results=[{
+                "step_id": "group1_1",
+                "status": "success",
+                "description": "goto",
+            }, {
+                "step_id": "group1_2",
+                "status": "success",
+                "description": "click",
+            }, {
+                # Synthetic goto is index 1; index 3 is stored click #2.
+                "step_id": "group1_3",
+                "status": "failed",
+                "description": "click",
+                "page_url": self.ui_page.url,
+                "error_message": (
+                    "locator.click: Timeout 15000ms exceeded; locator resolved to "
+                    "<li role=menuitem>; element is not visible"
+                ),
+            }],
+        )
+
+        failure = extract_failure_context(self.testcase, record)["failure_step"]
+        self.assertEqual(failure["element_id"], failed_menu_item.id)
+        self.assertEqual(failure["page_url"], self.ui_page.url)
+        self.assertEqual(failure["actual_url"], self.ui_page.url)
+
+        with patch("testcases.ai_diagnosis_service.LLMConfig.objects.filter") as configs:
+            configs.return_value.first.return_value = None
+            diagnosis = diagnose_execution_failure(
+                self.testcase, ui_record_id=record.id, user=self.user,
+            )
+        self.assertEqual(diagnosis["healing_suggestion"]["repair_type"], "navigation_assertion")
+        self.assertEqual(diagnosis["failure_step_info"]["element_id"], failed_menu_item.id)
 
     def test_navigation_repair_preserves_failure_when_routes_differ(self):
         self.testcase.ui_test_case = self.ui_testcase

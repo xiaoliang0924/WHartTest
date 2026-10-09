@@ -371,17 +371,36 @@ def extract_failure_context(
             target_step = case_steps[case_step_index]
             if target_step.page_step and target_step.page_step.page:
                 page_name = page_name or target_step.page_step.page.name
+                # Preserve the target route when resolving recorder runtime
+                # references; route-aware repair needs both actual and target URL.
+                page_url = page_url or target_step.page_step.page.url or ""
             details = list(target_step.page_step.step_details.all().select_related("element").order_by("step_sort"))
             if details:
-                matching_details = [detail for detail in details if detail.ope_key == operation_type]
-                if matching_details:
-                    first_detail = matching_details[0]
-                elif runtime_step_index is not None:
-                    # The recorder prepends one synthetic goto to each group.
-                    detail_index = max(runtime_step_index - 2, 0)
-                    first_detail = details[min(detail_index, len(details) - 1)]
-                else:
-                    first_detail = details[0]
+                first_detail = None
+                if runtime_step_index is not None:
+                    # run_steps reports one-based indexes. Some groups get a
+                    # synthetic goto prepended by the consumer, while groups
+                    # without a base URL do not. Detect it from the recorded
+                    # results instead of assuming a fixed offset. Resolve the
+                    # exact operation before falling back to operation type.
+                    group_prefix = f"group{runtime_group}_"
+                    synthetic_goto = any(
+                        str(result.get("step_id") or "") == f"{group_prefix}1"
+                        and (
+                            str(result.get("ope_key") or "").lower() == "goto"
+                            or str(result.get("description") or "").lower() == "goto"
+                        )
+                        for result in step_results
+                        if isinstance(result, dict)
+                    )
+                    detail_index = runtime_step_index - (2 if synthetic_goto else 1)
+                    if 0 <= detail_index < len(details):
+                        candidate = details[detail_index]
+                        if not operation_type or candidate.ope_key == operation_type:
+                            first_detail = candidate
+                if first_detail is None:
+                    matching_details = [detail for detail in details if detail.ope_key == operation_type]
+                    first_detail = matching_details[0] if matching_details else details[0]
                 operation_type = operation_type or first_detail.ope_key or ""
                 ope_value = ope_value or first_detail.ope_value
                 if first_detail.element:
