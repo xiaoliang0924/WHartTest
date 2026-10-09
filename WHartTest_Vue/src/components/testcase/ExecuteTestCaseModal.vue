@@ -243,11 +243,19 @@ const handleCancel = () => {
   }
 
   .bound-ui-info {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
+    min-width: 0;
+
+    :deep(.arco-tag) {
+      white-space: nowrap;
+    }
 
     .bound-name {
+      min-width: 0;
+      overflow-wrap: anywhere;
       font-weight: 500;
       color: var(--color-text-1);
     }
