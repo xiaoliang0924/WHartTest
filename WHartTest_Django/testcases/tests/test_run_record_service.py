@@ -21,6 +21,7 @@ from testcases.models import (
 )
 from testcases.serializers import TestCaseRunRecordSerializer
 from testcases.run_record_service import (
+    _append_bounded_tool_output,
     attach_testcase_step_screenshot,
     append_testcase_tool_execution_output,
     build_execution_result_report,
@@ -151,6 +152,29 @@ class ExecutionResultReportTests(SimpleTestCase):
         by_step = {item["step_number"]: item for item in results}
         self.assertEqual(by_step[2]["status"], "fail")
         self.assertIn("Timeout 15000ms exceeded", by_step[2]["actual_result"])
+
+    def test_timeout_remains_the_failure_reason_when_retry_guidance_contains_result_examples(self):
+        case = _fake_case(id=1782)
+        transcript = (
+            "[CASE_STEP_EXECUTION] case=1782 step=2\\n"
+            "locator.waitFor: Timeout 15000ms exceeded\\n"
+            "【脚本错误，请修正后重试】其它步骤截图；RESULT=FAIL 时禁止继续。"
+        )
+        results = build_step_results_from_execution_evidence(
+            case, transcript, fail_reason=""
+        )
+        by_step = {item["step_number"]: item for item in results}
+        self.assertEqual(by_step[2]["status"], "fail")
+        self.assertIn("Timeout 15000ms exceeded", by_step[2]["actual_result"])
+        self.assertNotIn("时禁止继续", by_step[2]["actual_result"])
+
+    def test_bounded_tool_log_keeps_a_parseable_delimiter_after_truncation(self):
+        marker = "\n[TESTCASE_TOOL_OUTPUT]\n"
+        first = _append_bounded_tool_output("", "old output")
+        bounded = _append_bounded_tool_output(first, "x" * 9000 + "CASE_STEP_EXECUTION")
+        self.assertLessEqual(len(bounded), 8000)
+        self.assertTrue(bounded.startswith(marker))
+        self.assertIn("CASE_STEP_EXECUTION", bounded)
 
     def test_structured_tool_boundary_reports_missing_assertion_without_inventing_pass(self):
         case = _fake_case(id=1779)

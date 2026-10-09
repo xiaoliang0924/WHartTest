@@ -114,6 +114,7 @@ _INSTRUCTIONAL_FAIL_RE = re.compile(
 )
 _NON_EXECUTION_RESULT_FAIL_RE = re.compile(
     r"RESULT=FAIL\s*(?:"
+    r"时禁止继续[^\n]*|"
     r"时立即判不通过，禁止自行补截图或改报通过|"
     r"必须停止，禁止改报通过|"
     r"[:：][^\n]*?(?:禁止\s*`?throw|通过则\s*`?RESULT=PASS|process\.exit|console\.log)"
@@ -336,12 +337,43 @@ def append_testcase_tool_execution_output(
         )
         if not record:
             return False
-        marker = "\n[TESTCASE_TOOL_OUTPUT]\n"
-        record.execution_log = (
-            str(record.execution_log or "") + marker + text
-        )[-8000:]
+        record.execution_log = _append_bounded_tool_output(
+            record.execution_log or "", text
+        )
         record.save(update_fields=["execution_log"])
     return True
+
+
+def _append_bounded_tool_output(
+    existing_log: str, output: str, *, max_chars: int = 8000
+) -> str:
+    """Keep tool-output delimiters intact when retaining the latest run evidence."""
+    marker = "\n[TESTCASE_TOOL_OUTPUT]\n"
+    existing = str(existing_log or "")
+    if marker in existing:
+        prefix, *chunks = existing.split(marker)
+    else:
+        prefix, chunks = existing, []
+    chunks.append(str(output or "").strip())
+
+    def size() -> int:
+        return len(prefix) + sum(len(marker) + len(chunk) for chunk in chunks)
+
+    while len(chunks) > 1 and size() > max_chars:
+        chunks.pop(0)
+    if size() > max_chars:
+        # Prefer the newest tool output over an old report or a partial marker.
+        prefix = ""
+        available = max(0, max_chars - len(marker))
+        current = chunks[-1]
+        if len(current) > available:
+            head_size = max(0, (available - 22) * 3 // 4)
+            tail_size = max(0, available - head_size - 22)
+            current = current[:head_size] + "\n[OUTPUT_TRUNCATED]\n" + (
+                current[-tail_size:] if tail_size else ""
+            )
+        chunks = [current]
+    return prefix + "".join(marker + chunk for chunk in chunks)
 
 
 def collect_assistant_transcript(messages) -> str:
