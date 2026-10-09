@@ -5,6 +5,36 @@ import re
 from urllib.parse import urljoin, urlsplit
 
 
+_VOLATILE_RECORD_TEXT = re.compile(
+    r"(?:\d{10,}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
+
+
+def drop_redundant_volatile_waits(
+    steps: list[dict], *, has_following_content_assertion: bool
+) -> list[dict]:
+    """Drop generated waits pinned to one observed record when a later assertion checks content.
+
+    Long numeric identifiers and UUIDs commonly change whenever test data is
+    prepared. A later content assertion remains responsible for proving the
+    result; deleting only this volatile wait avoids pinning the replay to an
+    earlier run's record ID without weakening that assertion.
+    """
+    if not has_following_content_assertion:
+        return steps
+    return [
+        step for step in steps
+        if not (
+            step.get('ope_key') == 'wait_for_visible'
+            and (step.get('element') or {}).get('locator_type') == 'text'
+            and _VOLATILE_RECORD_TEXT.fullmatch(
+                str((step.get('element') or {}).get('locator_value') or '').strip()
+            )
+        )
+    ]
+
+
 def same_route(left: str, right: str) -> bool:
     try:
         a, b = urlsplit(left), urlsplit(right)

@@ -918,7 +918,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         self._recorder_exec_user = user
         from .views import _resolve_recorder_skill_dir, _serialize_page_step_for_recorder, _auth_state_by_id
         from .recorder.session_manager import recorder_manager, RecorderSessionError
-        from .models import UiEnvironmentConfig, UiPage, UiPageSteps, UiTestCase, UiCaseStepsDetailed
+        from .models import (
+            UiEnvironmentConfig, UiPage, UiPageSteps, UiPageStepsDetailed,
+            UiTestCase, UiCaseStepsDetailed,
+        )
         import time as _time
 
         env_config = None
@@ -955,6 +958,16 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             if not groups:
                 await self._recorder_exec_error(kind, args, user, '用例没有可执行的页面步骤')
                 return
+            is_generated_ui_case = case.name.endswith(('（AI生成）', '(AI生成)'))
+            content_assertion_step_ids = set(await sync_to_async(lambda: list(
+                UiPageStepsDetailed.objects.filter(
+                    page_step_id__in=[page_step.id for page_step in groups],
+                    ope_key__in=(
+                        'assert_text', 'assert_contain_text', 'assert_value', 'assert_count',
+                    ),
+                )
+                .values_list('page_step_id', flat=True).distinct()
+            ))()) if is_generated_ui_case else set()
 
         # 生成用例回放不一定携带 env_config_id：先沿首步骤绑定的快照找环境，
         # 无快照时再按用例页面 URL 匹配项目环境，供自动登录配置使用。
@@ -1242,6 +1255,13 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     current_auth = pending_auth
                 steps = await sync_to_async(_serialize_page_step_for_recorder)(page_step)
                 from .replay_plan import prepare_authenticated_group
+                if is_generated_ui_case and any(
+                    later.id in content_assertion_step_ids for later in groups[group_index:]
+                ):
+                    from .replay_plan import drop_redundant_volatile_waits
+                    steps = drop_redundant_volatile_waits(
+                        steps, has_following_content_assertion=True,
+                    )
                 steps = prepare_authenticated_group(
                     steps, mode=getattr(page_step, 'authentication_mode', 'auto'),
                     login_profile=login_profile, first_group=group_index == 1,
