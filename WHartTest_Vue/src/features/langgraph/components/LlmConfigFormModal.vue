@@ -263,9 +263,11 @@ const text = computed(() => (
         testFailedWithReason: (reason: string) => `Test failed: ${reason}`,
         unknownError: 'Unknown error',
         providerOpenAICompatible: 'OpenAI Compatible',
+        providerAnthropic: 'Anthropic / Claude',
         providerDeepSeek: 'DeepSeek',
         providerQwen: 'Qwen',
         deepseekApiHint: 'DeepSeek is recommended with the official /v1 endpoint and the dedicated DeepSeek provider',
+        anthropicApiHint: 'Uses the native Anthropic Messages API. Claude Code gateways usually use the base URL without /v1.',
       }
     : {
         addConfig: '新增 LLM 配置',
@@ -313,15 +315,20 @@ const text = computed(() => (
         testFailedWithReason: (reason: string) => `测试失败: ${reason}`,
         unknownError: '未知错误',
         providerOpenAICompatible: 'OpenAI 兼容',
+        providerAnthropic: 'Anthropic / Claude',
         providerDeepSeek: 'DeepSeek',
         providerQwen: 'Qwen/通义千问',
         deepseekApiHint: 'DeepSeek 建议使用官方 /v1 地址，并选择专用 DeepSeek 供应商',
+        anthropicApiHint: '使用 Anthropic 原生 Messages API；Claude Code 中转地址通常填写不带 /v1 的根地址。',
       }
 ));
 
 const localizeProviderLabel = (value: string, fallback?: string) => {
   if (value === 'openai_compatible') {
     return text.value.providerOpenAICompatible;
+  }
+  if (value === 'anthropic') {
+    return text.value.providerAnthropic;
   }
   if (value === 'deepseek') {
     return text.value.providerDeepSeek;
@@ -336,6 +343,7 @@ const formRef = ref<FormInstance | null>(null);
 const modelOptions = ref<string[]>([]);
 const providerChoices = ref<Array<{ label: string; value: string }>>([
   { label: 'openai_compatible', value: 'openai_compatible' },
+  { label: 'anthropic', value: 'anthropic' },
   { label: 'deepseek', value: 'deepseek' },
   { label: 'qwen', value: 'qwen' },
 ]);
@@ -346,6 +354,7 @@ const providerOptions = computed(() => providerChoices.value.map((item) => ({
 const loadingModels = ref(false);
 const testingModel = ref(false);
 const DEEPSEEK_DEFAULT_API_URL = 'https://api.deepseek.com/v1';
+const ANTHROPIC_DEFAULT_API_URL = 'https://api.anthropic.com';
 const QWEN_DEFAULT_API_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const defaultFormData: CreateLlmConfigRequest = {
   config_name: '',
@@ -380,7 +389,9 @@ const formRules = computed<Record<string, FieldRule[]>>(() => ({
 }));
 
 const apiUrlPlaceholder = computed(() => (
-  formData.value.provider === 'deepseek'
+  formData.value.provider === 'anthropic'
+    ? ANTHROPIC_DEFAULT_API_URL
+    : formData.value.provider === 'deepseek'
     ? DEEPSEEK_DEFAULT_API_URL
     : formData.value.provider === 'qwen'
       ? QWEN_DEFAULT_API_URL
@@ -392,7 +403,9 @@ const apiKeyPlaceholder = computed(() => (
 ));
 
 const apiHintText = computed(() => (
-  formData.value.provider === 'deepseek'
+  formData.value.provider === 'anthropic'
+    ? text.value.anthropicApiHint
+    : formData.value.provider === 'deepseek'
     ? text.value.deepseekApiHint
     : formData.value.provider === 'qwen'
       ? text.value.qwenApiHint
@@ -434,6 +447,9 @@ const loadProviderOptions = async () => {
 };
 
 const handleProviderChange = (provider?: string) => {
+  if (provider === 'anthropic' && !formData.value.api_url) {
+    formData.value.api_url = ANTHROPIC_DEFAULT_API_URL;
+  }
   if (provider === 'deepseek' && !formData.value.api_url) {
     formData.value.api_url = DEEPSEEK_DEFAULT_API_URL;
   }
@@ -573,7 +589,8 @@ const fetchAvailableModels = async () => {
     const response = await fetchModels(
       formData.value.api_url,
       formData.value.api_key || undefined,
-      configId
+      configId,
+      formData.value.provider,
     );
 
     if (!isActiveModelRequest(sessionId, requestId)) {

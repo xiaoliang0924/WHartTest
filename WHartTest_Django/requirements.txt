@@ -67,10 +67,9 @@ langchain-deepseek==1.0.1
 # https://github.com/langchain-ai/langchain-qwq/blob/main/LICENSE
 langchain-qwq==0.3.4
 
-# LangChain Anthropic/Claude 支持（已移除 - 保留注释以便记录）
-# 如果将来需要使用 Anthropic/Claude，请取消注释以下依赖：
-# langchain-anthropic>=0.3.0
-# anthropic>=0.48.0
+# LangChain Anthropic/Claude 原生 Messages API 支持
+langchain-anthropic>=1.0.0,<2.0.0
+anthropic>=0.75.0,<1.0.0
 
 # LangChain核心库 - MIT许可证 (v1.x 重大升级)
 # https://github.com/langchain-ai/langchain/blob/master/libs/core/LICENSE

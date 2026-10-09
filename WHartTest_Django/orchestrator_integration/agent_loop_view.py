@@ -690,7 +690,7 @@ def _has_browser_execution_evidence(messages) -> bool:
     return False
 
 
-async def _force_save_generated_ui_case(*, llm, tools, messages) -> Dict[str, Any]:
+async def _force_save_generated_ui_case(*, llm, tools, messages, provider="openai_compatible") -> Dict[str, Any]:
     """Run a constrained second pass so generation is not left to the test agent's discretion."""
     save_tool = next(
         (tool for tool in (tools or []) if getattr(tool, "name", "") == "save_generated_ui_testcase"),
@@ -723,7 +723,10 @@ async def _force_save_generated_ui_case(*, llm, tools, messages) -> Dict[str, An
     ))
     human = HumanMessage(content="以下是本次已通过执行的原始证据，请据此保存 UI 自动化用例：\n\n" + observations)
     try:
-        bound_model = llm.bind_tools([save_tool], tool_choice="required")
+        # Anthropic Messages API calls this forced-tool mode "any"; OpenAI
+        # compatible APIs use "required". Both force the sole save tool.
+        tool_choice = "any" if provider == "anthropic" else "required"
+        bound_model = llm.bind_tools([save_tool], tool_choice=tool_choice)
         response = await asyncio.wait_for(bound_model.ainvoke([system, human]), timeout=180)
     except asyncio.TimeoutError:
         return {"status": "failed", "message": "生成模型在 180 秒内未返回，可使用本次执行记录重试生成。"}
@@ -1419,7 +1422,10 @@ async def _finalize_generated_ui_case(
 
     if not ui_case_id and record and record.status == "pass":
         generated = await _force_save_generated_ui_case(
-            llm=llm, tools=tools, messages=messages
+            llm=llm,
+            tools=tools,
+            messages=messages,
+            provider=getattr(active_config, "provider", "openai_compatible"),
         )
         reported_ui_case_id = None
         if generated.get("status") == "success":

@@ -326,6 +326,7 @@ class LLMConfigBundleRuntimeTests(TestCase):
             item["value"] for item in response.data["data"]["choices"]
         ]
         self.assertIn("deepseek", provider_values)
+        self.assertIn("anthropic", provider_values)
 
     @patch("langgraph_integration.deepseek_chat_model.ReasoningCompatibleChatDeepSeek")
     def test_create_llm_instance_uses_chatdeepseek_for_deepseek_provider(

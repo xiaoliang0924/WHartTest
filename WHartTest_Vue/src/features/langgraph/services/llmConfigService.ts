@@ -305,7 +305,8 @@ export async function patchLlmConfigBundle(
 export async function fetchModels(
   apiUrl: string,
   apiKey?: string,
-  configId?: number
+  configId?: number,
+  provider?: string,
 ): Promise<ApiResponse<{ models: string[] }>> {
   const response = await request<{ status: string; models?: string[]; message?: string }>({
     url: `${API_BASE_URL}/fetch_models/`,
@@ -314,6 +315,7 @@ export async function fetchModels(
       api_url: apiUrl,
       api_key: apiKey,
       config_id: configId,
+      provider,
     },
   });
 

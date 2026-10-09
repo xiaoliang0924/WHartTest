@@ -317,6 +317,7 @@ def create_llm_instance(active_config, temperature=0.7):
     根据配置创建LLM实例
     支持多供应商：
     - openai_compatible: ChatOpenAI（OpenAI兼容协议）
+    - anthropic: ChatAnthropic（Anthropic Messages API）
     - deepseek: ChatDeepSeek（DeepSeek 原生适配）
     - qwen: ChatQwen（阿里云百炼通义千问）
 
@@ -333,12 +334,46 @@ def create_llm_instance(active_config, temperature=0.7):
     max_retries = getattr(active_config, "max_retries", None) or 3
 
     base_url = (active_config.api_url or "").strip() or None
+    if provider == "anthropic" and base_url:
+        # Anthropic SDK appends /v1/messages itself; accept either the root URL
+        # recommended by Claude Code gateways or a conventional /v1 URL.
+        base_url = base_url.rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3]
     if provider == "deepseek" and base_url and base_url.rstrip("/") == "https://api.deepseek.com":
         base_url = "https://api.deepseek.com/v1"
     api_key = (active_config.api_key or "").strip()
 
     try:
-        if provider == "deepseek":
+        if provider == "anthropic":
+            try:
+                from langchain_anthropic import ChatAnthropic
+            except ImportError as e:
+                raise ImportError(
+                    "Anthropic provider requires langchain-anthropic and anthropic. "
+                    "Please install dependencies from requirements.txt."
+                ) from e
+
+            # The FoxCode Claude Code token uses Authorization: Bearer rather
+            # than Anthropic's standard x-api-key header. Keep ChatAnthropic's
+            # native Messages/tool-call handling while supplying that header.
+            llm_kwargs = {
+                "model": model_identifier,
+                "temperature": temperature,
+                "max_tokens": 8192,
+                "timeout": request_timeout,
+                "max_retries": max_retries,
+                "base_url": base_url,
+                "anthropic_api_key": api_key,
+            }
+            if api_key.startswith("sk-ant-oat"):
+                llm_kwargs["default_headers"] = {
+                    "Authorization": f"Bearer {api_key}"
+                }
+            llm = ChatAnthropic(
+                **llm_kwargs,
+            )
+        elif provider == "deepseek":
             try:
                 from .deepseek_chat_model import ReasoningCompatibleChatDeepSeek
             except ImportError as e:
@@ -650,12 +685,28 @@ class LLMConfigViewSet(BaseModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        provider = request.data.get("provider")
+        if not provider:
+            provider = config.provider if config_id else "openai_compatible"
+
         headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        if provider == "anthropic":
+            api_url = api_url.rstrip("/")
+            if api_url.endswith("/v1"):
+                api_url = api_url[:-3]
+            headers["anthropic-version"] = "2023-06-01"
+            if api_key.startswith("sk-ant-oat"):
+                headers["Authorization"] = f"Bearer {api_key}"
+            elif api_key:
+                headers["x-api-key"] = api_key
+            models_url = f"{api_url}/v1/models?limit=100"
+        else:
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            models_url = f"{api_url}/models"
 
         try:
-            resp = http_requests.get(f"{api_url}/models", headers=headers, timeout=10)
+            resp = http_requests.get(models_url, headers=headers, timeout=10)
             resp.raise_for_status()
             data = resp.json()
 
