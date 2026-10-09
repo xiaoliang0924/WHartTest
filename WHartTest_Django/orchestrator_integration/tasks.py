@@ -68,7 +68,7 @@ async def _generate_from_run(record_id, task_id):
     return await _finalize_generated_ui_case(
         llm=llm, tools=tools, messages=messages, test_case_id=record.testcase_id,
         project_id=record.testcase.project_id, record=record, user=record.executor,
-        background=True, on_stage=on_stage,
+        background=True, on_stage=on_stage, provider=getattr(config, "provider", "openai_compatible"),
     )
 
 

@@ -1413,7 +1413,8 @@ async def _queue_generated_ui_case(*, record, llm_config_id):
 
 
 async def _finalize_generated_ui_case(
-    *, llm, tools, messages, test_case_id, project_id, record, user=None, background=False, on_stage=None
+    *, llm, tools, messages, test_case_id, project_id, record, user=None, background=False, on_stage=None,
+    provider="openai_compatible",
 ) -> Dict[str, Any]:
     """Generate, replay-validate, bind, and report a UI case after success."""
     if not test_case_id:
@@ -1443,7 +1444,7 @@ async def _finalize_generated_ui_case(
             llm=llm,
             tools=tools,
             messages=messages,
-            provider=getattr(active_config, "provider", "openai_compatible"),
+            provider=provider,
         )
         reported_ui_case_id = None
         if generated.get("status") == "success":
