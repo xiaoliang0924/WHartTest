@@ -3876,7 +3876,9 @@ class AgentLoopStreamAPIView(View):
                 # 13. 配置调用参数
                 invoke_config = {
                     "configurable": {"thread_id": thread_id},
-                    "recursion_limit": 1000,  # 支持约500次工具调用
+                    # A testcase has a finite step list. Keep a generous ceiling for
+                    # normal exploration while preventing an unbounded model/tool loop.
+                    "recursion_limit": 128 if test_case_id else 1000,
                 }
                 input_messages = {"messages": [user_msg]}
 
@@ -4171,6 +4173,38 @@ class AgentLoopStreamAPIView(View):
                                                     str(content),
                                                     flags=re.IGNORECASE,
                                                 )
+                                                if (
+                                                    test_case_id
+                                                    and tool_name == "execute_skill_script"
+                                                    and "[CASE_TOOL_RETRY_LIMIT]" in str(content)
+                                                ):
+                                                    retry_failure = str(content)
+                                                    state_messages = await _get_agent_state_messages(
+                                                        agent, invoke_config
+                                                    )
+                                                    record, injected_report = await _complete_testcase_run_with_report(
+                                                        session_id=session_id,
+                                                        final_content=retry_failure,
+                                                        messages=state_messages,
+                                                        error_message=retry_failure,
+                                                        agent=agent,
+                                                        invoke_config=invoke_config,
+                                                    )
+                                                    if injected_report:
+                                                        yield create_sse_data(
+                                                            {"type": "stream", "data": "\n\n" + injected_report}
+                                                        )
+                                                    yield create_sse_data(
+                                                        {
+                                                            "type": "complete",
+                                                            "total_steps": step_count,
+                                                            "test_case_run": {
+                                                                "status": record.status if record else "fail",
+                                                                "summary": record.summary if record else retry_failure,
+                                                            },
+                                                        }
+                                                    )
+                                                    return
                                                 if (
                                                     test_case_id
                                                     and tool_name == "execute_skill_script"

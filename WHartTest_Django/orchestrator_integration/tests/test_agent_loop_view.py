@@ -38,6 +38,11 @@ from ..agent_loop_view import (
     _testcase_bound_ui_timeout_seconds,
     _mcp_tool_load_timeout_seconds,
 )
+from ..builtin_tools.skill_tools import (
+    _is_retryable_case_tool_error,
+    _normalize_testcase_skill_arguments,
+    _record_testcase_step_tool_result,
+)
 from ..middleware_config import build_dynamic_interrupt_on
 
 
@@ -84,6 +89,51 @@ class McpToolLoadTimeoutConfigTests(SimpleTestCase):
     def test_invalid_timeout_falls_back_to_default(self):
         with patch.dict(os.environ, {"MCP_TOOL_LOAD_TIMEOUT_SECONDS": "invalid"}):
             self.assertEqual(_mcp_tool_load_timeout_seconds(), 30.0)
+
+
+class TestcaseSkillDefaultsTests(SimpleTestCase):
+    def test_missing_skill_and_session_default_only_for_testcase_playwright(self):
+        self.assertEqual(
+            _normalize_testcase_skill_arguments(None, None, 175),
+            ("playwright-skill", "case_175"),
+        )
+        self.assertEqual(
+            _normalize_testcase_skill_arguments("whart-test", None, 175),
+            ("whart-test", None),
+        )
+        self.assertEqual(
+            _normalize_testcase_skill_arguments(None, None, None),
+            (None, None),
+        )
+
+    def test_browser_errors_are_retryable_but_passes_are_not(self):
+        self.assertTrue(
+            _is_retryable_case_tool_error(
+                "waiting for getByText('工单') to be visible: Timeout 10000ms exceeded"
+            )
+        )
+        self.assertFalse(_is_retryable_case_tool_error("RESULT=PASS: 页面正常"))
+        self.assertFalse(_is_retryable_case_tool_error("当前页面 URL: /work-order"))
+
+    def test_repeated_errors_stop_at_three_and_a_clean_result_resets_count(self):
+        failures = {}
+        error = "waiting for button to be visible: Timeout 10000ms exceeded"
+        self.assertIsNone(_record_testcase_step_tool_result(
+            failures, testcase_id=175, step=3, output=error
+        ))
+        self.assertIsNone(_record_testcase_step_tool_result(
+            failures, testcase_id=175, step=3, output=error
+        ))
+        terminal = _record_testcase_step_tool_result(
+            failures, testcase_id=175, step=3, output=error
+        )
+        self.assertIn("[CASE_TOOL_RETRY_LIMIT]", terminal)
+        self.assertIn("[CASE_STEP_EXECUTION] case=175 step=3", terminal)
+        self.assertIn("RESULT=FAIL", terminal)
+        self.assertIsNone(_record_testcase_step_tool_result(
+            failures, testcase_id=175, step=3, output="页面已加载"
+        ))
+        self.assertEqual(failures, {})
 
 
 class HitlToolSelectionTests(SimpleTestCase):

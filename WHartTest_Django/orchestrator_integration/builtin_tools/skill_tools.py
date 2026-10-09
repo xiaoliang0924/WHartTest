@@ -65,6 +65,60 @@ def _ensure_testcase_playwright_session_id(
     return f"case_{test_case_id}"
 
 
+def _normalize_testcase_skill_arguments(
+    skill_name: Optional[str], session_id: Optional[str], test_case_id: Optional[int]
+) -> Tuple[Optional[str], Optional[str]]:
+    """Fill the shared Playwright defaults only for testcase-bound executions."""
+    if not test_case_id:
+        return skill_name, session_id
+    resolved_skill = skill_name or "playwright-skill"
+    resolved_session = session_id
+    if resolved_skill == "playwright-skill" and not resolved_session:
+        resolved_session = f"case_{test_case_id}"
+    return resolved_skill, resolved_session
+
+
+def _is_retryable_case_tool_error(output: str) -> bool:
+    """Recognize browser/tool failures that can trap the model in repair loops."""
+    if re.search(r"RESULT\s*=\s*PASS\b", output or "", re.IGNORECASE):
+        return False
+    return bool(
+        re.search(
+            r"(?:命令执行失败\s*\(|错误:\s|Timeout\s+\d+ms exceeded|"
+            r"waiting for .* to be visible|locator\.[\w]+:.*(?:timeout|not visible)|"
+            r"strict mode violation|Target closed|browser has been closed)",
+            output or "",
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
+def _record_testcase_step_tool_result(
+    failures: dict[int, int],
+    *,
+    testcase_id: int,
+    step: int,
+    output: str,
+    max_attempts: int = 3,
+) -> Optional[str]:
+    """Track repeated hard errors and return a terminal failure at the limit."""
+    if not _is_retryable_case_tool_error(output):
+        failures.pop(step, None)
+        return None
+
+    failures[step] = failures.get(step, 0) + 1
+    if failures[step] < max_attempts:
+        return None
+
+    detail = re.sub(r"\s+", " ", str(output or "")).strip()[:600]
+    return (
+        f"[CASE_TOOL_RETRY_LIMIT]\n"
+        f"[CASE_STEP_EXECUTION] case={int(testcase_id)} step={step}\n"
+        f"RESULT=FAIL: 步骤{step}连续{failures[step]}次浏览器操作失败，已停止重试。"
+        f"最后错误：{detail}"
+    )
+
+
 _ARTIFACT_EXTENSIONS = {
     ".drawio",
     ".png",
@@ -1417,6 +1471,9 @@ def get_skill_tools(
     current_test_case_id = test_case_id
     current_chat_session_id = chat_session_id
     current_generate_ui_case = bool(generate_playwright_script and test_case_id)
+    testcase_step_failures: dict[int, int] = {}
+    testcase_terminal_failure: Optional[str] = None
+    testcase_failure_lock = threading.Lock()
 
     def _read_skill_content_sync(skill_name: str) -> str:
         """Read Skill content in a Django-safe synchronous worker."""
@@ -2105,6 +2162,54 @@ def get_skill_tools(
 
         from django.db import close_old_connections
 
+        def execute_case_aware(
+            requested_skill: Optional[str],
+            requested_command: Optional[str],
+            requested_session: Optional[str],
+        ) -> str:
+            nonlocal testcase_terminal_failure
+
+            resolved_skill, resolved_session = _normalize_testcase_skill_arguments(
+                requested_skill, requested_session, current_test_case_id
+            )
+            if not resolved_skill or not requested_command:
+                return "错误: 单个执行模式需要提供 skill_name 和 command 参数"
+
+            with testcase_failure_lock:
+                if testcase_terminal_failure:
+                    return testcase_terminal_failure
+
+            output = _execute_single_skill_script(
+                resolved_skill, requested_command, resolved_session
+            )
+            if (
+                not current_test_case_id
+                or resolved_skill != "playwright-skill"
+            ):
+                return output
+
+            step = _requested_testcase_step(requested_command)
+            if not step:
+                return output
+
+            with testcase_failure_lock:
+                retry_failure = _record_testcase_step_tool_result(
+                    testcase_step_failures,
+                    testcase_id=int(current_test_case_id),
+                    step=step,
+                    output=output,
+                )
+                if not retry_failure:
+                    return output
+                testcase_terminal_failure = retry_failure
+                logger.warning(
+                    "[execute_skill_script] testcase retry limit reached case=%s step=%s attempts=%s",
+                    current_test_case_id,
+                    step,
+                    testcase_step_failures[step],
+                )
+                return testcase_terminal_failure
+
         # 批量执行模式
         if commands:
             logger.info(
@@ -2119,6 +2224,9 @@ def get_skill_tools(
                 cmd_command = cmd.get("command")
                 cmd_session_id = cmd.get("session_id")
 
+                cmd_skill_name, cmd_session_id = _normalize_testcase_skill_arguments(
+                    cmd_skill_name, cmd_session_id, current_test_case_id
+                )
                 if not cmd_skill_name or not cmd_command:
                     return {
                         "index": idx,
@@ -2128,7 +2236,7 @@ def get_skill_tools(
                     }
 
                 try:
-                    result = _execute_single_skill_script(
+                    result = execute_case_aware(
                         cmd_skill_name, cmd_command, cmd_session_id
                     )
                     return {
@@ -2190,10 +2298,13 @@ def get_skill_tools(
             )
 
         # 单个执行模式
+        skill_name, session_id = _normalize_testcase_skill_arguments(
+            skill_name, session_id, current_test_case_id
+        )
         if not skill_name or not command:
             return "错误: 单个执行模式需要提供 skill_name 和 command 参数"
 
-        return _execute_single_skill_script(skill_name, command, session_id)
+        return execute_case_aware(skill_name, command, session_id)
 
     tools = [read_skill_content, execute_skill_script]
 
