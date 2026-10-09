@@ -370,6 +370,11 @@ class PlanExecutor:
         self._active_run: Optional[DataGenerationRun] = None
         self._claim_created_ticket_id: Any = None
         self._claim_created_ticket_no: Optional[str] = None
+        # Track tickets created by this plan independently of template_key.
+        # Older/custom plans can also create a ticket and then hit the same
+        # auto-assignment race as the built-in templates.
+        self._created_ticket_id: Any = None
+        self._created_ticket_no: Optional[str] = None
 
     def _ensure_claim_created_ticket(self, row: Optional[Dict[str, Any]] = None) -> None:
         if self.plan.template_key != 'biz_create_and_claim':
@@ -1195,13 +1200,21 @@ class PlanExecutor:
         if desired_user_id in (None, '', 0):
             raise DataGenerationError(f'缺少目标处理人 ID，无法从 {current_name} 改派给 {desired_label}')
 
-        if self.plan.template_key in {
+        built_in_create_template = self.plan.template_key in {
             'biz_create_and_transfer',
             'biz_create_and_claim',
             'biz_create_and_assign',
             'biz_create_assign_resolve',
             'biz_create_assign_close',
-        }:
+        }
+        tracked_created_ticket = (
+            self._created_ticket_id not in (None, '', 0)
+            and self._created_ticket_no
+            and str(self._created_ticket_id) == str(ticket_id)
+            and str(self._created_ticket_no) == str(row.get('ticketNo') or '')
+            and str(self._created_ticket_no) == str(self.context.get('ticketNo') or '')
+        )
+        if built_in_create_template or tracked_created_ticket:
             # Keep the ticket created by this run. Auto-assigned tickets can be
             # transferred by an administrator without logging in as the holder.
             if self.plan.template_key == 'biz_create_and_claim':
@@ -1272,9 +1285,9 @@ class PlanExecutor:
                     'created_ticket_transferred_to_source_assignee'
                     if self.plan.template_key == 'biz_create_and_transfer'
                     else (
-                        'created_ticket_transferred_to_assignee'
-                        if self.plan.template_key == 'biz_create_and_assign'
-                        else 'created_ticket_transferred_to_claim_assignee'
+                        'created_ticket_transferred_to_claim_assignee'
+                        if self.plan.template_key == 'biz_create_and_claim'
+                        else 'created_ticket_transferred_to_assignee'
                     )
                 ),
                 'ticketNo': created_no,
@@ -1978,6 +1991,16 @@ class PlanExecutor:
             extracted.update(_extract_values(response_body, custom_extract))
 
         self.context.update(extracted)
+
+        if str(step.get('name') or '').strip().startswith('创建工单'):
+            # Require both values to have been extracted from this successful
+            # create response; pre-existing input variables alone are not proof
+            # that this run owns the ticket.
+            created_ticket_id = extracted.get('ticketId')
+            created_ticket_no = extracted.get('ticketNo')
+            if created_ticket_id not in (None, '', 0) and created_ticket_no:
+                self._created_ticket_id = created_ticket_id
+                self._created_ticket_no = str(created_ticket_no)
 
         if (
             self.plan.template_key == 'biz_create_assign_close'

@@ -198,6 +198,101 @@ class PlanExecutorValidationTests(DjangoTestCase):
         transfer.assert_called_once()
         login.assert_not_called()
 
+    def test_custom_create_plan_reassigns_its_new_ticket_without_holder_login(self):
+        plan = DataGenerationPlan.objects.create(
+            project=self.project,
+            name='custom-create-and-assign',
+            template_key='',
+            default_environment=self.environment,
+            steps=[],
+            created_by=self.user,
+        )
+        executor = PlanExecutor(
+            plan,
+            triggered_by=self.user,
+            input_params={'assigneeUserId': 46, 'assigneeName': '李亮'},
+        )
+        executor.context.update(ticketId=5091, ticketNo='2026092459709012')
+        executor._created_ticket_id = 5091
+        executor._created_ticket_no = '2026092459709012'
+        original_row = {
+            'id': 5091,
+            'ticketNo': '2026092459709012',
+            'status': 'pending_process',
+            'assigneeUserId': 31,
+            'assigneeName': '张岩',
+        }
+        transferred_row = {**original_row, 'assigneeUserId': 46, 'assigneeName': '李亮'}
+
+        with patch.object(
+            executor, '_find_ticket_row_for_context', side_effect=[original_row, transferred_row],
+        ), patch(
+            'data_generation.services.ApiInterface.objects.filter',
+        ) as filter_interfaces, patch(
+            'api_environments.token_refresh.refresh_environment_tokens',
+            return_value={'adminToken': 'admin-token'},
+        ), patch.object(executor, '_run_named_ticket_mutation') as transfer, patch.object(
+            executor, '_login_any_username',
+        ) as holder_login:
+            filter_interfaces.return_value.first.return_value = MagicMock()
+            result = executor._reassign_if_wrong_assignee({
+                'type': 'api_call',
+                'name': '分配工单',
+                'variables': {'assigneeUserId': '{{assigneeUserId}}'},
+            })
+
+        self.assertEqual(result['reason'], 'created_ticket_transferred_to_assignee')
+        self.assertEqual(result['ticketNo'], '2026092459709012')
+        transfer.assert_called_once()
+        self.assertEqual(
+            transfer.call_args.kwargs['extra_variables']['assigneeToken'], 'admin-token',
+        )
+        holder_login.assert_not_called()
+
+    def test_custom_plan_cannot_use_admin_transfer_for_untracked_ticket(self):
+        plan = DataGenerationPlan.objects.create(
+            project=self.project,
+            name='custom-existing-ticket',
+            template_key='',
+            default_environment=self.environment,
+            steps=[],
+            created_by=self.user,
+        )
+        executor = PlanExecutor(plan, triggered_by=self.user)
+        executor.context.update(ticketId=5091, ticketNo='2026092459709012')
+        row = {
+            'id': 5091,
+            'ticketNo': '2026092459709012',
+            'status': 'pending_process',
+            'assigneeUserId': 31,
+            'assigneeName': '张岩',
+        }
+        with patch.object(executor, '_find_ticket_row_for_context', return_value=row), patch(
+            'data_generation.services.ApiInterface.objects.filter',
+        ) as filter_interfaces, patch.object(
+            executor, '_adopt_existing_ticket_for_desired_assignee', return_value=None,
+        ), patch.object(
+            executor, '_lookup_user_login_candidates', return_value=['802576'],
+        ), patch.object(
+            executor, '_login_any_username',
+            side_effect=DataGenerationError('登录未配置'),
+        ) as holder_login, patch(
+            'api_environments.token_refresh.refresh_environment_tokens',
+            return_value={'adminToken': 'admin-token'},
+        ), patch.object(
+            executor, '_run_named_ticket_mutation',
+            side_effect=DataGenerationError('取消分配接口 HTTP 500'),
+        ) as unassign:
+            filter_interfaces.return_value.first.return_value = MagicMock()
+            with self.assertRaisesMessage(DataGenerationError, '取消分配错误'):
+                executor._reassign_if_wrong_assignee({
+                    'type': 'api_call',
+                    'name': '分配工单',
+                    'variables': {'assigneeUserId': '{{assigneeUserId}}'},
+                })
+        unassign.assert_called_once()
+        holder_login.assert_called_once()
+
     def test_login_rate_limit_stops_candidate_loop(self):
         plan = DataGenerationPlan.objects.create(
             project=self.project, name='login-check', steps=[], created_by=self.user,
