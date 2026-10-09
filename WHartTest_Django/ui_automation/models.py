@@ -191,6 +191,11 @@ class UiPageSteps(models.Model):
     name = models.CharField(_('步骤名称'), max_length=64)
     description = models.TextField(_('步骤描述'), blank=True, null=True)
     run_flow = models.TextField(_('执行顺序描述'), null=True, blank=True)
+    authentication_mode = models.CharField(
+        _('认证执行方式'), max_length=16, default='auto',
+        choices=[('auto', _('自动协调')), ('environment', _('环境认证后验证')),
+                 ('script', _('脚本执行认证'))],
+    )
     flow_data = models.JSONField(_('流程图数据'), default=dict, blank=True)
     file_ids = models.JSONField(_('附件 file_id 列表'), default=list, blank=True)
     status = models.SmallIntegerField(_('状态'), choices=STATUS_CHOICES, default=0)

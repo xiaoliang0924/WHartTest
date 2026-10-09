@@ -118,6 +118,13 @@
         <a-form-item field="description" :label="pageText.description">
           <a-textarea v-model="formData.description" :placeholder="pageText.enterDescription" :auto-size="{ minRows: 2 }" />
         </a-form-item>
+        <a-form-item field="authentication_mode" :label="isEnglish ? 'Authentication' : '认证执行方式'">
+          <a-select v-model="formData.authentication_mode">
+            <a-option value="auto">{{ isEnglish ? 'Automatically coordinate authentication' : '自动协调认证' }}</a-option>
+            <a-option value="environment">{{ isEnglish ? 'Verify after environment login' : '环境登录后验证（仅断言）' }}</a-option>
+            <a-option value="script">{{ isEnglish ? 'Script handles login and role switching' : '脚本执行登录或角色切换' }}</a-option>
+          </a-select>
+        </a-form-item>
       
           <a-form-item label="附件">
             <FileAttachmentPicker
@@ -284,6 +291,7 @@ const formData = reactive<UiPageStepsForm>({
   name: '',
   description: '',
   run_flow: '',
+  authentication_mode: 'auto',
   flow_data: {},
 })
 
@@ -396,7 +404,7 @@ const onPageSizeChange = (pageSize: number) => {
 }
 
 const resetForm = () => {
-  Object.assign(formData, { project: projectId.value || 0, page: undefined, module: undefined, name: '', description: '', run_flow: '', flow_data: {}, file_ids: [] })
+  Object.assign(formData, { project: projectId.value || 0, page: undefined, module: undefined, name: '', description: '', run_flow: '', authentication_mode: 'auto', flow_data: {}, file_ids: [] })
   formRef.value?.clearValidate()
 }
 
@@ -435,6 +443,7 @@ const editPageStep = async (record: UiPageSteps) => {
         name: detail.name,
         description: detail.description || '',
         run_flow: detail.run_flow || '',
+        authentication_mode: detail.authentication_mode || 'auto',
         flow_data: detail.flow_data || {},
       })
     }
@@ -447,6 +456,7 @@ const editPageStep = async (record: UiPageSteps) => {
       name: record.name,
       description: record.description || '',
       run_flow: record.run_flow || '',
+      authentication_mode: record.authentication_mode || 'auto',
       flow_data: record.flow_data || {},
     })
   }

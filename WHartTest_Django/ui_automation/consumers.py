@@ -735,6 +735,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 duration = 0
             out.append({
                 'step_id': f"group{entry.get('group')}_{entry.get('index')}",
+                'detail_id': entry.get('detail_id'),
+                'element_id': entry.get('element_id'),
+                'ope_key': entry.get('ope_key') or '',
+                'synthetic': bool(entry.get('synthetic')),
                 'status': entry.get('status') or 'success',
                 'message': entry.get('message') or '',
                 'description': entry.get('description') or entry.get('ope_key') or '',
@@ -956,6 +960,27 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         # 无快照时再按用例页面 URL 匹配项目环境，供自动登录配置使用。
         storage_state = None
         first_auth_id = getattr(groups[0], 'auth_state_id', None) if groups else None
+        distinct_group_auth_ids = {
+            getattr(page_step, 'auth_state_id', None)
+            for page_step in groups
+            if getattr(page_step, 'auth_state_id', None)
+        }
+        # A single environment auto-login account cannot represent a workflow
+        # that intentionally switches roles. When generated groups have
+        # different saved login states, use those snapshots and the existing
+        # per-group context switch instead of logging in as the same account
+        # for every role.
+        use_group_auth_states = len(distinct_group_auth_ids) > 1
+        script_authentication = any(
+            getattr(group, 'authentication_mode', 'auto') == 'script' for group in groups
+        )
+        if script_authentication and any(
+            getattr(group, 'authentication_mode', 'auto') == 'environment' for group in groups
+        ):
+            await self._recorder_exec_error(
+                kind, args, user, '同一用例不能混用环境自动认证与脚本认证；角色切换请使用脚本或分别绑定登录态。'
+            )
+            return
         bound = None
         if first_auth_id:
             bound = await sync_to_async(_auth_state_by_id)(first_auth_id)
@@ -999,7 +1024,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 env_config_id = env_config.id
 
         login_profile = None
-        if env_config is not None and env_config.login_enabled:
+        if env_config is not None and env_config.login_enabled and not use_group_auth_states and not script_authentication:
             if not env_config.has_login_credentials:
                 await self._recorder_exec_error(
                     kind, args, user, '环境自动登录配置不完整：请填写账号和密码。'
@@ -1027,7 +1052,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     kind, args, user, '环境自动登录缺少登录页 URL，请在环境配置中填写。'
                 )
                 return
-        elif bound is not None:
+        elif bound is not None and not script_authentication:
             # 未配置账号登录时保留旧的 storageState 快照兼容行为。
             storage_state = bound.state_json
 
@@ -1048,11 +1073,6 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         def _is_login_url(url: str) -> bool:
             return bool(re.search(r'/+(?:login|signin|sign-in)(?:/|$|[?])', str(url or ''), re.I))
 
-        def _is_login_navigation(step: dict) -> bool:
-            return step.get('ope_key') == 'goto' and _is_login_url(
-                (step.get('ope_value') or {}).get('url')
-            )
-
         def _load_group_urls(page_steps) -> list:
             urls = []
             for ps in page_steps:
@@ -1062,11 +1082,12 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 if login_profile:
                     # 自动登录成功后，优先回到该步骤记录的业务页面；旧用例的页面 URL
                     # 可能仍是登录页，此时保持当前已登录页面，不要再导航回登录入口。
-                    url = page_url if page_url and not _is_login_url(page_url) else ''
-                elif env_config is not None and env_config.base_url:
-                    url = env_config.base_url
+                    from .replay_plan import same_route
+                    url = page_url if page_url and not (
+                        _is_login_url(page_url) or same_route(page_url, login_profile['url'])
+                    ) else ''
                 else:
-                    url = page_url
+                    url = page_url or (env_config.base_url if env_config else '')
                 urls.append(str(url or '').strip())
             return urls
 
@@ -1197,13 +1218,13 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             # 组间登录态切换与执行器同语义："向上匹配"——未绑定步骤沿用上一个
             # 已绑定步骤的登录态（不清理），仅生效登录态变化时才切换上下文
             pending_auth = (
-                None if login_profile else
+                None if login_profile or script_authentication else
                 (getattr(groups[0], 'auth_state_id', None) if groups else None)
             )
             current_auth = pending_auth  # start 时按首个生效登录态注入
             for page_step in ([] if failed_steps else groups):
                 group_index += 1
-                if not login_profile and getattr(page_step, 'auth_state_id', None):
+                if not login_profile and not script_authentication and getattr(page_step, 'auth_state_id', None):
                     pending_auth = getattr(page_step, 'auth_state_id', None) or None
                 if pending_auth != current_auth:
                     group_storage = None
@@ -1220,9 +1241,12 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                         )
                     current_auth = pending_auth
                 steps = await sync_to_async(_serialize_page_step_for_recorder)(page_step)
-                if login_profile:
-                    # 登录只执行一次；后续分组中的显式登录页 goto 同样会使认证失效。
-                    steps = [step for step in steps if not _is_login_navigation(step)]
+                from .replay_plan import prepare_authenticated_group
+                steps = prepare_authenticated_group(
+                    steps, mode=getattr(page_step, 'authentication_mode', 'auto'),
+                    login_profile=login_profile, first_group=group_index == 1,
+                    bound_authentication=bool(pending_auth),
+                )
                 logger.info(
                     '[recorder-exec] 第 %d/%d 组执行 page_step=%s steps=%d base_url=%s',
                     group_index, len(groups), page_step.id, len(steps), group_bases[group_index - 1],
@@ -1231,12 +1255,13 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 #（与执行器 total_steps 口径一致：sum(len(ps.steps))）
                 group_step_count = len(steps)
                 base_url = group_bases[group_index - 1]
-                if base_url:
+                if base_url and not (steps and steps[0].get('ope_key') == 'goto'):
                     steps = [{
                         'ope_key': 'goto',
                         'ope_value': {'url': base_url},
                         'step_type': 0,
                         'element': None,
+                        'synthetic': True,
                     }] + steps
                 total_steps += group_step_count
                 resp = await asyncio.to_thread(
@@ -1288,6 +1313,8 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                                 'screenshot': inspect_state.get('screenshot') or '',
                                 'captured_at': inspect_state.get('captured_at') or '',
                                 'failed_step': {
+                                    'detail_id': failed_entry.get('detail_id'),
+                                    'element_id': failed_entry.get('element_id'),
                                     'ope_key': failed_entry.get('ope_key') or '',
                                     'expected': failed_entry.get('expected') or '',
                                     'page_url': failed_entry.get('page_url') or '',
@@ -1350,24 +1377,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             # 存入执行记录 step_results——与执行器路径展示对齐
             case_step_results: list[dict] = []
             if kind != 'page_steps':
-                for entry in all_step_results:
-                    try:
-                        step_duration = round(float(entry.get('duration') or 0), 2)
-                    except (TypeError, ValueError):
-                        step_duration = 0
-                    case_step_results.append({
-                        'step_id': f"group{entry.get('group')}_{entry.get('index')}",
-                        'status': entry.get('status') or 'success',
-                        'message': entry.get('message') or '',
-                        'description': entry.get('description') or entry.get('ope_key') or '',
-                        'duration': step_duration,
-                        'element_found': (entry.get('status') == 'success'),
-                        'screenshot': entry.get('screenshot'),
-                        'page_url': entry.get('page_url') or '',
-                        'page_title': entry.get('page_title') or '',
-                        'ready_state': entry.get('ready_state') or '',
-                        'expected': entry.get('expected') or '',
-                    })
+                case_step_results = self._case_step_results_payload(all_step_results)
             if kind == 'page_steps':
                 result_args = {
                     'page_step_id': groups[0].id,

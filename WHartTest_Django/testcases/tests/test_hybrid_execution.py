@@ -238,8 +238,9 @@ class HybridExecutionAndBindingTests(APITransactionTestCase):
         self.testcase.save()
         self.ui_page.url = "https://example.test/work-order/tickets"
         self.ui_page.save(update_fields=["url"])
-        self.ui_element.locator_value = "//li[@role='menuitem' and normalize-space()='工单中心']"
-        self.ui_element.save(update_fields=["locator_value"])
+        first_click = self.ui_element
+        first_click.locator_value = "//li[@role='menuitem' and normalize-space()='工单中心']"
+        first_click.save(update_fields=["locator_value"])
         failed_menu_item = UiElement.objects.create(
             page=self.ui_page,
             name="工单列表菜单项",
@@ -268,7 +269,7 @@ class HybridExecutionAndBindingTests(APITransactionTestCase):
                 "status": "success",
                 "description": "click",
             }, {
-                # Synthetic goto is index 1; index 3 is stored click #2.
+                # index 1 is the synthetic goto; index 3 is stored click #2.
                 "step_id": "group1_3",
                 "status": "failed",
                 "description": "click",
@@ -281,6 +282,7 @@ class HybridExecutionAndBindingTests(APITransactionTestCase):
         )
 
         failure = extract_failure_context(self.testcase, record)["failure_step"]
+
         self.assertEqual(failure["element_id"], failed_menu_item.id)
         self.assertEqual(failure["page_url"], self.ui_page.url)
         self.assertEqual(failure["actual_url"], self.ui_page.url)
@@ -290,6 +292,7 @@ class HybridExecutionAndBindingTests(APITransactionTestCase):
             diagnosis = diagnose_execution_failure(
                 self.testcase, ui_record_id=record.id, user=self.user,
             )
+
         self.assertEqual(diagnosis["healing_suggestion"]["repair_type"], "navigation_assertion")
         self.assertEqual(diagnosis["failure_step_info"]["element_id"], failed_menu_item.id)
 
@@ -303,6 +306,8 @@ class HybridExecutionAndBindingTests(APITransactionTestCase):
             "root_cause_type": "SCRIPT_DEFECT",
             "healing_suggestion": {"repair_type": "navigation_assertion", "can_self_heal": True},
             "evidence": {
+                **self._failure_evidence(self.ui_page_step.step_details.get()),
+                "locator_value": "//li[@role='menuitem']",
                 "actual_url": "https://example.test/work-order/dashboard",
                 "page_url": "https://example.test/work-order/my-tickets",
             },
@@ -343,6 +348,7 @@ class HybridExecutionAndBindingTests(APITransactionTestCase):
                 "element_id": self.ui_element.id,
             },
             "evidence": {
+                **self._failure_evidence(detail),
                 "actual_url": "https://example.test/work-order/my-tickets?session=rotated",
                 "page_url": self.ui_page.url,
             },
@@ -368,6 +374,123 @@ class HybridExecutionAndBindingTests(APITransactionTestCase):
         self.assertIsNone(detail.element_id)
         self.assertEqual(detail.ope_value["expected"], self.ui_page.url)
         self.assertEqual(detail.ope_value["match"], "path")
+
+    def _failure_evidence(self, detail):
+        return {
+            "mapping_status": "resolved", "detail_id": detail.id,
+            "element_id": detail.element_id, "operation_type": detail.ope_key,
+            "locator_value": detail.element.locator_value if detail.element else "",
+            "error_message": "locator.click: Timeout; element is not visible",
+        }
+
+    def _runtime_failure(self, detail, **overrides):
+        self.testcase.ui_test_case = self.ui_testcase
+        self.testcase.save()
+        result = {
+            "step_id": "group1_2", "detail_id": detail.id,
+            "element_id": detail.element_id, "ope_key": detail.ope_key,
+            "status": "failed", "description": "业务元素",
+            "message": "locator.%s: Timeout 30000ms exceeded" % detail.ope_key,
+        }
+        result.update(overrides)
+        return UiExecutionRecord.objects.create(
+            test_case=self.ui_testcase, executor=self.user, status=3,
+            step_results=[{"step_id": "group1_1", "detail_id": None,
+                           "synthetic": True, "ope_key": "goto", "status": "success"}, result],
+        )
+
+    def test_filtered_login_navigation_does_not_shift_exact_failure_reference(self):
+        detail = self.ui_page_step.step_details.get()
+        detail.ope_key = "fill"
+        detail.save()
+        UiPageStepsDetailed.objects.create(
+            page_step=self.ui_page_step, step_sort=0, ope_key="goto",
+            ope_value={"url": "https://other-system.example/session"},
+        )
+        failure = extract_failure_context(self.testcase, self._runtime_failure(detail))["failure_step"]
+        self.assertEqual(failure["detail_id"], detail.id)
+        self.assertEqual(failure["element_id"], self.ui_element.id)
+        self.assertEqual(failure["operation_type"], "fill")
+
+    def test_synthetic_or_invalid_reference_never_falls_back_to_another_element(self):
+        detail = self.ui_page_step.step_details.get()
+        for reference in (None, 999999):
+            record = self._runtime_failure(detail, detail_id=reference)
+            failure = extract_failure_context(self.testcase, record)["failure_step"]
+            self.assertIsNone(failure["element_id"])
+            self.assertEqual(failure["mapping_status"], "unresolved")
+
+    def test_reference_to_other_case_is_not_used(self):
+        other_group = UiPageSteps.objects.create(
+            project=self.project, page=self.ui_page, module=self.ui_module,
+            name="Other case", creator=self.user,
+        )
+        other = UiPageStepsDetailed.objects.create(
+            page_step=other_group, ope_key="click", element=self.ui_element, step_sort=0,
+        )
+        failure = extract_failure_context(self.testcase, self._runtime_failure(other))["failure_step"]
+        self.assertIsNone(failure["element_id"])
+        self.assertEqual(failure["mapping_status"], "unresolved")
+
+    def test_locator_repair_cannot_target_later_element(self):
+        from asgiref.sync import async_to_sync
+        from orchestrator_integration.agent_loop_view import _apply_safe_generated_ui_repair
+        detail = self.ui_page_step.step_details.get()
+        later = UiElement.objects.create(
+            page=self.ui_page, name="Search", locator_type="id", locator_value="search", creator=self.user,
+        )
+        UiPageStepsDetailed.objects.create(
+            page_step=self.ui_page_step, element=later, ope_key="fill", step_sort=2,
+        )
+        diagnosis = {
+            "root_cause_type": "SCRIPT_DEFECT", "evidence": self._failure_evidence(detail),
+            "healing_suggestion": {"can_self_heal": True, "repair_type": "locator",
+                                   "element_id": later.id, "suggested_locator_type": "id",
+                                   "suggested_locator_value": "new-search"},
+        }
+        result = async_to_sync(_apply_safe_generated_ui_repair)(
+            project_id=self.project.id, ui_test_case_id=self.ui_testcase.id,
+            diagnosis=diagnosis, attempt=1,
+        )
+        self.assertEqual(result["status"], "skipped")
+        later.refresh_from_db()
+        self.assertEqual(later.locator_value, "search")
+
+    def test_locator_repair_clones_only_failed_detail_with_shared_element(self):
+        from asgiref.sync import async_to_sync
+        from orchestrator_integration.agent_loop_view import _apply_safe_generated_ui_repair
+        detail = self.ui_page_step.step_details.get()
+        later = UiPageStepsDetailed.objects.create(
+            page_step=self.ui_page_step, element=self.ui_element, ope_key="assert_visible", step_sort=2,
+        )
+        diagnosis = {
+            "root_cause_type": "SCRIPT_DEFECT", "evidence": self._failure_evidence(detail),
+            "healing_suggestion": {"can_self_heal": True, "repair_type": "locator",
+                                   "element_id": self.ui_element.id, "suggested_locator_type": "id",
+                                   "suggested_locator_value": "fixed-login"},
+        }
+        result = async_to_sync(_apply_safe_generated_ui_repair)(
+            project_id=self.project.id, ui_test_case_id=self.ui_testcase.id,
+            diagnosis=diagnosis, attempt=1,
+        )
+        self.assertEqual(result["status"], "applied")
+        detail.refresh_from_db()
+        later.refresh_from_db()
+        self.assertNotEqual(detail.element_id, self.ui_element.id)
+        self.assertEqual(later.element_id, self.ui_element.id)
+        self.ui_element.refresh_from_db()
+        self.assertEqual(self.ui_element.locator_value, "//button[@id='old-login-btn']")
+
+    def test_missing_machine_mapping_prevents_automatic_repair(self):
+        from asgiref.sync import async_to_sync
+        from orchestrator_integration.agent_loop_view import _apply_safe_generated_ui_repair
+        result = async_to_sync(_apply_safe_generated_ui_repair)(
+            project_id=self.project.id, ui_test_case_id=self.ui_testcase.id,
+            diagnosis={"root_cause_type": "SCRIPT_DEFECT", "healing_suggestion": {
+                "can_self_heal": True, "element_id": self.ui_element.id,
+                "suggested_locator_type": "id", "suggested_locator_value": "new"}}, attempt=1,
+        )
+        self.assertEqual(result["status"], "skipped")
 
     def test_apply_healing_to_element(self):
         """测试一键应用自愈建议更新 UI 元素定位"""

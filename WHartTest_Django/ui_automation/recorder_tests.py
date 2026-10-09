@@ -894,6 +894,87 @@ class RecorderBrowserExecTests(TestCase):
         result = next(data for data in layer.sent if data.get('data', {}).get('func_name') == 'u_case_result')
         self.assertEqual(result['data']['args']['status'], 'success')
 
+    def test_environment_login_does_not_replay_same_account_credentials(self):
+        from unittest.mock import patch
+        from ui_automation.models import UiExecutionRecord
+        self.env.login_enabled = True
+        self.env.login_url = 'http://env.local/auth/session'
+        self.env.login_username = 'qa-user'
+        self.env.login_password_encrypted = 'fixture-encrypted'
+        self.env.save()
+        self.page.url = 'http://env.local/dashboard'
+        self.page.save()
+        self.page_step.step_details.all().delete()
+        account = UiElement.objects.create(
+            page=self.page, name='Account', locator_type='id', locator_value='account', creator=self.user,
+        )
+        password = UiElement.objects.create(
+            page=self.page, name='Password', locator_type='css', locator_value='input[type="password"]', creator=self.user,
+        )
+        submit = UiElement.objects.create(
+            page=self.page, name='Sign in', locator_type='id', locator_value='submit', creator=self.user,
+        )
+        definitions = [
+            ('goto', None, {'url': self.env.login_url}),
+            ('fill', account, {'value': 'qa-user'}),
+            ('fill', password, {'value': '${{password}}'}),
+            ('click', submit, {}),
+            ('assert_url', None, {'expected': self.page.url, 'match': 'path'}),
+        ]
+        details = [UiPageStepsDetailed.objects.create(
+            page_step=self.page_step, step_sort=i, ope_key=key, element=element, ope_value=value,
+        ) for i, (key, element, value) in enumerate(definitions)]
+        consumer, session, _received, _layer = self._consumer_env()
+        original_request = session.request
+
+        def request(method, params=None, timeout=None):
+            if method == 'run_steps':
+                session.requests.append((method, params))
+                return {'ok': True, 'state': {'executed': len(params['steps']), 'failed': False,
+                    'step_results': [dict(step, index=i + 1, status='success')
+                                     for i, step in enumerate(params['steps'])]}}
+            return original_request(method, params, timeout)
+        session.request = request
+
+        async def scenario():
+            await consumer.handle_execute_test_case(
+                {'case_id': self.case.id, 'env_config_id': self.env.id,
+                 'actuator_id': 'recorder-browser'}, 'alice',
+            )
+            if consumer._recorder_exec_task is not None:
+                await asyncio.wait_for(consumer._recorder_exec_task, timeout=15)
+        with patch.object(UiEnvironmentConfig, 'get_login_password', return_value='fixture-secret'):
+            self._run(scenario)()
+        steps = next(params['steps'] for method, params in session.requests if method == 'run_steps')
+        self.assertEqual([step['ope_key'] for step in steps], ['goto', 'assert_url'])
+        self.assertEqual(steps[-1]['detail_id'], details[-1].id)
+        record = UiExecutionRecord.objects.get(test_case=self.case)
+        self.assertEqual(record.status, 2)
+        self.assertEqual(record.step_results[-1]['detail_id'], details[-1].id)
+        self.assertEqual(record.step_results[-1]['ope_key'], 'assert_url')
+        self.assertIsNone(record.step_results[-1]['element_id'])
+        self.assertTrue(record.step_results[-2]['synthetic'])
+        self.assertNotIn('fixture-secret', str(record.step_results))
+
+    def test_script_authentication_disables_environment_login_and_snapshot(self):
+        self.page_step.authentication_mode = 'script'
+        self.page_step.save()
+        self.env.login_enabled = True
+        self.env.save()
+        consumer, session, _received, _layer = self._consumer_env()
+        async def scenario():
+            await consumer.handle_execute_test_case(
+                {'case_id': self.case.id, 'env_config_id': self.env.id,
+                 'actuator_id': 'recorder-browser'}, 'alice',
+            )
+            if consumer._recorder_exec_task is not None:
+                await asyncio.wait_for(consumer._recorder_exec_task, timeout=15)
+        self._run(scenario)()
+        self.assertNotIn('login', [method for method, _params in session.requests])
+        start = next(params for method, params in session.requests if method == 'start')
+        self.assertNotIn('storage_state', start)
+        self.assertTrue(any(method == 'run_steps' for method, _params in session.requests))
+
     def test_failed_environment_login_persists_redacted_diagnostics_and_screenshot(self):
         """登录 RPC 失败时把脱敏诊断和截图带入执行记录，不执行业务步骤。"""
         from unittest.mock import patch
@@ -958,6 +1039,10 @@ class RecorderBrowserExecTests(TestCase):
         第 3 步切换一次上下文（注入 B），第 2/4 步沿用不清空（与执行器同语义）。"""
         from ui_automation.models import UiCaseStepsDetailed, UiAuthState, UiTestCase
         env_a = self.env
+        # Multiple per-group role states must take precedence over the
+        # environment's single-account automatic login profile.
+        env_a.login_enabled = True
+        env_a.save(update_fields=['login_enabled'])
         auth_a = UiAuthState.objects.create(
             env_config=env_a, name='登录态A', state_json={'cookies': [{'name': 'A'}]}, creator=self.user,
         )

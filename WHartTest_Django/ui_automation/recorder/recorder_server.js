@@ -2203,6 +2203,9 @@ async function cmdRunSteps(params) {
       const stepInfo = steps[i] || {};
       const resultEntry = {
         index: i + 1,
+        detail_id: stepInfo.detail_id || null,
+        element_id: stepInfo.element_id || null,
+        synthetic: Boolean(stepInfo.synthetic),
         ope_key: String(stepInfo.ope_key || ''),
         // 与执行器 description 同源：元素名称优先，回退步骤描述/操作名
         description: String(

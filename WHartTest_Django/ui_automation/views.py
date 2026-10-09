@@ -491,6 +491,7 @@ class UiPageStepsViewSet(viewsets.ModelViewSet):
                 name=candidate_name,
                 description=source.description,
                 run_flow=source.run_flow,
+                authentication_mode=source.authentication_mode,
                 flow_data=deepcopy(source.flow_data or {}),
                 file_ids=deepcopy(source.file_ids or []),
                 status=0,
@@ -1650,6 +1651,8 @@ def _serialize_page_step_for_recorder(page_step: UiPageSteps) -> list[dict]:
             except Exception as exc:
                 logger.warning('录制器上传步骤解析文件失败: %s', exc, exc_info=True)
         steps.append({
+            'detail_id': detail.id,
+            'element_id': detail.element_id,
             'ope_key': detail.ope_key,
             'ope_value': ope_value,
             'step_type': detail.step_type,

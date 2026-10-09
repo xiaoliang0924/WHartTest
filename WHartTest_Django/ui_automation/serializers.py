@@ -223,7 +223,7 @@ class UiPageStepsListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'project', 'page', 'page_name', 'module', 'module_name',
             'name', 'status', 'file_ids', 'step_count', 'creator', 'creator_name',
-            'auth_state_id', 'created_at', 'updated_at'
+            'auth_state_id', 'authentication_mode', 'created_at', 'updated_at'
         ]
         read_only_fields = ['status', 'creator', 'created_at', 'updated_at']
 

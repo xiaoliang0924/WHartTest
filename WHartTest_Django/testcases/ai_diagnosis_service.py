@@ -335,16 +335,42 @@ def extract_failure_context(
         "assert_checked", "assert_text", "assert_contain_text", "assert_value",
         "assert_count", "assert_url", "assert_title", "upload",
     }
-    if step_description in operation_hints:
-        operation_type = step_description
+    def runtime_operation(result):
+        explicit = str(result.get("ope_key") or "")
+        if explicit:
+            return explicit
+        description = str(result.get("description") or "")
+        if description in operation_hints:
+            return description
+        message = str(result.get("message") or result.get("error_message") or "")
+        match = re.search(r"(?:元素操作\s+|locator\.)([a-z_]+)", message)
+        return match.group(1) if match and match.group(1) in operation_hints else ""
+
+    operation_type = runtime_operation(failed_step_data or {})
+    detail_id = None
+    exact_reference = bool(failed_step_data and "detail_id" in failed_step_data)
+    if exact_reference:
+        try:
+            detail_id = int(failed_step_data.get("detail_id"))
+        except (TypeError, ValueError):
+            pass
+        numeric_step_id = detail_id
+    resolved_detail_id = None
 
     # 1. 优先通过 step_id 精准反查 UiPageStepsDetailed
     if numeric_step_id is not None:
         from ui_automation.models import UiPageStepsDetailed
-        detailed_step = UiPageStepsDetailed.objects.filter(id=numeric_step_id).select_related(
-            "element", "page_step", "page_step__page"
-        ).first()
-        if detailed_step:
+        detailed_step = UiPageStepsDetailed.objects.filter(
+            id=numeric_step_id,
+            page_step__case_usages__test_case_id=testcase.ui_test_case_id,
+            page_step__project_id=testcase.project_id,
+        ).select_related("element", "page_step", "page_step__page").first()
+        if detailed_step and (
+            (not operation_type or detailed_step.ope_key == operation_type)
+            and (not exact_reference or "element_id" not in failed_step_data
+                 or failed_step_data.get("element_id") == detailed_step.element_id)
+        ):
+            resolved_detail_id = detailed_step.id
             operation_type = detailed_step.ope_key or ""
             ope_value = detailed_step.ope_value
             if detailed_step.page_step and detailed_step.page_step.page:
@@ -359,7 +385,7 @@ def extract_failure_context(
                 step_description = detailed_step.description or (detailed_step.page_step.name if detailed_step.page_step else "")
 
     # 2. 如果未找到元素，尝试根据用例步骤序号兜底匹配
-    if not element_id and testcase.ui_test_case:
+    if resolved_detail_id is None and not exact_reference and testcase.ui_test_case:
         case_steps = list(testcase.ui_test_case.case_steps.all().select_related(
             "page_step", "page_step__page"
         ).order_by("case_sort"))
@@ -371,39 +397,45 @@ def extract_failure_context(
             target_step = case_steps[case_step_index]
             if target_step.page_step and target_step.page_step.page:
                 page_name = page_name or target_step.page_step.page.name
-                # Preserve the target route when resolving recorder runtime
-                # references; route-aware repair needs both actual and target URL.
+                # ``groupN_M`` is a recorder runtime reference. In this
+                # fallback path we still know which page-step group failed,
+                # so preserve its configured URL for route-aware diagnosis.
+                # Without this, the hidden-menu repair cannot verify that the
+                # browser is already on the target route and must skip safely.
                 page_url = page_url or target_step.page_step.page.url or ""
             details = list(target_step.page_step.step_details.all().select_related("element").order_by("step_sort"))
             if details:
                 first_detail = None
                 if runtime_step_index is not None:
-                    # run_steps reports one-based indexes. Some groups get a
-                    # synthetic goto prepended by the consumer, while groups
-                    # without a base URL do not. Detect it from the recorded
-                    # results instead of assuming a fixed offset. Resolve the
-                    # exact operation before falling back to operation type.
-                    group_prefix = f"group{runtime_group}_"
-                    synthetic_goto = any(
-                        str(result.get("step_id") or "") == f"{group_prefix}1"
-                        and (
-                            str(result.get("ope_key") or "").lower() == "goto"
-                            or str(result.get("description") or "").lower() == "goto"
-                        )
-                        for result in step_results
-                        if isinstance(result, dict)
-                    )
-                    detail_index = runtime_step_index - (2 if synthetic_goto else 1)
-                    if 0 <= detail_index < len(details):
-                        candidate = details[detail_index]
-                        if not operation_type or candidate.ope_key == operation_type:
-                            first_detail = candidate
-                if first_detail is None:
-                    matching_details = [detail for detail in details if detail.ope_key == operation_type]
-                    first_detail = matching_details[0] if matching_details else details[0]
-                operation_type = operation_type or first_detail.ope_key or ""
-                ope_value = ope_value or first_detail.ope_value
-                if first_detail.element:
+                    # Legacy results have no database ID. Accept a positional
+                    # mapping only if the entire executed prefix has matching
+                    # operation types and both possible goto offsets resolve
+                    # to a single detail. Never guess the first element.
+                    prefix = f"group{runtime_group}_"
+                    runtime = [r for r in step_results if isinstance(r, dict)
+                               and str(r.get("step_id") or "").startswith(prefix)]
+                    candidates = {}
+                    for offset in (0, 1):
+                        if offset and (not runtime or runtime_operation(runtime[0]) != "goto"):
+                            continue
+                        executed = runtime[offset:]
+                        if not executed or len(executed) > len(details):
+                            continue
+                        if all(runtime_operation(r) == d.ope_key
+                               for r, d in zip(executed, details)):
+                            candidate = details[len(executed) - 1]
+                            candidates[candidate.id] = candidate
+                    if len(candidates) == 1:
+                        first_detail = next(iter(candidates.values()))
+                else:
+                    matches = [d for d in details if d.ope_key == operation_type]
+                    if len(matches) == 1:
+                        first_detail = matches[0]
+                if first_detail is not None:
+                    resolved_detail_id = first_detail.id
+                    operation_type = operation_type or first_detail.ope_key or ""
+                    ope_value = first_detail.ope_value
+                if first_detail is not None and first_detail.element:
                     element_id = first_detail.element.id
                     element_name = first_detail.element.name
                     locator_type = first_detail.element.locator_type
@@ -440,6 +472,8 @@ def extract_failure_context(
         "dom_snapshot": dom_snapshot,
         "available_elements": available_elements,
         "failure_step": {
+            "detail_id": resolved_detail_id,
+            "mapping_status": "resolved" if resolved_detail_id else "unresolved",
             "step_sort": step_sort,
             "step_description": step_description,
             "page_name": page_name,
@@ -622,6 +656,11 @@ UI用例名称: {testcase.ui_test_case.name if testcase.ui_test_case else '无'}
     # Keep the machine-collected evidence outside the LLM schema so the safe
     # repair layer can make decisions from facts, even if the model omits them.
     diagnosis_result["evidence"] = {
+        "detail_id": failed_step.get("detail_id"),
+        "element_id": failed_step.get("element_id"),
+        "mapping_status": failed_step.get("mapping_status", "unresolved"),
+        "locator_value": failed_step.get("locator_value") or "",
+        "error_message": failure_info.get("error_message") or "",
         "actual_url": (failure_info.get("failure_step") or {}).get("actual_url")
         or (failure_info.get("exploration") or {}).get("page_url")
         or "",

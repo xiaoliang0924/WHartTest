@@ -94,6 +94,7 @@ export interface UiPageSteps extends TimeStampFields {
   module: number
   module_name?: string
   auth_state_id?: number | null  // 绑定登录态（执行时优先注入该登录态）
+  authentication_mode?: 'auto' | 'environment' | 'script'
   name: string
   description?: string
   run_flow?: string

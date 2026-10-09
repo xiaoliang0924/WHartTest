@@ -24,6 +24,7 @@ from ..agent_loop_view import (
     _explicitly_failed_helper_step_from_messages,
     _testcase_step_was_attempted,
     _build_incomplete_testcase_resume_prompt,
+    _build_incomplete_ai_resume_prompt,
     _build_sanitized_messages,
     _extract_linked_image_urls,
     _is_linked_image_url_allowed,

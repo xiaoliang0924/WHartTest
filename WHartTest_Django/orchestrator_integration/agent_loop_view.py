@@ -712,6 +712,8 @@ async def _force_save_generated_ui_case(*, llm, tools, messages) -> Dict[str, An
         "现在必须调用唯一可用工具 save_generated_ui_testcase 一次，"
         "传入 payload_json JSON 字符串，包含 name、description、url、steps。"
         "每个功能测试步骤对应一个 UI step，动作按实际观察顺序记录；"
+        "每个 step 可指定 authentication_mode：auto（默认协调环境认证）、environment（环境已负责认证，该组只能保存真实登录成功断言）、script（必须由脚本执行登录或角色切换）。"
+        "不要把登录表单填写动作放到登录后的业务页面；多账号切换不得省略或用同一环境账号替代。"
         "导航步骤必须检查当前页面状态：如果该步骤开始时 URL 的 origin+pathname 已与目标页面一致，不要生成冗余菜单点击，改为保存基于本次实际 URL 的 assert mode=url、match=path；"
         "若必须点击导航，只能保存本次观察到的可见菜单项。定位到隐藏菜单节点时不得使用 force click 或单纯替换 XPath，应限定可见导航区域；没有可见目标时保留失败，不要伪造通过。"
         "没有足够证据的步骤不要编造，工具若因步骤不完整拒绝保存，应如实报告。"
@@ -962,13 +964,40 @@ async def _apply_safe_generated_ui_repair(
     if suggestion.get("can_self_heal") is not True:
         return {"status": "skipped", "reason": "AI 未确认存在安全的自动修复方案。"}
 
+    # Only machine-resolved failure evidence may select a repair target.
+    # Membership in the case alone does not prove that an element failed.
+    evidence = diagnosis.get("evidence") or {}
+    try:
+        failed_detail_id = int(evidence.get("detail_id"))
+    except (TypeError, ValueError):
+        return {"status": "skipped", "reason": "无法准确定位真实失败步骤，未自动修改用例。"}
+    from ui_automation.models import UiPageStepsDetailed
+
+    failed_detail = await sync_to_async(lambda: UiPageStepsDetailed.objects.filter(
+        id=failed_detail_id,
+        page_step__case_usages__test_case_id=ui_test_case_id,
+        page_step__project_id=project_id,
+    ).first())()
+    if (
+        evidence.get("mapping_status") != "resolved"
+        or failed_detail is None
+        or failed_detail.ope_key != evidence.get("operation_type")
+        or failed_detail.element_id != evidence.get("element_id")
+    ):
+        return {"status": "skipped", "reason": "失败步骤证据不完整或已变化，未自动修改用例。"}
+    failure_info = {
+        "operation_type": evidence.get("operation_type"),
+        "element_id": evidence.get("element_id"),
+        "current_locator_value": evidence.get("locator_value") or "",
+        "error_message": evidence.get("error_message") or "",
+    }
+
     if repair_type == "navigation_assertion":
         from ui_automation.models import UiCaseStepsDetailed, UiPageStepsDetailed
 
         evidence = diagnosis.get("evidence") or {}
         actual_url = str(evidence.get("actual_url") or "").strip()
         target_url = str(evidence.get("page_url") or "").strip()
-        failure_info = diagnosis.get("failure_step_info") or {}
         error_text = str(failure_info.get("error_message") or "").lower()
         locator_evidence = " ".join((
             str(failure_info.get("current_locator_value") or ""),
@@ -1004,6 +1033,7 @@ async def _apply_safe_generated_ui_repair(
 
             with transaction.atomic():
                 matching_ids = list(UiPageStepsDetailed.objects.filter(
+                    id=failed_detail_id,
                     element_id=element_id,
                     ope_key="click",
                     page_step__case_usages__test_case_id=ui_test_case_id,
@@ -1056,6 +1086,7 @@ async def _apply_safe_generated_ui_repair(
                 return {"status": "skipped", "reason": "失败现场 URL 不完整，未放宽 URL 断言。"}
 
             details = list(UiPageStepsDetailed.objects.filter(
+                id=failed_detail_id,
                 page_step__case_usages__test_case_id=ui_test_case_id,
                 ope_key="assert_url",
             ).distinct().order_by("page_step_id", "step_sort"))
@@ -1103,7 +1134,6 @@ async def _apply_safe_generated_ui_repair(
     # page transition that is merely slower than the default, allow one small,
     # bounded wait increase.  The recorder honours this timeout below; it does
     # not turn a failed URL/title assertion into a pass.
-    failure_info = diagnosis.get("failure_step_info") or {}
     operation_type = str(failure_info.get("operation_type") or "").strip()
     error_text = str(failure_info.get("error_message") or "")
     if (
@@ -1124,6 +1154,7 @@ async def _apply_safe_generated_ui_repair(
                     else ["assert_url", "assert_title"]
                 )
                 candidates = list(UiPageStepsDetailed.objects.filter(
+                    id=failed_detail_id,
                     page_step__case_usages__test_case_id=ui_test_case_id,
                     ope_key__in=candidate_keys,
                 ).distinct().order_by("page_step_id", "step_sort"))
@@ -1165,6 +1196,9 @@ async def _apply_safe_generated_ui_repair(
     except (TypeError, ValueError):
         return {"status": "skipped", "reason": "AI 未返回当前用例可定位的元素。"}
 
+    if element_id != failed_detail.element_id:
+        return {"status": "skipped", "reason": "AI 建议指向其他步骤元素，未自动修改用例。"}
+
     locator_type = str(suggestion.get("suggested_locator_type") or "").strip()
     locator_value = str(suggestion.get("suggested_locator_value") or "").strip()
     from ui_automation.models import UiCaseStepsDetailed, UiElement, UiPageStepsDetailed
@@ -1185,15 +1219,17 @@ async def _apply_safe_generated_ui_repair(
             if element is None:
                 return {"status": "skipped", "reason": "待修复元素不存在或不属于当前项目。"}
 
-            details = UiPageStepsDetailed.objects.filter(
+            detail = UiPageStepsDetailed.objects.select_for_update().filter(
+                id=failed_detail_id,
                 page_step__case_usages__test_case_id=ui_test_case_id,
+                page_step__project_id=project_id,
                 element_id=element.id,
-            ).distinct()
-            if not details.exists():
-                return {"status": "skipped", "reason": "AI 指向的元素不属于当前生成用例。"}
-            page_step_ids = details.values_list("page_step_id", flat=True)
+                ope_key=evidence.get("operation_type"),
+            ).first()
+            if detail is None:
+                return {"status": "skipped", "reason": "失败步骤已变化或不属于当前生成用例。"}
             if UiCaseStepsDetailed.objects.filter(
-                page_step_id__in=page_step_ids,
+                page_step_id=detail.page_step_id,
             ).exclude(test_case_id=ui_test_case_id).exists():
                 return {"status": "skipped", "reason": "目标页面步骤被其他用例复用，未自动修改。"}
             if (
@@ -1222,7 +1258,8 @@ async def _apply_safe_generated_ui_repair(
                 description=element.description,
                 creator=element.creator,
             )
-            details.update(element=clone)
+            detail.element = clone
+            detail.save(update_fields=["element", "updated_at"])
             return {
                 "status": "applied",
                 "element_id": clone.id,

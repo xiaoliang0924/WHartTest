@@ -14,6 +14,8 @@ from ui_automation.models import (
     UiPageSteps,
     UiPageStepsDetailed,
     UiTestCase,
+    UiEnvironmentConfig,
+    UiAuthState,
 )
 from ui_automation.serializers import UiPageStepsExecuteSerializer
 from ui_automation.generated_case_service import persist_generated_ui_testcase
@@ -100,6 +102,35 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
             str(list(UiPageStepsDetailed.objects.values_list('ope_value', flat=True))),
         )
 
+    def test_generated_authentication_mode_is_persisted(self):
+        self.payload['steps'][0]['authentication_mode'] = 'script'
+        result = persist_generated_ui_testcase(
+            testcase_id=self.testcase.id, project_id=self.project.id,
+            user_id=self.user.id, payload=self.payload,
+        )
+        group = UiTestCase.objects.get(id=result['ui_test_case_id']).case_steps.get().page_step
+        self.assertEqual(group.authentication_mode, 'script')
+
+    def test_environment_authentication_rejects_repeated_form_actions(self):
+        self.payload['steps'][0]['authentication_mode'] = 'environment'
+        with self.assertRaisesRegex(ValueError, '只能保存登录成功的断言'):
+            persist_generated_ui_testcase(
+                testcase_id=self.testcase.id, project_id=self.project.id,
+                user_id=self.user.id, payload=self.payload,
+            )
+        self.assertFalse(UiTestCase.objects.exists())
+
+    def test_environment_authentication_preserves_success_assertion(self):
+        self.payload['steps'][0]['authentication_mode'] = 'environment'
+        self.payload['steps'][0]['actions'] = [self.payload['steps'][0]['actions'][-1]]
+        result = persist_generated_ui_testcase(
+            testcase_id=self.testcase.id, project_id=self.project.id,
+            user_id=self.user.id, payload=self.payload,
+        )
+        group = UiTestCase.objects.get(id=result['ui_test_case_id']).case_steps.get().page_step
+        self.assertEqual(group.authentication_mode, 'environment')
+        self.assertEqual(list(group.step_details.values_list('ope_key', flat=True)), ['assert_url'])
+
     def test_invalid_payload_rolls_back_all_ui_rows(self):
         invalid_payload = {
             'steps': [{
@@ -154,6 +185,97 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
         self.assertEqual(first['ui_test_case_id'], second['ui_test_case_id'])
         self.assertFalse(second['created'])
         self.assertEqual(UiTestCase.objects.count(), 1)
+
+    def test_generated_case_preserves_per_step_role_auth_states(self):
+        env = UiEnvironmentConfig.objects.create(
+            project=self.project,
+            name='Role test environment',
+            base_url='https://example.test/login',
+            creator=self.user,
+        )
+        ordinary = UiAuthState.objects.create(
+            env_config=env,
+            name='Ordinary user',
+            state_json={'cookies': [{'name': 'ordinary', 'value': 'snapshot'}]},
+            creator=self.user,
+        )
+        admin = UiAuthState.objects.create(
+            env_config=env,
+            name='Administrator',
+            state_json={'cookies': [{'name': 'admin', 'value': 'snapshot'}]},
+            creator=self.user,
+        )
+        first_step = dict(self.payload['steps'][0], auth_state_id=ordinary.id)
+        second_step = dict(self.payload['steps'][0], name='Switch to administrator', auth_state_id=admin.id)
+        payload = dict(self.payload, steps=[first_step, second_step])
+
+        result = persist_generated_ui_testcase(
+            testcase_id=self.testcase.id,
+            project_id=self.project.id,
+            user_id=self.user.id,
+            payload=payload,
+        )
+
+        case = UiTestCase.objects.get(pk=result['ui_test_case_id'])
+        bound_states = list(
+            case.case_steps.select_related('page_step').order_by('case_sort')
+            .values_list('page_step__auth_state_id', flat=True)
+        )
+        self.assertEqual(bound_states, [ordinary.id, admin.id])
+        self.assertEqual(result['auth_state_ids'], [ordinary.id, admin.id])
+
+    def test_generated_case_rejects_auth_state_from_another_project(self):
+        other_project = Project.objects.create(name='Other project')
+        other_env = UiEnvironmentConfig.objects.create(
+            project=other_project,
+            name='Other environment',
+            base_url='https://example.test/login',
+            creator=self.user,
+        )
+        foreign_state = UiAuthState.objects.create(
+            env_config=other_env,
+            name='Foreign state',
+            state_json={'cookies': [{'name': 'foreign', 'value': 'snapshot'}]},
+            creator=self.user,
+        )
+        payload = dict(self.payload, steps=[dict(self.payload['steps'][0], auth_state_id=foreign_state.id)])
+
+        with self.assertRaisesRegex(ValueError, '不属于当前项目'):
+            persist_generated_ui_testcase(
+                testcase_id=self.testcase.id,
+                project_id=self.project.id,
+                user_id=self.user.id,
+                payload=payload,
+            )
+
+        self.assertFalse(UiTestCase.objects.exists())
+
+    def test_multi_account_case_is_not_saved_with_only_one_login_state(self):
+        TestCaseStep.objects.create(
+            test_case=self.testcase,
+            step_number=2,
+            description='退出后使用管理员账号(802714/000000)重新登录并验证',
+            expected_result='管理员登录成功',
+            creator=self.user,
+        )
+        self.testcase.steps.filter(step_number=1).update(
+            description='使用普通用户账号(802434/000000)登录并验证'
+        )
+        payload = dict(self.payload, steps=[
+            dict(self.payload['steps'][0], functional_step_numbers=[1]),
+            dict(self.payload['steps'][0], name='Administrator checks', functional_step_numbers=[2]),
+        ])
+
+        with self.assertRaisesRegex(ValueError, '涉及 2 个账号.*只绑定了 0 个独立登录态'):
+            persist_generated_ui_testcase(
+                testcase_id=self.testcase.id,
+                project_id=self.project.id,
+                user_id=self.user.id,
+                payload=payload,
+            )
+
+        self.assertFalse(UiTestCase.objects.exists())
+        self.assertIsNone(self.testcase.__class__.objects.get(pk=self.testcase.pk).ui_test_case_id)
 
     @skipUnlessDBFeature('has_select_for_update_of')
     def test_postgres_lock_scope_excludes_nullable_ui_case_join(self):
