@@ -16,6 +16,7 @@ from langchain_core.outputs import ChatGenerationChunk
 from .. import agent_loop_view
 from ..agent_loop_view import (
     _decode_sse_payload,
+    _stream_content_to_text,
     _is_final_testcase_step_pass,
     _extract_helper_testcase_progress,
     _extract_helper_result_reason,
@@ -53,6 +54,20 @@ class SsePayloadDecodeTests(SimpleTestCase):
 
     def test_ignores_non_json_terminal_event(self):
         self.assertIsNone(_decode_sse_payload("data: [DONE]\n\n"))
+
+
+class AnthropicStreamContentTests(SimpleTestCase):
+    def test_normalizes_anthropic_text_blocks_and_skips_non_text_blocks(self):
+        content = [
+            {"type": "text", "text": "Claude "},
+            {"type": "thinking", "thinking": "private reasoning"},
+            {"type": "text", "text": "response"},
+        ]
+
+        self.assertEqual(_stream_content_to_text(content), "Claude response")
+
+    def test_preserves_plain_text_chunks(self):
+        self.assertEqual(_stream_content_to_text("hello"), "hello")
 
 
 class BoundUiTimeoutConfigTests(SimpleTestCase):

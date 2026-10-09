@@ -118,6 +118,24 @@ def _build_sse_error_event(exc: Exception) -> Dict[str, Any]:
     return {"type": "error", "message": f"执行错误: {str(exc)}", "code": 500}
 
 
+def _stream_content_to_text(content: Any) -> str:
+    """Normalize string and Anthropic-style content blocks for SSE text output."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+
+    text_parts = []
+    for block in content:
+        if isinstance(block, str):
+            text_parts.append(block)
+        elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
+            text = block.get("text")
+            if isinstance(text, str):
+                text_parts.append(text)
+    return "".join(text_parts)
+
+
 def create_flushed_sse(data_dict: Dict[str, Any]) -> str:
     """SSE event plus padding so nginx/proxies flush before the next blocking helper."""
     return create_sse_data(data_dict) + (":" + (" " * 4096) + "\n\n")
@@ -4476,18 +4494,24 @@ class AgentLoopStreamAPIView(View):
                                     # 检查是否是 ToolMessage（通过类名或 type 属性）
                                     token_type = type(token).__name__
                                     if "ToolMessage" not in token_type:
-                                        streamed_assistant_content += token.content
+                                        text_chunk = _stream_content_to_text(token.content)
+                                        if not text_chunk:
+                                            continue
+                                        streamed_assistant_content += text_chunk
                                         yield create_sse_data(
-                                            {"type": "stream", "data": token.content}
+                                            {"type": "stream", "data": text_chunk}
                                         )
                             elif hasattr(chunk, "content") and chunk.content:
                                 # 兼容旧版本可能直接返回 message 的情况
                                 # 同样过滤掉 ToolMessage
                                 chunk_type = type(chunk).__name__
                                 if "ToolMessage" not in chunk_type:
-                                    streamed_assistant_content += chunk.content
+                                    text_chunk = _stream_content_to_text(chunk.content)
+                                    if not text_chunk:
+                                        continue
+                                    streamed_assistant_content += text_chunk
                                     yield create_sse_data(
-                                        {"type": "stream", "data": chunk.content}
+                                        {"type": "stream", "data": text_chunk}
                                     )
 
                 except Exception as e:
@@ -4803,7 +4827,10 @@ class AgentLoopStreamAPIView(View):
                                                 )
                                                 await asyncio.wait_for(
                                                     agent.ainvoke(
-                                                        {"messages": [SystemMessage(content=resume_prompt)]},
+                                                        # Resume instructions are appended to the existing
+                                                        # transcript. Keep them as a human turn because
+                                                        # Anthropic only accepts system content at the start.
+                                                        {"messages": [HumanMessage(content=resume_prompt)]},
                                                         config=resume_config,
                                                     ),
                                                     timeout=180,
@@ -5842,16 +5869,22 @@ class AgentLoopResumeAPIView(View):
                                     # 检查是否是 ToolMessage（通过类名或 type 属性）
                                     token_type = type(token).__name__
                                     if "ToolMessage" not in token_type:
+                                        text_chunk = _stream_content_to_text(token.content)
+                                        if not text_chunk:
+                                            continue
                                         yield create_sse_data(
-                                            {"type": "stream", "data": token.content}
+                                            {"type": "stream", "data": text_chunk}
                                         )
                             elif hasattr(chunk, "content") and chunk.content:
                                 # 兼容旧版本可能直接返回 message 的情况
                                 # 同样过滤掉 ToolMessage
                                 chunk_type = type(chunk).__name__
                                 if "ToolMessage" not in chunk_type:
+                                    text_chunk = _stream_content_to_text(chunk.content)
+                                    if not text_chunk:
+                                        continue
                                     yield create_sse_data(
-                                        {"type": "stream", "data": chunk.content}
+                                        {"type": "stream", "data": text_chunk}
                                     )
 
                 except Exception as e:
