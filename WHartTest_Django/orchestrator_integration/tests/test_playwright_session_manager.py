@@ -13,6 +13,7 @@ from orchestrator_integration.builtin_tools.skill_tools import (
     _cross_step_click_mismatch,
     _ensure_testcase_playwright_session_id,
     _infer_pending_testcase_step,
+    _persist_testcase_tool_output,
     _requested_testcase_step,
     _tag_testcase_step_execution,
 )
@@ -73,6 +74,20 @@ class TestcasePlaywrightSessionRoutingTests(SimpleTestCase):
         with patch("testcases.models.TestCaseRunRecord.objects.filter", return_value=queryset):
             pending = _infer_pending_testcase_step(42, "session-42")
         self.assertEqual(pending, 4)
+
+    def test_persistent_browser_output_is_durably_saved_before_tool_return(self):
+        with patch(
+            "testcases.run_record_service.append_testcase_tool_execution_output",
+            return_value=True,
+        ) as persist:
+            _persist_testcase_tool_output(
+                session_id="session-42", testcase_id=42, output="RESULT=PASS: step 1"
+            )
+        persist.assert_called_once_with(
+            session_id="session-42",
+            testcase_id=42,
+            output="RESULT=PASS: step 1",
+        )
 
     def test_blocks_click_repeated_from_a_different_step(self):
         case = MagicMock()

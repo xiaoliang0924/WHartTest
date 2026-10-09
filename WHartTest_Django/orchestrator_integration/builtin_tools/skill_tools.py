@@ -295,6 +295,27 @@ def _cross_step_click_mismatch(
     return None
 
 
+def _persist_testcase_tool_output(
+    *, session_id: Optional[str], testcase_id: Optional[int], output: str
+) -> None:
+    """Persist browser output before tool return so step inference/finalization can use it."""
+    if not session_id or not testcase_id:
+        return
+    try:
+        from testcases.run_record_service import append_testcase_tool_execution_output
+
+        append_testcase_tool_execution_output(
+            session_id=str(session_id), testcase_id=int(testcase_id), output=output
+        )
+    except Exception:
+        logger.warning(
+            "Could not persist testcase browser output session=%s case=%s",
+            session_id,
+            testcase_id,
+            exc_info=True,
+        )
+
+
 def _get_skill_runtime_env() -> dict[str, str]:
     """Build the environment passed to skills that call the internal API."""
     env = os.environ.copy()
@@ -2101,6 +2122,17 @@ def get_skill_tools(
                         )
                         if auto_upload_notes:
                             result_output = f"{result_output}\n{auto_upload_notes}"
+                        # Persistent Playwright calls return before the regular
+                        # subprocess persistence path below. Save their output
+                        # before returning so the next browser action can infer
+                        # the first step without a PASS receipt and the final
+                        # report can inspect the same raw timeout/assertion text.
+                        if current_test_case_id and current_chat_session_id:
+                            _persist_testcase_tool_output(
+                                session_id=current_chat_session_id,
+                                testcase_id=current_test_case_id,
+                                output=result_output,
+                            )
                         return _finalize_skill_result(
                             result_output,
                             skill_dir=skill_dir,
@@ -2111,19 +2143,43 @@ def get_skill_tools(
                         logger.error(
                             "[execute_skill_script] 持久化 Playwright 执行超时"
                         )
-                        return _with_failure_reminder(
+                        failure_output = _with_failure_reminder(
                             "错误: 命令执行超时（60秒）",
                             skill_name=skill_name,
                         )
+                        failure_output = _tag_testcase_step_execution(
+                            failure_output,
+                            helper_code,
+                            current_test_case_id,
+                            step_override=testcase_step,
+                        )
+                        _persist_testcase_tool_output(
+                            session_id=current_chat_session_id,
+                            testcase_id=current_test_case_id,
+                            output=failure_output,
+                        )
+                        return failure_output
                     except Exception as e:
                         logger.error(
                             f"[execute_skill_script] 持久化 Playwright 执行失败: {e}",
                             exc_info=True,
                         )
-                        return _with_failure_reminder(
+                        failure_output = _with_failure_reminder(
                             f"错误: {str(e)}",
                             skill_name=skill_name,
                         )
+                        failure_output = _tag_testcase_step_execution(
+                            failure_output,
+                            helper_code,
+                            current_test_case_id,
+                            step_override=testcase_step,
+                        )
+                        _persist_testcase_tool_output(
+                            session_id=current_chat_session_id,
+                            testcase_id=current_test_case_id,
+                            output=failure_output,
+                        )
+                        return failure_output
 
             # playwright-cli 在只读的 skill 目录下以相对文件名保存截图会 EACCES，
             # 改在可写的截图目录执行，使截图默认落入 SCREENSHOT_DIR
