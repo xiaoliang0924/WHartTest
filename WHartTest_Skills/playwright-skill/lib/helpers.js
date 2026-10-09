@@ -2311,16 +2311,19 @@ function getFilterFieldLocator(page, fieldLabel) {
  * 只会等到超时。要打开这个弹窗必须走 `.type-pool-trigger` / `.add-icon`。
  */
 function getFilterDialogTrigger(field) {
-  return field.locator('.type-pool-trigger, .add-icon, .type-pool-actions').first();
+  // Click the actual plus icon. Clicking the wider wrapper can hit blank space
+  // and leave the dialog closed even though the locator itself is visible.
+  const plusIcon = field.locator('.add-icon').first();
+  return plusIcon;
 }
 
-/** 按弹窗标题定位多选弹窗（默认标题「选择<字段名>」），找不到标题时退回最后一个 el-dialog */
+/** 按弹窗标题定位当前可见的多选弹窗（默认标题「选择<字段名>」）。 */
 async function getFilterDialog(page, fieldLabel, dialogTitle) {
   const escaped = String(dialogTitle || `选择${fieldLabel}`).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const titleRe = new RegExp(`^\\s*${escaped}\\s*$`);
-  // ⚠️ 同一会话里跑多个筛选步骤时，历史弹窗会以 display:none 留在 DOM 里。
-  // 若直接取 `.el-dialog.last()`，可能选中一个已关闭的隐藏弹窗，waitFor visible 必然超时。
-  // 因此优先在「可见」弹窗里按标题匹配，再退回到可见弹窗，最后才退回全部。
+  // Element Plus keeps closed dialogs mounted with display:none. Never return
+  // a hidden historical dialog: a caller waiting on it cannot observe a newly
+  // opened dialog reliably and will time out on a stale DOM node.
   const visible = page.locator('.el-dialog').filter({ visible: true });
   const byTitleVisible = page
     .locator('.el-dialog')
@@ -2328,13 +2331,8 @@ async function getFilterDialog(page, fieldLabel, dialogTitle) {
     .filter({ has: page.locator('.el-dialog__title', { hasText: titleRe }) })
     .last();
   if ((await byTitleVisible.count()) > 0) return byTitleVisible;
-  const byTitle = page
-    .locator('.el-dialog')
-    .filter({ has: page.locator('.el-dialog__title', { hasText: titleRe }) })
-    .last();
-  if ((await byTitle.count()) > 0) return byTitle;
   if ((await visible.count()) > 0) return visible.last();
-  return page.locator('.el-dialog').last();
+  return null;
 }
 
 /**
@@ -2350,9 +2348,11 @@ async function openFilterDialogField(page, fieldLabel) {
   await trigger.waitFor({ state: 'visible', timeout: 15000 });
   await trigger.scrollIntoViewIfNeeded().catch(() => {});
 
-  const dialog = await getFilterDialog(page, fieldLabel);
+  let dialog = await getFilterDialog(page, fieldLabel);
   const dialogOpen = async () => {
-    if ((await dialog.count()) === 0) return false;
+    // Re-query each time; a modal may be mounted only after the trigger click.
+    dialog = await getFilterDialog(page, fieldLabel);
+    if (!dialog || (await dialog.count()) === 0) return false;
     return await dialog.isVisible().catch(() => false);
   };
 
@@ -2370,7 +2370,20 @@ async function openFilterDialogField(page, fieldLabel) {
     await page.waitForTimeout(600);
   }
 
-  await dialog.waitFor({ state: 'visible', timeout: 15000 });
+  if (!(await dialogOpen())) {
+    let visibleTitles = [];
+    try {
+      visibleTitles = await page
+        .locator('.el-dialog:visible .el-dialog__title')
+        .allInnerTexts();
+    } catch (_) {
+      // The failure result below remains useful when the page is transitioning.
+    }
+    console.log(
+      `RESULT=FAIL: 点击筛选字段「${fieldLabel}」后未打开可见弹窗。当前可见弹窗：${visibleTitles.join('、') || '无'}`,
+    );
+    return false;
+  }
   console.log(`[openFilterDialogField] 已打开「${fieldLabel}」多选弹窗，URL=${page.url()}`);
   return true;
 }
@@ -2445,7 +2458,7 @@ function pickClosestOption(target, candidates) {
  * ⚠️ 用例里的选项名拿不准时先调这个，不要凭猜测写名称然后等超时。
  */
 async function listFilterDialogOptions(page, fieldLabel, options = {}) {
-  await openFilterDialogField(page, fieldLabel);
+  if (!(await openFilterDialogField(page, fieldLabel))) return [];
   const dialog = await getFilterDialog(page, fieldLabel, options.dialogTitle);
   const names = await readFilterDialogOptions(dialog);
   const cancel = dialog
@@ -2561,7 +2574,7 @@ async function selectDialogMultiSelect(page, fieldLabel, optionName, options = {
   if ((await filterField.count()) > 0) {
     // 带「+」触发器的弹窗多选字段（如「工单类型」）
     if ((await getFilterDialogTrigger(filterField).count()) > 0) {
-      await openFilterDialogField(page, fieldLabel);
+      if (!(await openFilterDialogField(page, fieldLabel))) return false;
       const dialog = await getFilterDialog(page, fieldLabel, options.dialogTitle);
       for (const name of optionNames) {
         await selectFilterDialogOption(page, fieldLabel, name, { ...options, dialog });
