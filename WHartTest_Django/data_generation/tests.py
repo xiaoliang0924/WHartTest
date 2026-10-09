@@ -213,8 +213,10 @@ class PlanExecutorValidationTests(DjangoTestCase):
             input_params={'assigneeUserId': 46, 'assigneeName': '李亮'},
         )
         executor.context.update(ticketId=5091, ticketNo='2026092459709012')
-        executor._created_ticket_id = 5091
-        executor._created_ticket_no = '2026092459709012'
+        executor._track_created_ticket_from_step(
+            {'name': '创建状态筛选样本：待处理'},
+            {'ticketId': 5091, 'ticketNo': '2026092459709012'},
+        )
         original_row = {
             'id': 5091,
             'ticketNo': '2026092459709012',

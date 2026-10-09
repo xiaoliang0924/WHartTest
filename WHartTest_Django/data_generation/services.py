@@ -376,6 +376,26 @@ class PlanExecutor:
         self._created_ticket_id: Any = None
         self._created_ticket_no: Optional[str] = None
 
+    def _track_created_ticket_from_step(
+        self,
+        step: Dict[str, Any],
+        extracted: Dict[str, Any],
+    ) -> None:
+        """Remember the ticket produced by a successful create step."""
+        step_name = str(step.get('name') or '').strip()
+        if not step_name.startswith('创建'):
+            return
+
+        # Require both values to have been extracted from this successful
+        # response; pre-existing input variables alone are not proof that this
+        # run owns the ticket. Some reusable data plans use names such as
+        # "创建状态筛选样本：待处理" rather than "创建工单".
+        created_ticket_id = extracted.get('ticketId')
+        created_ticket_no = extracted.get('ticketNo')
+        if created_ticket_id not in (None, '', 0) and created_ticket_no:
+            self._created_ticket_id = created_ticket_id
+            self._created_ticket_no = str(created_ticket_no)
+
     def _ensure_claim_created_ticket(self, row: Optional[Dict[str, Any]] = None) -> None:
         if self.plan.template_key != 'biz_create_and_claim':
             return
@@ -1991,16 +2011,7 @@ class PlanExecutor:
             extracted.update(_extract_values(response_body, custom_extract))
 
         self.context.update(extracted)
-
-        if str(step.get('name') or '').strip().startswith('创建工单'):
-            # Require both values to have been extracted from this successful
-            # create response; pre-existing input variables alone are not proof
-            # that this run owns the ticket.
-            created_ticket_id = extracted.get('ticketId')
-            created_ticket_no = extracted.get('ticketNo')
-            if created_ticket_id not in (None, '', 0) and created_ticket_no:
-                self._created_ticket_id = created_ticket_id
-                self._created_ticket_no = str(created_ticket_no)
+        self._track_created_ticket_from_step(step, extracted)
 
         if (
             self.plan.template_key == 'biz_create_assign_close'
