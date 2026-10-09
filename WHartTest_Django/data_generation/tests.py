@@ -696,6 +696,11 @@ class IntentRouterStateTests(DjangoTestCase):
         created = [step for step in template['steps'] if step['name'].startswith('创建状态筛选样本')]
         self.assertEqual(len(created), 4)
         self.assertTrue(all(step['variables']['ticketType'] == 'TYPE_A' for step in created))
+        names = [step['name'] for step in template['steps']]
+        self.assertLess(
+            names.index('完成状态筛选样本：已完成'),
+            names.index('领取状态筛选样本：处理中'),
+        )
         for step in created:
             summary = step['variables'].get('summary') or ''
             # 模板字面量或渲染后都不应超过 20（无 timestamp）。

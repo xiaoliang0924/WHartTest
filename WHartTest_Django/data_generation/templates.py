@@ -69,8 +69,11 @@ def _status_filter_fixture_steps() -> List[Dict[str, Any]]:
     fixtures = (
         ('待分配', 'pendingAssign'),
         ('待处理', 'pendingProcess'),
-        ('处理中', 'processing'),
+        # Complete this conversation before starting the final processing
+        # sample. The target system permits one active initiator conversation;
+        # leaving a processing sample open would queue the next claim.
         ('已完成', 'resolved'),
+        ('处理中', 'processing'),
     )
     steps: List[Dict[str, Any]] = []
     for status_name, prefix in fixtures:
