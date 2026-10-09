@@ -111,6 +111,17 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
         group = UiTestCase.objects.get(id=result['ui_test_case_id']).case_steps.get().page_step
         self.assertEqual(group.authentication_mode, 'script')
 
+    def test_assertion_only_script_auth_uses_environment_authentication(self):
+        self.payload['steps'][0]['authentication_mode'] = 'script'
+        self.payload['steps'][0]['actions'] = [self.payload['steps'][0]['actions'][-1]]
+        result = persist_generated_ui_testcase(
+            testcase_id=self.testcase.id, project_id=self.project.id,
+            user_id=self.user.id, payload=self.payload,
+        )
+        group = UiTestCase.objects.get(id=result['ui_test_case_id']).case_steps.get().page_step
+        self.assertEqual(group.authentication_mode, 'environment')
+        self.assertEqual(list(group.step_details.values_list('ope_key', flat=True)), ['assert_url'])
+
     def test_environment_authentication_rejects_repeated_form_actions(self):
         self.payload['steps'][0]['authentication_mode'] = 'environment'
         with self.assertRaisesRegex(ValueError, '只能保存登录成功的断言'):

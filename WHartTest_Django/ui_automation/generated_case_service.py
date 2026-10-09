@@ -220,6 +220,17 @@ def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
         authentication_mode = step.get("authentication_mode", "auto")
         if authentication_mode not in {"auto", "environment", "script"}:
             raise ValueError(f"第 {index} 步的认证执行方式无效。")
+        # A script-authenticated group must actually perform login or role-switch
+        # actions. Assertion-only groups verify a session supplied by the
+        # environment/login state and must not disable that authentication.
+        if (
+            authentication_mode == "script"
+            and isinstance(actions, list)
+            and actions
+            and all(isinstance(action, dict) and action.get("type") == "assert" for action in actions)
+        ):
+            authentication_mode = "environment"
+            step["authentication_mode"] = authentication_mode
         if authentication_mode == "environment" and (
             not isinstance(actions, list) or not actions
             or any(action.get("type") != "assert" for action in actions if isinstance(action, dict))
