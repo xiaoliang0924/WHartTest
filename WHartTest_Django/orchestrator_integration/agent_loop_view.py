@@ -2260,6 +2260,43 @@ def _testcase_step_was_attempted(messages, *, step: int, test_case_id=None) -> b
     return False
 
 
+async def _stream_ai_testcase_resume(agent, *, resume_prompt, config,
+                                     session_id, test_case_id, total_steps):
+    """Publish concrete tool evidence while the AI continues an incomplete case."""
+    async with asyncio.timeout(180):
+        async for update in agent.astream(
+            {"messages": [HumanMessage(content=resume_prompt)]},
+            config=config, stream_mode="updates",
+        ):
+            if should_stop(session_id):
+                raise RuntimeError("用户停止执行")
+            for node in update.values():
+                if not isinstance(node, dict):
+                    continue
+                for msg in node.get("messages", []):
+                    calls = getattr(msg, "tool_calls", None)
+                    if calls:
+                        for event in await _emit_testcase_tool_started(
+                            calls, session_id=session_id, test_case_id=test_case_id,
+                        ):
+                            yield event
+                    if type(msg).__name__ != "ToolMessage":
+                        continue
+                    content = getattr(msg, "content", "")
+                    case_id, step = _extract_helper_testcase_progress(content)
+                    if step is not None and case_id in (None, int(test_case_id)):
+                        yield {
+                            "type": "testcase_progress", "session_id": session_id,
+                            "test_case_id": int(test_case_id), "step": step,
+                            "total_steps": total_steps, "state": "completed",
+                            "message": f"步骤 {step}/{total_steps} 执行已返回，正在校验结果",
+                        }
+                    yield {
+                        "type": "tool_result", "tool_name": getattr(msg, "name", None),
+                        "tool_output": content,
+                    }
+
+
 async def _run_and_stream_remaining_helper_steps(
     *,
     test_case_id: int,
@@ -4826,16 +4863,13 @@ class AgentLoopStreamAPIView(View):
                                                 resume_config["recursion_limit"] = min(
                                                     int(resume_config.get("recursion_limit", 1000)), 48
                                                 )
-                                                await asyncio.wait_for(
-                                                    agent.ainvoke(
-                                                        # Resume instructions are appended to the existing
-                                                        # transcript. Keep them as a human turn because
-                                                        # Anthropic only accepts system content at the start.
-                                                        {"messages": [HumanMessage(content=resume_prompt)]},
-                                                        config=resume_config,
-                                                    ),
-                                                    timeout=180,
-                                                )
+                                                async for resume_event in _stream_ai_testcase_resume(
+                                                    agent, resume_prompt=resume_prompt,
+                                                    config=resume_config, session_id=session_id,
+                                                    test_case_id=int(test_case_id),
+                                                    total_steps=int(total_case_steps),
+                                                ):
+                                                    yield create_flushed_sse(resume_event)
                                                 resumed_messages = await _get_agent_state_messages(
                                                     agent, invoke_config
                                                 )
