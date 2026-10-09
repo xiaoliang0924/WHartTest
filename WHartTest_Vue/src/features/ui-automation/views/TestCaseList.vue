@@ -223,7 +223,7 @@
 <script setup lang="ts">
 import FileAttachmentPicker from '@/features/file-management/components/FileAttachmentPicker.vue'
 import ExecutionScreenModal from '../components/ExecutionScreenModal.vue'
-import { ref, reactive, computed, onMounted, watch, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch, onUnmounted, h } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { IconPlus, IconEdit, IconDelete, IconOrderedList, IconPlayArrow, IconThunderbolt, IconCopy } from '@arco-design/web-vue/es/icon'
 import { useProjectStore } from '@/store/projectStore'
@@ -869,7 +869,26 @@ const handleCaseResult = (data: any) => {
   if (result.status === 'success') {
     Message.success(pageText.value.caseRunSuccess(result.passed_steps, result.total_steps))
   } else {
-    Message.error(pageText.value.caseRunFailed(result.message))
+    const failurePrefix = /^(?:用例执行失败|case execution failed)\s*[:：]\s*/i
+    let detail = String(result.message || '').trim()
+    while (failurePrefix.test(detail)) detail = detail.replace(failurePrefix, '').trim()
+
+    Message.error({
+      content: () => h(
+        'div',
+        {
+          style: {
+            maxWidth: 'min(560px, calc(100vw - 40px))',
+            whiteSpace: 'normal',
+            overflowWrap: 'anywhere',
+            lineHeight: 1.55,
+          },
+        },
+        pageText.value.caseRunFailed(detail || (isEnglish.value ? 'Please review the execution details.' : '请查看执行详情。')),
+      ),
+      duration: 8000,
+      closable: true,
+    })
   }
   fetchTestCases()
 }
