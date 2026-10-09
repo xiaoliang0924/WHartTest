@@ -64,6 +64,14 @@ def prepare_authenticated_group(steps: list[dict], *, mode: str, login_profile: 
                             and not same_route(urljoin(login_url, str((s.get('ope_value') or {}).get('expected') or
                                                    (s.get('ope_value') or {}).get('value') or '')), login_url)]
     allowed = {'goto', 'fill', 'click', 'wait', 'wait_for_ready'}
+    account_value = str((accounts[0].get('ope_value') or {}).get('value') or '') if len(accounts) == 1 else ''
+    password_value = str((passwords[0].get('ope_value') or {}).get('value') or '') if len(passwords) == 1 else ''
+    # Some generated cases intentionally leave the account blank while using
+    # the environment password variable. Since the environment login has
+    # already succeeded before page groups run, this is a delegated login,
+    # not evidence that the case is switching to another account. A recorded
+    # non-empty account must still match exactly.
+    delegated_credentials = not account_value and password_value == '${{password}}'
     pure_login = (
         first_group and len(login_gotos) == 1 and len(passwords) == 1
         and len(fills) == 2 and len(accounts) == 1 and len(clicks) == 1
@@ -73,7 +81,10 @@ def prepare_authenticated_group(steps: list[dict], *, mode: str, login_profile: 
         and steps.index(clicks[0]) > max(steps.index(s) for s in fills)
         and all(steps.index(s) > steps.index(clicks[0]) for s in assertions)
         and all(s.get('ope_key') in allowed or str(s.get('ope_key') or '').startswith('assert_') for s in steps)
-        and str((accounts[0].get('ope_value') or {}).get('value') or '') == str(login_profile.get('username') or '')
+        and (
+            account_value == str(login_profile.get('username') or '')
+            or delegated_credentials
+        )
     )
     if not pure_login:
         raise ValueError('脚本登录流程与环境自动登录重复或账号不一致；请明确选择脚本认证，或将独立登录组改为环境认证后的成功断言。')
