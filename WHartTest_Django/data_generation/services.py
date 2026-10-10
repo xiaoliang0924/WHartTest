@@ -425,6 +425,9 @@ class PlanExecutor:
         """Do not report case pre-data success based only on a written snapshot."""
         if self.trigger_type != DataGenerationRun.TRIGGER_CASE_PRE:
             return
+        if self.plan.template_key == 'biz_prepare_status_filter_data':
+            self._verify_status_filter_fixture_states()
+            return
         allowed_statuses = {
             'biz_create_and_assign': {'pending_process'},
             'biz_create_and_claim': {'processing', 'claimed'},
@@ -463,6 +466,52 @@ class PlanExecutor:
                 f'本次工单 {ticket_no} 的实际处理人与目标处理人不一致'
             )
         self.context['ticketStatus'] = actual_status
+
+    def _verify_status_filter_fixture_states(self) -> None:
+        expected = {
+            'pendingAssign': 'pending_assign',
+            'pendingProcess': 'pending_process',
+            'processing': 'processing',
+            'resolved': 'resolved',
+        }
+        original_context = self.context
+        for prefix, expected_status in expected.items():
+            ticket_id = original_context.get(f'{prefix}TicketId')
+            ticket_no = str(original_context.get(f'{prefix}TicketNo') or '').strip()
+            if not ticket_id or not ticket_no:
+                raise DataGenerationError(
+                    f'状态筛选夹具 {prefix} 缺少本次运行生成的工单 ID 或工单号'
+                )
+            row = None
+            for attempt in range(3):
+                self.context = {
+                    **original_context,
+                    'ticketId': ticket_id,
+                    'ticketNo': ticket_no,
+                    'processingTicketId': None,
+                }
+                row = self._find_ticket_row_for_context()
+                if (
+                    row
+                    and str(row.get('id') or row.get('ticketId') or '') == str(ticket_id)
+                    and str(row.get('ticketNo') or '') == ticket_no
+                    and str(row.get('status') or '').strip() == expected_status
+                ):
+                    break
+                if attempt < 2:
+                    time.sleep(0.5)
+            self.context = original_context
+            actual_status = str((row or {}).get('status') or '').strip()
+            if (
+                not row
+                or str(row.get('id') or row.get('ticketId') or '') != str(ticket_id)
+                or str(row.get('ticketNo') or '') != ticket_no
+                or actual_status != expected_status
+            ):
+                raise DataGenerationError(
+                    f'状态筛选夹具 {ticket_no} 的实际状态为 {actual_status or "空"}，'
+                    f'预期为 {expected_status}；未写入夹具标识'
+                )
 
     def execute(self, run: Optional[DataGenerationRun] = None) -> DataGenerationRun:
         if run is None:
@@ -1648,6 +1697,17 @@ class PlanExecutor:
         return
 
     def _run_api_call(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        if (
+            self.plan.template_key == 'biz_prepare_status_filter_data'
+            and str(step.get('name') or '').strip() == '取消分配状态筛选样本：待分配'
+        ):
+            row = self._find_ticket_row_for_context()
+            if row is not None and not _ticket_row_is_already_assigned(row):
+                return {
+                    'skipped': True,
+                    'reason': 'ticket_already_pending_assign',
+                    'ticketNo': row.get('ticketNo') or self.context.get('ticketNo'),
+                }
         skipped = self._maybe_skip_manual_assign_api_call(step)
         if skipped is not None:
             return skipped
@@ -1677,14 +1737,21 @@ class PlanExecutor:
         interface_data['body_source'] = 'data_generation_plan'
         _normalize_legacy_auth_header_placeholders(interface_data)
 
-        if (
+        step_name = str(step.get('name') or '').strip()
+        needs_empty_json_body = (
             self.plan.template_key == 'biz_create_assign_close'
-            and str(step.get('name') or '').strip() == '关闭工单'
+            and step_name == '关闭工单'
+        ) or (
+            self.plan.template_key == 'biz_prepare_status_filter_data'
+            and step_name == '取消分配状态筛选样本：待分配'
+        )
+        if (
+            needs_empty_json_body
             and isinstance(interface_data.get('body'), dict)
             and interface_data['body'].get('type') == 'none'
         ):
-            # The target close endpoint expects JSON, including for an empty
-            # payload. A body-less POST currently returns HTTP 500 there.
+            # These target POST endpoints require an explicit empty JSON object;
+            # a body-less request returns HTTP 500.
             interface_data['body'] = {'type': 'raw', 'content': {}}
 
         force_assignee_token = (

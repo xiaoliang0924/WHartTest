@@ -310,6 +310,92 @@ class PlanExecutorValidationTests(DjangoTestCase):
                 )
         login.assert_called_once()
 
+    @patch('data_generation.services.InterfaceRunner')
+    def test_status_filter_unassign_sends_empty_json_body(self, mock_runner_cls):
+        plan = DataGenerationPlan.objects.create(
+            project=self.project, name='status-filter-unassign',
+            template_key='biz_prepare_status_filter_data',
+            default_environment=self.environment, steps=[], created_by=self.user,
+        )
+        with patch('data_generation.services.get_template_by_key', return_value=None):
+            executor = PlanExecutor(plan, triggered_by=self.user)
+        executor.context.update(ticketId=10, ticketNo='PA10')
+        with patch.object(executor, '_find_ticket_row_for_context', return_value={
+            'id': 10, 'ticketNo': 'PA10', 'status': 'pending_process',
+            'assigneeUserId': 3, 'assigneeName': '张岩',
+        }), patch('data_generation.services.ApiInterface.objects.get') as get_interface, patch(
+            'api_environments.token_refresh.refresh_environment_tokens',
+            return_value={},
+        ):
+            interface = MagicMock()
+            interface.id = 483
+            interface.name = '取消分配工单'
+            interface.project_id = self.project.id
+            interface.get_interface_data.return_value = {
+                'type': 'http', 'method': 'POST',
+                'url': '/api/tickets/\${ticketId}/unassign',
+                'headers': [], 'params': [], 'path_params': [],
+                'body': {'type': 'none', 'content': None},
+            }
+            get_interface.return_value = interface
+            runner = MagicMock()
+            runner.run_interface.return_value = runner
+            runner.get_response.return_value = {
+                'success': True, 'status_code': 200,
+                'response': {'content': '{"message":"取消分配成功"}'},
+                'extracted_variables': {},
+            }
+            mock_runner_cls.return_value = runner
+            executor._run_api_call({
+                'type': 'api_call', 'name': '取消分配状态筛选样本：待分配',
+                'interface_id': 483,
+            })
+
+        sent_interface = mock_runner_cls.call_args.args[0]
+        self.assertEqual(sent_interface['body'], {'type': 'raw', 'content': {}})
+
+    def test_status_filter_case_predata_verifies_all_fixture_statuses(self):
+        plan = DataGenerationPlan.objects.create(
+            project=self.project, name='status-filter-fixtures',
+            template_key='biz_prepare_status_filter_data',
+            default_environment=self.environment, steps=[], created_by=self.user,
+        )
+        with patch('data_generation.services.get_template_by_key', return_value=None):
+            executor = PlanExecutor(
+                plan, triggered_by=self.user,
+                trigger_type=DataGenerationRun.TRIGGER_CASE_PRE,
+            )
+        fixtures = [
+            ('pending_assign', 10, 'PA10'),
+            ('pending_process', 11, 'PP11'),
+            ('processing', 12, 'PR12'),
+            ('resolved', 13, 'RS13'),
+        ]
+        executor.context.update({
+            f'{prefix}TicketId': ticket_id for prefix, ticket_id, _ in [
+                ('pendingAssign', 10, 'PA10'), ('pendingProcess', 11, 'PP11'),
+                ('processing', 12, 'PR12'), ('resolved', 13, 'RS13'),
+            ]
+        })
+        executor.context.update({
+            f'{prefix}TicketNo': ticket_no for prefix, _, ticket_no in [
+                ('pendingAssign', 10, 'PA10'), ('pendingProcess', 11, 'PP11'),
+                ('processing', 12, 'PR12'), ('resolved', 13, 'RS13'),
+            ]
+        })
+        rows = [
+            {'id': ticket_id, 'ticketNo': ticket_no, 'status': status}
+            for status, ticket_id, ticket_no in fixtures
+        ]
+        with patch.object(executor, '_find_ticket_row_for_context', side_effect=rows):
+            executor._verify_case_fixture_state()
+
+        rows[0] = {'id': 10, 'ticketNo': 'PA10', 'status': 'pending_process'}
+        with patch.object(executor, '_find_ticket_row_for_context', side_effect=rows), \
+                patch('data_generation.services.time.sleep'):
+            with self.assertRaisesMessage(DataGenerationError, '预期为 pending_assign'):
+                executor._verify_case_fixture_state()
+
     def test_case_fixture_verifies_actual_status_and_assignee(self):
         plan = DataGenerationPlan.objects.create(
             project=self.project, name='case-state-check',
@@ -692,6 +778,12 @@ class IntentRouterStateTests(DjangoTestCase):
         self.assertIn('创建状态筛选样本：待处理', names)
         self.assertIn('创建状态筛选样本：处理中', names)
         self.assertIn('创建状态筛选样本：已完成', names)
+        unassign_index = names.index('取消分配状态筛选样本：待分配')
+        self.assertEqual(
+            template['steps'][unassign_index]['interface_ref'],
+            'unassign_ticket',
+        )
+        self.assertGreater(unassign_index, names.index('创建状态筛选样本：待分配'))
 
         created = [step for step in template['steps'] if step['name'].startswith('创建状态筛选样本')]
         self.assertEqual(len(created), 4)

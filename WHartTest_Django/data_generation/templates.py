@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 ENV_REF_DEFAULT = 'default'
 REF_CREATE_TICKET = 'create_ticket'
 REF_ASSIGN_TICKET = 'assign_ticket'
+REF_UNASSIGN_TICKET = 'unassign_ticket'
 REF_TRANSFER_TICKET = 'transfer_ticket'
 REF_CLAIM_TICKET = 'claim_ticket'
 REF_RESOLVE_TICKET = 'resolve_ticket'
@@ -89,6 +90,16 @@ def _status_filter_fixture_steps() -> List[Dict[str, Any]]:
                 ticket_type='TYPE_A',
             )
         )
+        if prefix == 'pendingAssign':
+            # TYPE_A can be automatically assigned to a default handler at creation.
+            # Explicitly unassign this fixture so it is truly pending_assign.
+            steps.append(
+                _ticket_status_transition_step(
+                    name='取消分配状态筛选样本：待分配',
+                    interface_ref=REF_UNASSIGN_TICKET,
+                    ticket_id_key=ticket_id,
+                )
+            )
         if prefix in ('pendingProcess', 'processing', 'resolved'):
             steps.append(
                 _ticket_status_transition_step(
