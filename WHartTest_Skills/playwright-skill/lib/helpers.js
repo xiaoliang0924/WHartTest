@@ -2214,6 +2214,11 @@ async function selectFormDropdownOption(page, labelText, optionText) {
   }
 
   await select.waitFor({ state: 'visible', timeout: 15000 });
+  // Element Plus renders a readonly combobox input inside an interactive
+  // wrapper. Clicking the input directly can be intercepted by the selected
+  // item/placeholder sibling, so target the wrapper when it exists.
+  const selectTrigger = select.locator('.el-select__wrapper').first();
+  const clickTarget = (await selectTrigger.count()) > 0 ? selectTrigger : select;
 
   const readShown = async () => {
     const selectedItem = select.locator(
@@ -2242,7 +2247,7 @@ async function selectFormDropdownOption(page, labelText, optionText) {
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     await page.keyboard.press('Escape').catch(() => {});
     await page.waitForTimeout(150);
-    await select.click({ force: true });
+    await clickTarget.click({ timeout: 5000 });
     const dropdown = page
       .locator('.el-select-dropdown.el-popper:visible, .el-select-dropdown:visible')
       .last();
@@ -2280,6 +2285,112 @@ async function selectFormDropdownOption(page, labelText, optionText) {
     `RESULT=FAIL: 下拉「${labelText}」未选中「${optionText}」，筛选框当前为「${shown || '空'}」。禁止把列表里的「${optionText}」当成已筛选。`,
   );
   return false;
+}
+
+/**
+ * Set and verify both ends of a visible date-range filter.
+ * The page's real field label and expected input format must come from the
+ * current test step/page observation. Editable controls are filled directly;
+ * readonly controls are selected through the visible Element Plus range calendar.
+ */
+async function selectFormDateRange(page, labelText, startDate, endDate) {
+  const start = String(startDate || '').trim();
+  const end = String(endDate || '').trim();
+  if (!start || !end) {
+    throw new Error(`[selectFormDateRange]「${labelText}」必须同时提供开始和结束日期`);
+  }
+  await ensureFilterPanelVisible(page);
+  const field = getFilterFieldLocator(page, labelText);
+  if (!(await field.count())) {
+    throw new Error(`[selectFormDateRange] 未找到筛选字段「${labelText}」`);
+  }
+  const editor = field.locator('.el-date-editor').first();
+  await editor.waitFor({ state: 'visible', timeout: 15000 });
+  const inputs = editor.locator('input');
+  if ((await inputs.count()) < 2) {
+    throw new Error(`[selectFormDateRange]「${labelText}」不是可识别的日期范围控件`);
+  }
+  const startInput = inputs.nth(0);
+  const endInput = inputs.nth(1);
+  const readonly = await startInput.evaluate((el) => el.readOnly || el.hasAttribute('readonly')).catch(() => true)
+    || await endInput.evaluate((el) => el.readOnly || el.hasAttribute('readonly')).catch(() => true);
+  if (readonly) {
+    const startTarget = new Date(start);
+    const endTarget = new Date(end);
+    if (Number.isNaN(startTarget.getTime()) || Number.isNaN(endTarget.getTime())) {
+      throw new Error(`[selectFormDateRange] 日期格式无法解析：${start} 至 ${end}`);
+    }
+    await editor.click({ timeout: 5000 });
+    const picker = page.locator('.el-date-range-picker:visible').last();
+    await picker.waitFor({ state: 'visible', timeout: 10000 });
+    const contents = picker.locator('.el-date-range-picker__content');
+    if ((await contents.count()) < 2) {
+      throw new Error(`[selectFormDateRange]「${labelText}」日期面板不是可识别的双日历范围面板`);
+    }
+    const monthIndex = (date) => date.getFullYear() * 12 + date.getMonth();
+    const readMonth = async (content) => {
+      const header = await content.locator('.el-date-range-picker__header').innerText();
+      const chinese = header.match(/(\d{4})\s*年\s*(\d{1,2})\s*月/);
+      if (chinese) return Number(chinese[1]) * 12 + Number(chinese[2]) - 1;
+      const parsed = Date.parse(`${header} 1`);
+      if (!Number.isNaN(parsed)) {
+        const date = new Date(parsed);
+        return monthIndex(date);
+      }
+      throw new Error(`[selectFormDateRange] 无法识别日历月份：${header}`);
+    };
+    const navigateMonth = async (content, direction) => {
+      const selectors = direction === 'previous'
+        ? '.d-arrow-left, .arrow-left, .el-icon-arrow-left, [aria-label*="Previous Month"], [aria-label*="上个月"]'
+        : '.d-arrow-right, .arrow-right, .el-icon-arrow-right, [aria-label*="Next Month"], [aria-label*="下个月"]';
+      const button = content.locator(selectors).first();
+      await button.click({ timeout: 3000 });
+      await page.waitForTimeout(100);
+    };
+    const chooseCalendarDate = async (dateText, targetDate) => {
+      const wantedMonth = monthIndex(targetDate);
+      for (let attempt = 0; attempt < 36; attempt += 1) {
+        const leftMonth = await readMonth(contents.nth(0));
+        const rightMonth = await readMonth(contents.nth(1));
+        let content = null;
+        if (wantedMonth === leftMonth) content = contents.nth(0);
+        else if (wantedMonth === rightMonth) content = contents.nth(1);
+        else if (wantedMonth < leftMonth) await navigateMonth(contents.nth(0), 'previous');
+        else if (wantedMonth > rightMonth) await navigateMonth(contents.nth(1), 'next');
+        else await navigateMonth(contents.nth(0), 'next');
+
+        if (!content) continue;
+        const day = String(targetDate.getDate());
+        const cell = content
+          .locator('td.available:not(.disabled):not(.prev-month):not(.next-month)')
+          .filter({ hasText: new RegExp(`^\\s*${day}\\s*$`) })
+          .first();
+        await cell.waitFor({ state: 'visible', timeout: 3000 });
+        await cell.click({ timeout: 3000 });
+        await page.waitForTimeout(150);
+        return;
+      }
+      throw new Error(`[selectFormDateRange] 日历中未能选择日期 ${dateText}`);
+    };
+    await chooseCalendarDate(start, startTarget);
+    await chooseCalendarDate(end, endTarget);
+  } else {
+    await startInput.fill(start);
+    await startInput.press('Enter').catch(() => {});
+    await endInput.fill(end);
+    await endInput.press('Enter').catch(() => {});
+  }
+  await page.waitForTimeout(300);
+
+  const actualStart = String(await startInput.inputValue().catch(() => '')).trim();
+  const actualEnd = String(await endInput.inputValue().catch(() => '')).trim();
+  if (actualStart !== start || actualEnd !== end) {
+    throw new Error(
+      `[selectFormDateRange]「${labelText}」日期未完整回填：预期 ${start} 至 ${end}，实际 ${actualStart || '空'} 至 ${actualEnd || '空'}`,
+    );
+  }
+  console.log(`RESULT=PASS: 日期范围「${labelText}」已设置为 ${actualStart} 至 ${actualEnd}`);
+  return true;
 }
 
 /**
@@ -2513,6 +2624,16 @@ async function selectFilterDialogOption(page, fieldLabel, optionName, options = 
     );
   }
 
+  const confirmButton = dialog
+    .locator('.picker-footer button, .el-dialog__footer button')
+    .filter({ hasText: options.confirmName || /确定/ })
+    .first();
+  const selectedCount = async () => {
+    const text = String(await confirmButton.innerText().catch(() => ''));
+    const match = text.match(/[（(]\s*(\d+)\s*[）)]/);
+    return match ? Number(match[1]) : null;
+  };
+  const beforeCount = await selectedCount();
   await row.scrollIntoViewIfNeeded().catch(() => {});
   const checkbox = row.locator('.el-checkbox').first();
   if ((await checkbox.count()) > 0) {
@@ -2520,7 +2641,30 @@ async function selectFilterDialogOption(page, fieldLabel, optionName, options = 
   } else {
     await row.click();
   }
-  await page.waitForTimeout(400);
+  const selectedState = row.locator(
+    '.el-checkbox.is-checked, [aria-checked="true"], [aria-selected="true"], .is-selected',
+  ).first();
+  const deadline = Date.now() + 3000;
+  let confirmed = false;
+  while (Date.now() < deadline) {
+    if (await selectedState.count().catch(() => 0)) {
+      confirmed = await selectedState.isVisible().catch(() => true);
+      if (confirmed) break;
+    }
+    const afterCount = await selectedCount();
+    if (beforeCount !== null && afterCount !== null && afterCount > beforeCount) {
+      confirmed = true;
+      break;
+    }
+    await page.waitForTimeout(100);
+  }
+  if (!confirmed && beforeCount !== null) {
+    const afterCount = await selectedCount();
+    confirmed = afterCount > beforeCount;
+  }
+  if (!confirmed) {
+    throw new Error(`[selectFilterDialogOption] 点击「${optionName}」后未观察到选中状态`);
+  }
   console.log(`[selectFilterDialogOption] 已勾选「${optionName}」`);
   return dialog;
 }
@@ -2538,9 +2682,21 @@ async function confirmFilterDialog(page, fieldLabel, options = {}) {
     .first();
   await btn.waitFor({ state: 'visible', timeout: 12000 });
   const deadline = Date.now() + 8000;
+  let enabled = false;
   while (Date.now() < deadline) {
-    if (!(await btn.isDisabled().catch(() => false))) break;
+    if (!(await btn.isDisabled().catch(() => true))) {
+      enabled = true;
+      break;
+    }
     await page.waitForTimeout(200);
+  }
+  if (!enabled) {
+    throw new Error(`[confirmFilterDialog] 弹窗「${fieldLabel}」没有已选项目，不能确认`);
+  }
+  const buttonText = String(await btn.innerText().catch(() => ''));
+  const selectedCount = buttonText.match(/[（(]\s*(\d+)\s*[）)]/);
+  if (selectedCount && Number(selectedCount[1]) === 0) {
+    throw new Error(`[confirmFilterDialog] 弹窗「${fieldLabel}」显示已选 0 项，不能确认`);
   }
   try {
     await btn.click({ timeout: 8000 });
@@ -2548,6 +2704,7 @@ async function confirmFilterDialog(page, fieldLabel, options = {}) {
     await btn.click({ timeout: 5000, force: true });
   }
   await page.waitForTimeout(500);
+  await dialog.waitFor({ state: 'hidden', timeout: 5000 });
   console.log('[confirmFilterDialog] 已点击弹窗「确定」');
   return true;
 }
@@ -2580,6 +2737,19 @@ async function selectDialogMultiSelect(page, fieldLabel, optionName, options = {
         await selectFilterDialogOption(page, fieldLabel, name, { ...options, dialog });
       }
       await confirmFilterDialog(page, fieldLabel, { ...options, confirmName, dialog });
+      const deadline = Date.now() + 5000;
+      let shown = '';
+      while (Date.now() < deadline) {
+        shown = String(await filterField.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+        if (optionNames.every((name) => shown.includes(name))) break;
+        await page.waitForTimeout(100);
+      }
+      const missing = optionNames.filter((name) => !shown.includes(name));
+      if (missing.length) {
+        throw new Error(
+          `[selectDialogMultiSelect] 弹窗已确认，但筛选字段「${fieldLabel}」未回填：${missing.join('、')}；当前显示「${shown || '空'}」`,
+        );
+      }
       return true;
     }
     // 该字段是普通下拉，不是弹窗多选（单选语义，多传的名字会被忽略）
@@ -6783,6 +6953,7 @@ module.exports = {
   assertPageShows,
   clickRowAction,
   selectFormDropdownOption,
+  selectFormDateRange,
   selectDialogMultiSelect,
   selectTicketTypeInFilter,
   getFilterFieldLocator,

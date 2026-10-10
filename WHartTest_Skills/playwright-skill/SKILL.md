@@ -33,6 +33,7 @@ description: 通用浏览器自动化。用于页面操作、表单填写、登�
 | 断言区块/字段可见 | `await helpers.assertPageShows(page, ['基本信息', '工单类型', '工单摘要']);`；禁止 `getByText('工单类型*')`，必填星号是独立节点 |
 | 列表行点操作 | `await helpers.clickRowAction(page, '行内文本', '按钮名');` |
 | 普通下拉 | `await helpers.selectFormDropdownOption(page, '工单状态', '待处理');`；选完以筛选框当前值为准，禁止用列表里的同名文字代替 |
+| 日期范围 | `await helpers.selectFormDateRange(page, '创建日期', '2026-10-01', '2026-10-10');`；日期格式必须来自当前页面；helper 会在可编辑框中填写或在只读框的日历中逐端选择，并核对开始和结束输入值 |
 | 筛选项填值 | `await helpers.fillFilterField(page, '字段标签', '值');` |
 | 点菜单并校验 | `await helpers.navigateByMenu(page, '父菜单 > 子菜单', null, '/目标路由');`。**步骤里给了路由片段（如 `/work-order/tickets`）就把它作第 4 参传进去作兜底** —— 菜单被遮挡/子菜单折叠时会自动 goto 该路由；禁止用 `/work-order` 这类父级公共前缀 |
 | 点嵌套菜单路径 | `await helpers.navigateByMenuPath(page, ['父菜单', '子菜单']);`；禁止使用父级公共 URL 前缀 |

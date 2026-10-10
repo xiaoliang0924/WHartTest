@@ -2032,11 +2032,61 @@ async function runOneStep(page, step) {
     }
     else if (assertType === 'visible') await locator.waitFor({ state: 'visible', ...options });
     else if (assertType === 'hidden') await locator.waitFor({ state: 'hidden', ...options });
-    else if (assertType === 'enabled') await locator.waitFor({ state: 'attached', ...options });
+    else if (assertType === 'enabled') {
+      const deadline = Date.now() + options.timeout;
+      while (Date.now() < deadline && !(await locator.isEnabled().catch(() => false))) {
+        await page.waitForTimeout(100);
+      }
+      if (!(await locator.isEnabled().catch(() => false))) throw new Error('元素未启用');
+    }
+    else if (assertType === 'disabled') {
+      const deadline = Date.now() + options.timeout;
+      while (Date.now() < deadline && !(await locator.isDisabled().catch(() => false))) {
+        await page.waitForTimeout(100);
+      }
+      if (!(await locator.isDisabled().catch(() => false))) throw new Error('元素未禁用');
+    }
+    else if (assertType === 'checked') {
+      await locator.waitFor({ state: 'visible', ...options });
+      if (!(await locator.isChecked().catch(() => false))) throw new Error('元素未勾选');
+    }
     else if (assertType === 'text' || assertType === 'contain_text') {
       await locator.waitFor({ state: 'visible', ...options });
       if (inputValue) {
-        await locator.filter({ hasText: inputValue }).waitFor({ state: 'visible', ...options });
+        if (assertType === 'text') {
+          const deadline = Date.now() + options.timeout;
+          let actual = '';
+          while (Date.now() < deadline) {
+            actual = String(await locator.innerText().catch(() => '')).trim();
+            if (actual === inputValue.trim()) break;
+            await page.waitForTimeout(100);
+          }
+          if (actual !== inputValue.trim()) {
+            throw new Error(`文本断言失败：预期「${inputValue}」，实际「${actual}」`);
+          }
+        } else {
+          await locator.getByText(inputValue, { exact: false }).first().waitFor({ state: 'visible', ...options }).catch(async () => {
+            const actual = String(await locator.innerText().catch(() => '')).trim();
+            if (!actual.includes(inputValue)) {
+              throw new Error(`文本包含断言失败：预期包含「${inputValue}」，实际「${actual}」`);
+            }
+          });
+        }
+      }
+    }
+    else if (assertType === 'value') {
+      const expected = String(opeValue.expected ?? opeValue.value ?? inputValue);
+      const deadline = Date.now() + options.timeout;
+      let actual = '';
+      while (Date.now() < deadline) {
+        actual = String(await locator.inputValue().catch(async () =>
+          await locator.getAttribute('value').catch(async () => await locator.innerText().catch(() => ''))
+        )).trim();
+        if (actual === expected.trim()) break;
+        await page.waitForTimeout(100);
+      }
+      if (actual !== expected.trim()) {
+        throw new Error(`值断言失败：预期「${expected}」，实际「${actual}」`);
       }
     }
     else await locator.waitFor({ state: 'visible', ...options });
@@ -2046,10 +2096,28 @@ async function runOneStep(page, step) {
     return '步骤缺少元素定位（' + opeKey + '）';
   }
   switch (opeKey) {
-    case 'click':
+    case 'click': {
       await dismissVersionNoticeBeforeClick(page);
-      await locator.click({ timeout: 15000 });
+      // Element Plus select inputs are readonly and sit underneath a sibling
+      // placeholder. A click on input[role=combobox] times out because that
+      // sibling receives the pointer. Route the click to the component's
+      // visible interactive wrapper, preserving normal Playwright hit testing.
+      let clickTarget = locator;
+      const isReadonlyCombobox = await locator.evaluate((el) =>
+        el instanceof HTMLInputElement
+        && el.getAttribute('role') === 'combobox'
+        && el.hasAttribute('readonly')
+        && el.classList.contains('el-select__input')
+      ).catch(() => false);
+      if (isReadonlyCombobox) {
+        const wrapper = locator.locator(
+          'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " el-select__wrapper ")][1]',
+        ).first();
+        if (await wrapper.count()) clickTarget = wrapper;
+      }
+      await clickTarget.click({ timeout: 15000 });
       return null;
+    }
     case 'fill':
       await locator.fill(inputValue);
       return null;

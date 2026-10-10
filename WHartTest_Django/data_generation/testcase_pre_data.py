@@ -1770,6 +1770,7 @@ def build_testcase_step_script_hints(testcase: TestCase) -> str:
             '- 登录只有 stdout 出现 `RESULT=PASS` 才能判通过；出现 `RESULT=FAIL` 必须停止，禁止继续执行菜单步骤',
             '- 点菜单进入页面：`await helpers.navigateByMenu(page, \'步骤里的菜单名\');`；仅在明确知道目标路由时传唯一 URL 片段，禁止用 `/work-order` 这类父级公共前缀',
             '- 普通下拉：`await helpers.selectFormDropdownOption(page, \'字段标签\', \'选项\');`',
+            '- 日期范围：`await helpers.selectFormDateRange(page, \'字段标签\', \'开始日期\', \'结束日期\');`；helper 会填写可编辑框或在只读日历里逐端选择；日期格式按页面当前显示值填写，并检查两端回填。',
             '- 筛选项填值：`await helpers.fillFilterField(page, \'字段标签\', \'值\');`',
             '- 弹窗多选：`await helpers.selectDialogMultiSelect(page, \'字段标签\', \'选项名\');`',
             '- 点按钮：`await helpers.clickPageButton(page, \'按钮名\');`（会先关遮罩/侧栏）',
