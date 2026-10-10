@@ -72,7 +72,8 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
    - 普通下拉：`selectFormDropdownOption(page, 字段标签, 选项)`。helper 已检查筛选框当前值；不要再手写 `.el-form-item` / `innerText()` 重复校验，避免依赖页面 DOM 结构。helper 返回失败就将当前步骤标失败。禁止用列表单元格里的同名状态代替。
    - **按工单状态找行**（如「找到处理中工单」）：必须操作页面真实的「工单状态」下拉（`selectFormDropdownOption(page, '工单状态', '处理中')` 或 `filterWorkOrdersByStatus(page, '处理中')`），不能把状态填进「工单号/工单编号」文本搜索框。
    - **字段名必须来自当前页面**：若用例字段名与页面占位文字不同，先 `describePageForAI(page)` 并基于实际可见控件调用 helper；例如「工单编号」可对应页面的「搜索工单号…」。禁止猜不存在的 placeholder。拿不到控件时，报告实际可见字段与定位错误，不得改写成「缺失业务」。
-   - 弹窗多选：`selectDialogMultiSelect(page, 字段标签, 选项名)`
+   - **只打开多选弹窗**：必须调用 `openFilterDialogField(page, 字段标签)`，它会点击字段内真实的 `+` 触发器并等待弹窗。页面字段标题是静态文字，禁止用 `getByText('工单类型').click()` 或猜测 `.el-form-item` 去代替触发器。
+   - **选择弹窗选项**：同一步完整选择用 `selectDialogMultiSelect(page, 字段标签, 选项名)`；若用例把打开、勾选、确认拆为多步，则分别调用 `openFilterDialogField`、`selectFilterDialogOption`、`confirmFilterDialog`，不得提前执行后续步骤。
    - 日期范围：优先用 `selectFormDateRange(page, 字段标签, 开始日期, 结束日期)`；helper 会对可编辑框填写、对只读框在日历里逐端点选，并核对两个输入值。日期格式必须来自页面观察；只打开日历不能算选择成功。
    - 禁止用 `getByText('某状态').click()` 点表格里的状态文字。
    - 禁止 `getByPlaceholder('请选择工单状态')`：Element Plus 下拉通常没有这个 placeholder。

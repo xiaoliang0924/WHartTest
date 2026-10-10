@@ -34,6 +34,7 @@ description: 通用浏览器自动化。用于页面操作、表单填写、登�
 | 列表行点操作 | `await helpers.clickRowAction(page, '行内文本', '按钮名');` |
 | 普通下拉 | `await helpers.selectFormDropdownOption(page, '工单状态', '待处理');`；选完以筛选框当前值为准，禁止用列表里的同名文字代替 |
 | 日期范围 | `await helpers.selectFormDateRange(page, '创建日期', '2026-10-01', '2026-10-10');`；日期格式必须来自当前页面；helper 会在可编辑框中填写或在只读框的日历中逐端选择，并核对开始和结束输入值 |
+| 只打开筛选弹窗 | `await helpers.openFilterDialogField(page, '工单类型');`；该 helper 会点字段真实的 `+` 触发器并等待弹窗。禁止点静态字段文字或猜 `.el-form-item` 结构 |
 | 筛选项填值 | `await helpers.fillFilterField(page, '字段标签', '值');` |
 | 点菜单并校验 | `await helpers.navigateByMenu(page, '父菜单 > 子菜单', null, '/目标路由');`。**步骤里给了路由片段（如 `/work-order/tickets`）就把它作第 4 参传进去作兜底** —— 菜单被遮挡/子菜单折叠时会自动 goto 该路由；禁止用 `/work-order` 这类父级公共前缀 |
 | 点嵌套菜单路径 | `await helpers.navigateByMenuPath(page, ['父菜单', '子菜单']);`；禁止使用父级公共 URL 前缀 |
@@ -79,5 +80,6 @@ node run.js "await helpers.loginStep1(page);"
 ### 工单列表字段定位
 
 - 步骤说“找到状态为 X 的工单”时，用页面真实的「工单状态」下拉筛选：`selectFormDropdownOption(page, '工单状态', '处理中')` 或 `filterWorkOrdersByStatus(page, '处理中')`。不要把“处理中”等状态文本填入工单号搜索框。
+- 步骤只要求打开多选弹窗时，用 `openFilterDialogField(page, 字段标签)`；不要点击静态标签。步骤要求选项时，用 `selectDialogMultiSelect` 或按步骤拆分为 `openFilterDialogField`、`selectFilterDialogOption`、`confirmFilterDialog`。
 - 字段标签和输入框 placeholder 可能有文案差异。先用 `describePageForAI(page)` 查看当前页面实际字段；例如用例写“工单编号”，页面可能显示“搜索工单号…”。`fillFilterField` 会做常见别名匹配；如果仍找不到，应报告页面实际可见字段和原始定位错误，不要猜 placeholder，也不要归因成“缺失业务”。
 - 失败报告要保留触发失败的原始步骤和控件错误。后续步骤因前一步失败未执行时，标记“未执行”，不要把超时改写为后续步骤“缺失业务”。
