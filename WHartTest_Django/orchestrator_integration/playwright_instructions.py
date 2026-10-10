@@ -73,7 +73,8 @@ MANUAL_TESTCASE_EXECUTION_HINT = """
    - **按工单状态找行**（如「找到处理中工单」）：必须操作页面真实的「工单状态」下拉（`selectFormDropdownOption(page, '工单状态', '处理中')` 或 `filterWorkOrdersByStatus(page, '处理中')`），不能把状态填进「工单号/工单编号」文本搜索框。
    - **字段名必须来自当前页面**：若用例字段名与页面占位文字不同，先 `describePageForAI(page)` 并基于实际可见控件调用 helper；例如「工单编号」可对应页面的「搜索工单号…」。禁止猜不存在的 placeholder。拿不到控件时，报告实际可见字段与定位错误，不得改写成「缺失业务」。
    - **只打开多选弹窗**：必须调用 `openFilterDialogField(page, 字段标签)`，它会点击字段内真实的 `+` 触发器并等待弹窗。页面字段标题是静态文字，禁止用 `getByText('工单类型').click()` 或猜测 `.el-form-item` 去代替触发器。
-   - **选择弹窗选项**：同一步完整选择用 `selectDialogMultiSelect(page, 字段标签, 选项名)`；若用例把打开、勾选、确认拆为多步，则分别调用 `openFilterDialogField`、`selectFilterDialogOption`、`confirmFilterDialog`，不得提前执行后续步骤。
+   - **选择弹窗选项**：先从当前弹窗读取真实选项名；完整选择用 `selectDialogMultiSelect(page, 字段标签, 完整选项名)`。若拆为多步，严格按签名 `selectFilterDialogOption(page, 字段标签, 完整选项名)`，再调用 `confirmFilterDialog(page, 字段标签)`；禁止漏传参数、传 `undefined` 或凭空改选项名；helper 报错时修正签名/真实选项名，禁止用未经验证的原生 Playwright 定位绕过。
+   - **确认后核验筛选回填**：调用 `assertFilterFieldShows(page, 字段标签, 完整选项名)`，它读取真实 `.filter-field` 内容并核验完整值。禁止手写 `.el-form-item` / `.el-tag` 定位，因为页面自定义筛选布局不保证这些结构存在，标签视觉截断也不代表值缺失。
    - 日期范围：优先用 `selectFormDateRange(page, 字段标签, 开始日期, 结束日期)`；helper 会对可编辑框填写、对只读框在日历里逐端点选，并核对两个输入值。日期格式必须来自页面观察；只打开日历不能算选择成功。
    - 禁止用 `getByText('某状态').click()` 点表格里的状态文字。
    - 禁止 `getByPlaceholder('请选择工单状态')`：Element Plus 下拉通常没有这个 placeholder。

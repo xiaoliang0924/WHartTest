@@ -2590,6 +2590,12 @@ async function listFilterDialogOptions(page, fieldLabel, options = {}) {
  * 而是列出弹窗中全部可选项 + 最接近的一个，避免上层靠猜名字反复重试。
  */
 async function selectFilterDialogOption(page, fieldLabel, optionName, options = {}) {
+  if (!String(fieldLabel || '').trim() || !String(optionName || '').trim() || String(optionName).trim() === 'undefined') {
+    throw new Error(
+      '[selectFilterDialogOption] 参数错误：必须按 (page, fieldLabel, optionName) 传入字段标签和当前弹窗中的完整选项名；' +
+      `实际 fieldLabel=${JSON.stringify(fieldLabel)}，optionName=${JSON.stringify(optionName)}`,
+    );
+  }
   const dialog = options.dialog || (await getFilterDialog(page, fieldLabel, options.dialogTitle));
   await dialog.waitFor({ state: 'visible', timeout: 15000 });
 
@@ -2707,6 +2713,39 @@ async function confirmFilterDialog(page, fieldLabel, options = {}) {
   await dialog.waitFor({ state: 'hidden', timeout: 5000 });
   console.log('[confirmFilterDialog] 已点击弹窗「确定」');
   return true;
+}
+
+/**
+ * 确认弹窗后，按筛选面板真实的 .filter-field DOM 核验选中值已回填。
+ * 不依赖 Element Plus 的 .el-form-item / .el-tag 内部结构，支持标签视觉截断。
+ */
+async function assertFilterFieldShows(page, fieldLabel, expectedValues, options = {}) {
+  const expected = (Array.isArray(expectedValues) ? expectedValues : [expectedValues])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  if (!expected.length) {
+    throw new Error(`[assertFilterFieldShows] 字段「${fieldLabel}」没有提供预期值`);
+  }
+
+  await ensureFilterPanelVisible(page);
+  const field = getFilterFieldLocator(page, fieldLabel);
+  await field.waitFor({ state: 'visible', timeout: options.timeout || 10000 });
+  const deadline = Date.now() + (options.timeout || 5000);
+  let actual = '';
+  while (Date.now() < deadline) {
+    actual = String(await field.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+    if (expected.every((value) => actual.includes(value))) {
+      console.log(`RESULT=PASS: 筛选字段「${fieldLabel}」已回填「${expected.join('、')}」`);
+      return true;
+    }
+    await page.waitForTimeout(100);
+  }
+
+  const missing = expected.filter((value) => !actual.includes(value));
+  throw new Error(
+    `[assertFilterFieldShows] 筛选字段「${fieldLabel}」未显示预期值「${missing.join('、')}」；` +
+    `当前字段内容为「${actual || '空'}」`,
+  );
 }
 
 /**
@@ -6963,6 +7002,7 @@ module.exports = {
   listFilterDialogOptions,
   selectFilterDialogOption,
   confirmFilterDialog,
+  assertFilterFieldShows,
   filterByFields,
   filterWorkOrdersByStatus,
   detectWorkOrderPage,

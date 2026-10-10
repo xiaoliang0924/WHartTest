@@ -25,10 +25,11 @@ description: 通用浏览器自动化。用于页面操作、表单填写、登�
 | 列表页截图 | 自动包含搜索/筛选区 + 列表；步骤≥2 时若仍在登录页会报 `RESULT=FAIL` |
 | 关遮挡弹窗 | `await helpers.dismissBlockingDialogs(page);` |
 | 点按钮（先关遮罩/侧栏） | `await helpers.clickPageButton(page, '查询');`；普通按钮名带 `+` 时也可写成 `+ 创建工单`。**但筛选字段旁边的「+」不是按钮**，见下一行 |
-| 步骤：打开筛选字段的多选弹窗（如「工单类型」） | `await helpers.openFilterDialogField(page, '工单类型');`。这类字段是**弹窗式触发器**：**点击字段本身**即可打开弹窗。字段旁的「+」只是装饰图标（真实 DOM 是 `<i class="el-icon add-icon"><svg/></i>`，没有 role / aria-label / 文本），不要去找它 |
-| 步骤：在弹窗里勾选 1 个选项 | `await helpers.selectFilterDialogOption(page, '工单类型', '快递派送');`。选项名**必须是弹窗里真实存在的名称**（`.picker-item-name` 的文案）；写错不会静默超时，而是抛错并把**全部可选项 + 最接近的名字**列出来 |
+| 步骤：打开筛选字段的多选弹窗（如「工单类型」） | `await helpers.openFilterDialogField(page, '工单类型');`。它会点击该字段右侧真实的 `.add-icon` 触发器并等待弹窗；不要点击静态标题或猜 `.el-form-item` |
+| 步骤：在弹窗里勾选 1 个选项 | `await helpers.selectFilterDialogOption(page, '工单类型', '弹窗中观察到的完整选项名');`。参数顺序固定为 `(page, fieldLabel, optionName)`；选项名必须来自当前弹窗（可先用 `listFilterDialogOptions` 读取），禁止省略、传 `undefined` 或凭空改名 |
 | **选项名不确定时先查真实名单** | `await helpers.listFilterDialogOptions(page, '工单类型');` → 返回弹窗里全部选项名（只读，自动关闭弹窗）。**严禁**凭猜测写选项名后反复重试：报错里已明确说明「这是用例选项名与被测系统数据不一致，重试不会成功」，此时应把差异暴露给人工/改用例，不要换一个名字继续猜 |
-| 步骤：点弹窗「确定」 | `await helpers.confirmFilterDialog(page, '工单类型');`。未勾选时按钮文案是「确定（0）」且 disabled，helper 会等它变为可点 |
+| helper 报参数/定位错误 | 先按函数签名修正字段名和选项名；禁止绕过 helper 改用未经验证的原生 Playwright 定位继续点击 |
+| 步骤：点弹窗「确定」 | `await helpers.confirmFilterDialog(page, '工单类型');`。未勾选时按钮文案是「确定（0）」且 disabled，helper 会等它变为可点。随后用 `await helpers.assertFilterFieldShows(page, '工单类型', '完整选项名');` 核验筛选字段已回填，禁止手写 `.el-form-item` / `.el-tag` 猜定位 |
 | 弹窗多选（一步到底：弹窗+勾选+确定） | `await helpers.selectDialogMultiSelect(page, '字段标签', '选项名');`；**勾多个就传数组**：`selectDialogMultiSelect(page, '工单类型', ['快递派送', '快递UPS派送'])`。字段若是普通下拉会自动走下拉分支 |
 | 断言区块/字段可见 | `await helpers.assertPageShows(page, ['基本信息', '工单类型', '工单摘要']);`；禁止 `getByText('工单类型*')`，必填星号是独立节点 |
 | 列表行点操作 | `await helpers.clickRowAction(page, '行内文本', '按钮名');` |
