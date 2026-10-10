@@ -1289,6 +1289,11 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     'run_steps',
                     {
                         'steps': steps,
+                        # Keep transient UI state (open dialogs, dropdowns, date
+                        # panels and current selections) between page-step groups.
+                        # cmdRunSteps normally presses Escape during cleanup; only
+                        # the last group should perform that cleanup.
+                        'preserve_ui_state': group_index < len(groups),
                         # Only auto-select the application's automatic-login
                         # path when this group has an explicitly bound state.
                         'auto_login_if_prompted': bool(pending_auth),

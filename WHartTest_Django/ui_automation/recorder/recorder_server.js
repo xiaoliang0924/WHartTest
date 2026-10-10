@@ -2367,19 +2367,25 @@ async function cmdRunSteps(params) {
     }
   } finally {
     state.preRunning = false;
-    // 前置执行往往会把元素滚动到可视区，并留下焦点与下拉/弹层（popper 为 fixed 定位，
-    // 归位后仍悬浮遮挡画面）。结束后统一归位：
-    // ① Escape 收起下拉/菜单等弹层；② 滚回顶部；③ 清除焦点；④ 立即推一帧干净画面。
-    try {
-      await state.page.keyboard.press('Escape');
-    } catch (_) {}
-    try {
-      await state.page.evaluate(() => {
-        window.scrollTo(0, 0);
-        var ae = document.activeElement;
-        if (ae && typeof ae.blur === 'function') ae.blur();
-      });
-    } catch (_) {}
+    // A multi-page-step UI case is replayed as several run_steps calls on the
+    // same page. Preserve transient UI state between groups so a dialog,
+    // dropdown, date panel, or selection opened in one group remains available
+    // to the next. The caller opts out of cleanup until its final group.
+    if (!params.preserve_ui_state) {
+      // 前置执行往往会把元素滚动到可视区，并留下焦点与下拉/弹层（popper 为 fixed 定位，
+      // 归位后仍悬浮遮挡画面）。最后一组结束后统一归位：
+      // ① Escape 收起下拉/菜单等弹层；② 滚回顶部；③ 清除焦点。
+      try {
+        await state.page.keyboard.press('Escape');
+      } catch (_) {}
+      try {
+        await state.page.evaluate(() => {
+          window.scrollTo(0, 0);
+          var ae = document.activeElement;
+          if (ae && typeof ae.blur === 'function') ae.blur();
+        });
+      } catch (_) {}
+    }
     try {
       const shot = await state.page.screenshot({ type: 'jpeg', quality: 60 });
       pushEvent('frame', {
