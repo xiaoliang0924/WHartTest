@@ -481,6 +481,64 @@ class HybridExecutionAndBindingTests(APITransactionTestCase):
         self.ui_element.refresh_from_db()
         self.assertEqual(self.ui_element.locator_value, "//button[@id='old-login-btn']")
 
+    def test_generated_work_order_type_trigger_uses_verified_add_icon_locator(self):
+        from asgiref.sync import async_to_sync
+        from orchestrator_integration.agent_loop_view import _apply_safe_generated_ui_repair
+
+        self.testcase.ui_test_case = self.ui_testcase
+        self.testcase.save()
+        self.ui_page.url = "https://test.bot.by56.com/work-order/tickets"
+        self.ui_page.save(update_fields=["url"])
+        self.ui_element.name = "工单类型筛选字段添加按钮"
+        self.ui_element.locator_value = "//label[contains(text(), '工单类型')]/following-sibling::*//i[contains(@class, 'el-icon-plus')]"
+        self.ui_element.locator_type_2 = "xpath"
+        self.ui_element.locator_value_2 = "//input[@role='combobox']"
+        self.ui_element.locator_type_3 = "css"
+        self.ui_element.locator_value_3 = ".el-icon-plus"
+        self.ui_element.save(update_fields=[
+            "name", "locator_value", "locator_type_2", "locator_value_2",
+            "locator_type_3", "locator_value_3",
+        ])
+        detail = self.ui_page_step.step_details.get()
+        diagnosis = {
+            "root_cause_type": "SCRIPT_DEFECT",
+            "healing_suggestion": {
+                "can_self_heal": True,
+                "repair_type": "locator",
+                "element_id": self.ui_element.id,
+                "suggested_locator_type": "xpath",
+                "suggested_locator_value": "//input[@role='combobox']",
+            },
+            "evidence": {
+                **self._failure_evidence(detail),
+                "actual_url": self.ui_page.url,
+            },
+            "failure_step_info": {
+                "step_sort": 1,
+                "element_name": self.ui_element.name,
+                "operation_type": "click",
+                "element_id": self.ui_element.id,
+                "current_locator_value": self.ui_element.locator_value,
+                "error_message": "locator.click: Timeout 15000ms exceeded",
+            },
+        }
+
+        result = async_to_sync(_apply_safe_generated_ui_repair)(
+            project_id=self.project.id,
+            ui_test_case_id=self.ui_testcase.id,
+            diagnosis=diagnosis,
+            attempt=1,
+        )
+
+        self.assertEqual(result["status"], "applied")
+        detail.refresh_from_db()
+        repaired = detail.element
+        self.assertIn(".add-icon", repaired.locator_value)
+        self.assertNotIn("el-icon-plus", repaired.locator_value)
+        self.assertNotIn("combobox", repaired.locator_value)
+        self.assertIsNone(repaired.locator_value_2)
+        self.assertIsNone(repaired.locator_value_3)
+
     def test_missing_machine_mapping_prevents_automatic_repair(self):
         from asgiref.sync import async_to_sync
         from orchestrator_integration.agent_loop_view import _apply_safe_generated_ui_repair

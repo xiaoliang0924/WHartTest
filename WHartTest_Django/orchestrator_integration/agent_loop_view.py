@@ -737,7 +737,7 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
         "导航步骤必须检查当前页面状态：如果该步骤开始时 URL 的 origin+pathname 已与目标页面一致，不要生成冗余菜单点击，改为保存基于本次实际 URL 的 assert mode=url、match=path；"
         "若必须点击导航，只能保存本次观察到的可见菜单项。定位到隐藏菜单节点时不得使用 force click 或单纯替换 XPath，应限定可见导航区域；没有可见目标时保留失败，不要伪造通过。"
         "对于 Element Plus 普通下拉，若实际脚本通过 selectFormDropdownOption 选择，保存动作时点击可见的 .el-select__wrapper，再点击可见下拉层中的精确选项；禁止把只读 input[role=combobox] 作为 click 目标。选择后必须保存对筛选框已显示目标值的断言。"
-        "对于弹窗多选，必须把打开弹窗、点击真实选项行、确认作为独立且有序的实际动作；只有观察到弹窗已选数量大于 0 或选中标记后才保存确认动作，关闭后断言筛选字段已显示所选项。"
+        "对于弹窗多选，必须把打开弹窗、点击真实选项行、确认作为独立且有序的实际动作；只有观察到弹窗已选数量大于 0 或选中标记后才保存确认动作，关闭后断言筛选字段已显示所选项。对于本系统工单列表的工单类型弹窗筛选，触发器是真实 .filter-field 容器内的 .add-icon；若需保存为元素定位，使用 XPath //*[contains(@class,'filter-field')][.//*[contains(@class,'filter-field-label') and normalize-space()='工单类型']]//*[contains(@class,'add-icon')]，禁止推测 .el-icon-plus 或点击只读 input[role=combobox]；其他字段也必须按当前 DOM 观察确定对应的真实触发器。"
         "对于日期范围，必须保存选择实际目标起止日期的动作，并分别断言起始与结束输入值；只打开日历不算完成选择。若实际执行使用 selectFormDateRange，应保存真实观察到的输入值校验；若用日历选择，则定位日期面板中的完整年月与日期。日期格式与定位器必须来自本次页面观察，不得猜测。"
         "任何控件操作如果没有可验证的回填值/选中状态证据，不得保存为成功步骤；应保留失败或说明证据不足。"
         "没有足够证据的步骤不要编造，工具若因步骤不完整拒绝保存，应如实报告。"
@@ -1019,6 +1019,43 @@ async def _apply_safe_generated_ui_repair(
         "error_message": evidence.get("error_message") or "",
     }
 
+    # The work-order type filter is a custom popup trigger, not an Element Plus
+    # el-icon-plus or readonly combobox. Prefer the selector used by the
+    # verified Playwright helper when a generated locator for this trigger
+    # times out; never accept an LLM-invented selector for this known control.
+    step_info = diagnosis.get("failure_step_info") or {}
+    element_name = str(step_info.get("element_name") or "")
+    label_match = re.match(r"^\s*([\w\u4e00-\u9fff /-]+?)\s*筛选字段添加按钮", element_name)
+    page_url = str(evidence.get("actual_url") or "")
+    try:
+        page_path = urlsplit(page_url).path.rstrip("/") or "/"
+    except Exception:
+        page_path = ""
+    error_lower = failure_info["error_message"].lower()
+    if (
+        failure_info["operation_type"] == "click"
+        and "timeout" in error_lower
+        and page_path == "/work-order/tickets"
+        and label_match
+        and label_match.group(1) == "工单类型"
+    ):
+        suggestion = {
+            **suggestion,
+            "can_self_heal": True,
+            "repair_type": "locator",
+            "element_id": evidence.get("element_id"),
+            "suggested_locator_type": "xpath",
+            "suggested_locator_value": (
+                "//*[contains(@class,'filter-field')]"
+                "[.//*[contains(@class,'filter-field-label') and normalize-space()='工单类型']]"
+                "//*[contains(@class,'add-icon')]"
+            ),
+            "explanation": "当前页面是自定义弹窗筛选字段；按已验证的页面助手，点击 .filter-field 中工单类型标签对应的 .add-icon 触发器。",
+        }
+        diagnosis["root_cause_type"] = "SCRIPT_DEFECT"
+        diagnosis["healing_suggestion"] = suggestion
+        repair_type = "locator"
+
     if repair_type == "navigation_assertion":
         from ui_automation.models import UiCaseStepsDetailed, UiPageStepsDetailed
 
@@ -1265,20 +1302,21 @@ async def _apply_safe_generated_ui_repair(
             ):
                 return {"status": "skipped", "reason": "AI 建议与当前定位器相同，未重复修改。"}
 
-            # Keep the old locator as a fallback on the cloned element.  The
-            # repair never changes assertion ope_value or any business value.
+            # The current click already tried every configured locator and
+            # timed out, so do not retain the failed primary or its fallbacks.
+            # A repaired clone must start with only the evidence-backed locator.
             clone = UiElement.objects.create(
                 page=element.page,
                 name=f"{element.name}（AI修复{attempt}）"[:64],
                 locator_type=locator_type,
                 locator_value=locator_value,
                 locator_index=element.locator_index,
-                locator_type_2=element.locator_type,
-                locator_value_2=element.locator_value,
-                locator_index_2=element.locator_index,
-                locator_type_3=element.locator_type_2,
-                locator_value_3=element.locator_value_2,
-                locator_index_3=element.locator_index_2,
+                locator_type_2=None,
+                locator_value_2=None,
+                locator_index_2=None,
+                locator_type_3=None,
+                locator_value_3=None,
+                locator_index_3=None,
                 wait_time=element.wait_time,
                 is_iframe=element.is_iframe,
                 iframe_locator=element.iframe_locator,
