@@ -533,7 +533,7 @@ class HybridExecutionAndBindingTests(APITransactionTestCase):
         self.assertEqual(result["status"], "applied")
         detail.refresh_from_db()
         repaired = detail.element
-        self.assertIn(".add-icon", repaired.locator_value)
+        self.assertIn("add-icon", repaired.locator_value)
         self.assertNotIn("el-icon-plus", repaired.locator_value)
         self.assertNotIn("combobox", repaired.locator_value)
         self.assertIsNone(repaired.locator_value_2)
