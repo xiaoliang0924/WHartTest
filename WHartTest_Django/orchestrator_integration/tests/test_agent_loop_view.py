@@ -45,6 +45,7 @@ from ..builtin_tools.skill_tools import (
     _record_testcase_step_tool_result,
 )
 from ..middleware_config import build_dynamic_interrupt_on
+from ..playwright_instructions import MANUAL_TESTCASE_EXECUTION_HINT
 
 
 class SsePayloadDecodeTests(SimpleTestCase):
@@ -1499,3 +1500,14 @@ class SkillFailureReminderTests(SimpleTestCase):
         )
         self.assertIn("脚本错误，请修正后重试", output)
         self.assertIn("测试执行结果: 不通过", output)
+
+
+class FilterAssertionInstructionRegressionTests(SimpleTestCase):
+    def test_dropdown_failure_cannot_be_overridden_by_page_wide_text(self):
+        self.assertIn("筛选控件自身当前值与目标选项完全一致", MANUAL_TESTCASE_EXECUTION_HINT)
+        self.assertIn("页面任意位置文本存在性", MANUAL_TESTCASE_EXECUTION_HINT)
+
+    def test_status_filter_assertion_uses_matching_positive_and_negative_fixtures(self):
+        self.assertIn("其他状态的造数工单不出现", MANUAL_TESTCASE_EXECUTION_HINT)
+        self.assertIn("先核实每个造数工单号与状态的对应关系", MANUAL_TESTCASE_EXECUTION_HINT)
+        self.assertIn("结果不可验证", MANUAL_TESTCASE_EXECUTION_HINT)

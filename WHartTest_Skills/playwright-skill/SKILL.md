@@ -34,6 +34,9 @@ description: 通用浏览器自动化。用于页面操作、表单填写、登�
 | 断言区块/字段可见 | `await helpers.assertPageShows(page, ['基本信息', '工单类型', '工单摘要']);`；禁止 `getByText('工单类型*')`，必填星号是独立节点 |
 | 列表行点操作 | `await helpers.clickRowAction(page, '行内文本', '按钮名');` |
 | 普通下拉 | `await helpers.selectFormDropdownOption(page, '工单状态', '待处理');`；选完以筛选框当前值为准，禁止用列表里的同名文字代替 |
+- 下拉 helper 超时/失败时，禁止用 `assertPageShows` 搜索页面任意位置同名文字兜底通过；只能在只读检查确认筛选控件自身当前值完全匹配后通过。
+- 对“仅返回状态 X”的用例，先核实造数工单号对应的实际状态，只断言 X 状态工单出现、其他状态工单不出现；禁止把两种状态的工单号都要求出现在结果中。列表没有状态列时查状态徽章、详情或只读数据证据；不能用整行摘要/主题里的状态词判定，无法观察则报告不可验证。
+
 | 日期范围 | `await helpers.selectFormDateRange(page, '创建日期', '2026-10-01', '2026-10-10');`；日期格式必须来自当前页面；helper 会在可编辑框中填写或在只读框的日历中逐端选择，并核对开始和结束输入值 |
 | 只打开筛选弹窗 | `await helpers.openFilterDialogField(page, '工单类型');`；该 helper 会点字段真实的 `+` 触发器并等待弹窗。禁止点静态字段文字或猜 `.el-form-item` 结构 |
 | 筛选项填值 | `await helpers.fillFilterField(page, '字段标签', '值');` |
