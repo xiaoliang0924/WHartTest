@@ -1726,6 +1726,10 @@ async function resolveLocatorWithFallback(page, selector, log, options = {}) {
  * 插入的 goto 会以 net::ERR_ABORTED 被中止。等待导航稳定后重试一次。
  */
 async function gotoWithRetry(page, url, attempts = 2) {
+  // Each recorded page-step group receives a synthetic goto for its base URL.
+  // When consecutive groups already share that exact URL, reloading would
+  // erase transient UI state such as an open dialog or selected filters.
+  if (page.url() === url) return;
   let lastErr = null;
   for (let i = 0; i < attempts; i++) {
     try {
