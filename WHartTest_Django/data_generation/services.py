@@ -710,6 +710,8 @@ class PlanExecutor:
 
     def _is_manual_assign_api_step(self, step: Dict[str, Any]) -> bool:
         step_name = str(step.get('name') or '').strip()
+        if '取消分配' in step_name:
+            return False
         if step_name == '分配工单':
             return True
         if step.get('interface_ref') == REF_ASSIGN_TICKET:
@@ -723,8 +725,10 @@ class PlanExecutor:
         ).first()
         if interface is None:
             return False
-        name = str(interface.name or '')
-        return '分配工单' in name or (name.startswith('分配') and '取消' not in name)
+        name = str(interface.name or '').strip()
+        if '取消分配' in name:
+            return False
+        return '分配工单' in name or name.startswith('分配')
 
     def _is_transfer_api_step(self, step: Dict[str, Any]) -> bool:
         if str(step.get('name') or '').strip() == '转派工单':

@@ -310,6 +310,24 @@ class PlanExecutorValidationTests(DjangoTestCase):
                 )
         login.assert_called_once()
 
+    def test_unassign_interface_is_not_classified_as_manual_assign(self):
+        plan = DataGenerationPlan.objects.create(
+            project=self.project, name='status-filter-unassign-classification',
+            template_key='biz_prepare_status_filter_data',
+            default_environment=self.environment, steps=[], created_by=self.user,
+        )
+        with patch('data_generation.services.get_template_by_key', return_value=None):
+            executor = PlanExecutor(plan, triggered_by=self.user)
+        interface = MagicMock()
+        interface.name = '取消分配工单'
+        with patch('data_generation.services.ApiInterface.objects.filter') as filter_interfaces:
+            filter_interfaces.return_value.first.return_value = interface
+            self.assertFalse(executor._is_manual_assign_api_step({
+                'type': 'api_call',
+                'name': '取消分配状态筛选样本：待分配',
+                'interface_id': 483,
+            }))
+
     @patch('data_generation.services.InterfaceRunner')
     def test_status_filter_unassign_sends_empty_json_body(self, mock_runner_cls):
         plan = DataGenerationPlan.objects.create(
