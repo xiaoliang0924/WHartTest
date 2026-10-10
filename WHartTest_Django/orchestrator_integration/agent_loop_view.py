@@ -737,7 +737,7 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
         "导航步骤必须检查当前页面状态：如果该步骤开始时 URL 的 origin+pathname 已与目标页面一致，不要生成冗余菜单点击，改为保存基于本次实际 URL 的 assert mode=url、match=path；"
         "若必须点击导航，只能保存本次观察到的可见菜单项。定位到隐藏菜单节点时不得使用 force click 或单纯替换 XPath，应限定可见导航区域；没有可见目标时保留失败，不要伪造通过。"
         "对于 Element Plus 普通下拉，若实际脚本通过 selectFormDropdownOption 选择，保存动作时点击可见的 .el-select__wrapper，再点击可见下拉层中的精确选项；禁止把只读 input[role=combobox] 作为 click 目标。选择后必须保存对筛选框已显示目标值的断言。"
-        "对于弹窗多选，必须把打开弹窗、点击真实选项行、确认作为独立且有序的实际动作；只有观察到弹窗已选数量大于 0 或选中标记后才保存确认动作，关闭后断言筛选字段已显示所选项。对于本系统工单列表的工单类型弹窗筛选，触发器是真实 .filter-field 容器内的 .add-icon；若需保存为元素定位，使用 XPath //*[contains(@class,'filter-field')][.//*[contains(@class,'filter-field-label') and normalize-space()='工单类型']]//*[contains(@class,'add-icon')]，禁止推测 .el-icon-plus 或点击只读 input[role=combobox]；其他字段也必须按当前 DOM 观察确定对应的真实触发器。"
+        "对于弹窗多选，必须把打开弹窗、点击真实选项行、确认作为独立且有序的实际动作；只有观察到弹窗已选数量大于 0 或选中标记后才保存确认动作。关闭后断言筛选字段已显示所选项：限定到页面实际观察到的字段容器及其标签/控件结构，不能假设标签是原生 label，也不能猜 .el-tag 或 following-sibling DOM 层级；自定义筛选面板应依据真实 .filter-field 与 .filter-field-label 结构定位。查询后不要再定位已关闭弹窗中的选项；若没有结果行，依据页面实际显示的空结果状态和仍保留的筛选值验收。对于本系统工单列表的工单类型弹窗筛选，触发器是真实 .filter-field 容器内的 .add-icon；若需保存为元素定位，使用 XPath //*[contains(@class,'filter-field')][.//*[contains(@class,'filter-field-label') and normalize-space()='工单类型']]//*[contains(@class,'add-icon')]，禁止推测 .el-icon-plus 或点击只读 input[role=combobox]；其他字段也必须按当前 DOM 观察确定对应的真实触发器。"
         "对于日期范围，必须保存选择实际目标起止日期的动作，并分别断言起始与结束输入值；只打开日历不算完成选择。若实际执行使用 selectFormDateRange，应保存真实观察到的输入值校验；若用日历选择，则定位日期面板中的完整年月与日期。日期格式与定位器必须来自本次页面观察，不得猜测。"
         "任何控件操作如果没有可验证的回填值/选中状态证据，不得保存为成功步骤；应保留失败或说明证据不足。"
         "没有足够证据的步骤不要编造，工具若因步骤不完整拒绝保存，应如实报告。"
@@ -1000,7 +1000,7 @@ async def _apply_safe_generated_ui_repair(
         return {"status": "skipped", "reason": "无法准确定位真实失败步骤，未自动修改用例。"}
     from ui_automation.models import UiPageStepsDetailed
 
-    failed_detail = await sync_to_async(lambda: UiPageStepsDetailed.objects.filter(
+    failed_detail = await sync_to_async(lambda: UiPageStepsDetailed.objects.select_related("element").filter(
         id=failed_detail_id,
         page_step__case_usages__test_case_id=ui_test_case_id,
         page_step__project_id=project_id,
@@ -1265,6 +1265,45 @@ async def _apply_safe_generated_ui_repair(
 
     locator_type = str(suggestion.get("suggested_locator_type") or "").strip()
     locator_value = str(suggestion.get("suggested_locator_value") or "").strip()
+
+    # Generated post-confirm assertions for the custom filter panel must scope
+    # the selected value to the actual `.filter-field` container. This app uses
+    # a div-based label/control layout, so LLM repairs that assume a native
+    # <label>, guessed siblings, or Element Plus `.el-tag` keep failing even
+    # when the selected chip is visibly present. Derive the field and value
+    # strictly from the failed asset and use the observed DOM contract.
+    element_name = str(getattr(failed_detail.element, "name", "") or "")
+    current_locator = str(failure_info.get("current_locator_value") or "")
+    if (
+        failure_info.get("operation_type") == "assert_visible"
+        and "Timeout" in str(failure_info.get("error_message") or "")
+        and "筛选字段显示" in element_name
+        and ("label" in current_locator or "filter-field" in current_locator)
+    ):
+        label_match = re.search(
+            r"contains\s*\(\s*text\(\)\s*,\s*['\"]([^'\"]+)['\"]",
+            current_locator,
+        )
+        expected_value = element_name.split("筛选字段显示", 1)[1].split("（AI修复", 1)[0].strip()
+        if label_match and expected_value:
+            field_label = label_match.group(1).strip()
+
+            def xpath_literal(value: str) -> str:
+                if "'" not in value:
+                    return f"'{value}'"
+                if '"' not in value:
+                    return f'"{value}"'
+                return "concat(" + ", \"'\", ".join(
+                    f"'{part}'" for part in value.split("'")
+                ) + ")"
+
+            locator_type = "xpath"
+            locator_value = (
+                "//*[contains(concat(' ', normalize-space(@class), ' '), ' filter-field ')]"
+                "[.//*[contains(concat(' ', normalize-space(@class), ' '), ' filter-field-label ') "
+                f"and normalize-space()={xpath_literal(field_label)}]]"
+                f"[contains(., {xpath_literal(expected_value)})]"
+            )
     from ui_automation.models import UiCaseStepsDetailed, UiElement, UiPageStepsDetailed
 
     valid_locator_types = {value for value, _label in UiElement.LOCATOR_TYPE_CHOICES}

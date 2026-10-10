@@ -539,6 +539,56 @@ class HybridExecutionAndBindingTests(APITransactionTestCase):
         self.assertIsNone(repaired.locator_value_2)
         self.assertIsNone(repaired.locator_value_3)
 
+    def test_generated_filter_value_assertion_uses_observed_filter_field_container(self):
+        from asgiref.sync import async_to_sync
+        from orchestrator_integration.agent_loop_view import _apply_safe_generated_ui_repair
+
+        self.testcase.ui_test_case = self.ui_testcase
+        self.testcase.save()
+        self.ui_page.url = "https://test.bot.by56.com/work-order/tickets"
+        self.ui_page.save(update_fields=["url"])
+        self.ui_element.name = "工单类型筛选字段显示快递UPS派送（AI修复1）"
+        self.ui_element.locator_type = "xpath"
+        self.ui_element.locator_value = (
+            "//label[contains(text(), '工单类型')]/following-sibling::*"
+            "//*[contains(text(), '快递UPS派送')]"
+        )
+        self.ui_element.save(update_fields=["name", "locator_type", "locator_value"])
+        detail = self.ui_page_step.step_details.get()
+        detail.ope_key = "assert_visible"
+        detail.step_type = 1
+        detail.save(update_fields=["ope_key", "step_type"])
+        evidence = self._failure_evidence(detail)
+        evidence.update({
+            "operation_type": "assert_visible",
+            "error_message": "locator.waitFor: Timeout 10000ms exceeded",
+            "actual_url": self.ui_page.url,
+            "page_url": self.ui_page.url,
+        })
+        diagnosis = {
+            "root_cause_type": "SCRIPT_DEFECT",
+            "healing_suggestion": {
+                "can_self_heal": True,
+                "repair_type": "locator",
+                "element_id": self.ui_element.id,
+                "suggested_locator_type": "xpath",
+                "suggested_locator_value": "//label/parent::*//*[contains(@class,'el-tag')]",
+            },
+            "evidence": evidence,
+        }
+
+        result = async_to_sync(_apply_safe_generated_ui_repair)(
+            project_id=self.project.id,
+            ui_test_case_id=self.ui_testcase.id,
+            diagnosis=diagnosis,
+            attempt=1,
+        )
+
+        self.assertEqual(result["status"], "applied")
+        detail.refresh_from_db()
+        self.assertIn("filter-field-label", detail.element.locator_value)
+        self.assertIn("快递UPS派送", detail.element.locator_value)
+
     def test_missing_machine_mapping_prevents_automatic_repair(self):
         from asgiref.sync import async_to_sync
         from orchestrator_integration.agent_loop_view import _apply_safe_generated_ui_repair
