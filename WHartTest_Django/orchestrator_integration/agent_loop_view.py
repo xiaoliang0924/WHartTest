@@ -982,7 +982,7 @@ def _promote_hidden_current_route_navigation(diagnosis: Dict[str, Any]) -> bool:
         evidence.get("mapping_status") != "resolved"
         or evidence.get("operation_type") != "click"
         or not evidence.get("element_id")
-        or "not visible" not in error
+        or not ("not visible" in error or "timeout" in error)
         or "menuitem" not in error
     ):
         return False

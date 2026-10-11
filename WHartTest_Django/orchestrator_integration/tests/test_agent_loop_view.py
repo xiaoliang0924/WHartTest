@@ -324,7 +324,9 @@ class HiddenNavigationRepairEvidenceTests(SimpleTestCase):
                 "locator_value": "工单总览",
                 "actual_url": "https://test.example/work-order/dashboard?from=list",
                 "page_url": "https://test.example/work-order/dashboard",
-                "error_message": 'locator resolved to <li role="menuitem">; element is not visible',
+                # Diagnosis truncates long Playwright logs before the final visibility line.
+                "error_message": 'locator.click: Timeout 15000ms exceeded; locator resolved to <li role="menuitem">',
+
             },
         }
 
