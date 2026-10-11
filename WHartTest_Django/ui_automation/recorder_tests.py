@@ -861,6 +861,9 @@ class RecorderBrowserExecTests(TestCase):
         self.assertEqual(case_broadcasts[0]['data']['args']['passed_steps'], 1)
         record = UiExecutionRecord.objects.get(test_case=self.case)
         self.assertEqual(record.status, 2)
+        from django.utils import timezone
+        self.assertTrue(timezone.is_aware(record.start_time))
+        self.assertTrue(timezone.is_aware(record.end_time))
         self.assertEqual(record.executor_name if hasattr(record, 'executor_name') else 'recorder-browser', 'recorder-browser')
 
     def test_case_exec_fails_closed_when_recorder_omits_step_results(self):

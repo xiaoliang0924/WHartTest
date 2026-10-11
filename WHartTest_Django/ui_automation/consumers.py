@@ -1974,7 +1974,8 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         """保存执行结果到数据库"""
         from .models import UiExecutionRecord, UiTestCase, UiBatchExecutionRecord
         from django.contrib.auth.models import User
-        from datetime import datetime, timedelta
+        from datetime import timedelta
+        from django.utils import timezone
 
         logger.info(f">>> save_execution_result 被调用, args: {args}")
 
@@ -1984,7 +1985,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         status = status_map.get(status_str, 3)  # 默认失败
 
         duration = args.get('duration', 0)
-        end_time = datetime.now()
+        end_time = timezone.now()
         start_time = end_time - timedelta(seconds=duration) if duration else end_time
 
         # 提取步骤结果
