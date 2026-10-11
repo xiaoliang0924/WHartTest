@@ -1240,21 +1240,21 @@ defineExpose({
 .page-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: stretch;
+  flex-direction: column;
   margin-bottom: 16px;
   flex-shrink: 0;
-  flex-wrap: wrap;
-  gap: 10px;
+  gap: 12px;
 }
 
 .search-box {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   min-width: 0;
-  flex: 1;
-  overflow: hidden;
+  width: 100%;
+  overflow: visible;
 }
 
 .search-box > * {
@@ -1264,7 +1264,8 @@ defineExpose({
 
 .action-buttons {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
   flex-shrink: 0;
 }
@@ -1302,6 +1303,11 @@ defineExpose({
   flex-shrink: 0;
 }
 
+/* Keep selected-case actions reachable when the list pane is narrow. */
+.search-box :deep(.arco-btn) {
+  flex-shrink: 0;
+}
+
 @media (max-width: 1200px) {
   .io-btn-text {
     display: none;
@@ -1312,6 +1318,25 @@ defineExpose({
   }
   .io-btn :deep(.arco-btn-icon) {
     margin-right: 0;
+  }
+}
+
+@media (max-width: 768px) {
+  .testcase-content {
+    padding: 10px;
+  }
+
+  .page-header {
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .search-box {
+    gap: 6px;
+  }
+
+  .action-buttons {
+    justify-content: flex-start;
   }
 }
 
