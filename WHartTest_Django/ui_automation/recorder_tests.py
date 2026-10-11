@@ -772,7 +772,13 @@ class RecorderBrowserExecTests(TestCase):
                     return {'ok': True, 'state': {'viewport': {'width': 1400, 'height': 900}}}
                 if method == 'run_steps':
                     steps = params.get('steps', [])
-                    return {'ok': True, 'state': {'executed': len(steps), 'failed': False}}
+                    return {'ok': True, 'state': {
+                        'executed': len(steps), 'failed': False,
+                        'step_results': [
+                            dict(step, index=i + 1, status='success')
+                            for i, step in enumerate(steps)
+                        ],
+                    }}
                 return {'ok': True, 'state': {}}
 
         session = FakeSession()
@@ -856,6 +862,32 @@ class RecorderBrowserExecTests(TestCase):
         record = UiExecutionRecord.objects.get(test_case=self.case)
         self.assertEqual(record.status, 2)
         self.assertEqual(record.executor_name if hasattr(record, 'executor_name') else 'recorder-browser', 'recorder-browser')
+
+    def test_case_exec_fails_closed_when_recorder_omits_step_results(self):
+        from ui_automation.models import UiExecutionRecord
+        consumer, session, _received, layer = self._consumer_env()
+        original_request = session.request
+
+        def request(method, params=None, timeout=None):
+            if method == 'run_steps':
+                session.requests.append((method, params or {}))
+                return {'ok': True, 'state': {'executed': 1, 'failed': False, 'step_results': []}}
+            return original_request(method, params, timeout)
+
+        session.request = request
+
+        async def scenario():
+            await consumer.handle_execute_test_case(
+                {'case_id': self.case.id, 'env_config_id': self.env.id,
+                 'actuator_id': 'recorder-browser'}, 'alice',
+            )
+            if consumer._recorder_exec_task is not None:
+                await asyncio.wait_for(consumer._recorder_exec_task, timeout=15)
+
+        self._run(scenario)()
+        record = UiExecutionRecord.objects.get(test_case=self.case)
+        self.assertEqual(record.status, 3)
+        self.assertIn('回放结果不完整', record.error_message)
 
     def test_case_uses_environment_manual_login_before_trace_and_steps(self):
         """配置账号后使用全新上下文手动登录，且认证凭据不进入 Trace/业务步骤。"""

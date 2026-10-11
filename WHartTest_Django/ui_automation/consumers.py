@@ -932,6 +932,9 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             )()
         groups = []
         project_id = 0
+        # Page-step debugging shares the recorder loop with testcase replay but
+        # has no UiTestCase from which this flag can be inferred.
+        is_generated_ui_case = False
         if kind == 'page_steps':
             page_step = await sync_to_async(
                 UiPageSteps.objects.filter(id=args.get('page_step_id')).first
@@ -1301,19 +1304,47 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     180,
                 )
                 resp_state = resp.get('state', {}) if isinstance(resp, dict) else {}
+                resp_state = resp_state if isinstance(resp_state, dict) else {}
                 # 收集本组逐步结果（标注组序号，供执行记录展示）
-                for entry in (resp_state.get('step_results') or []):
+                group_results = resp_state.get('step_results')
+                group_results = group_results if isinstance(group_results, list) else []
+                for entry in group_results:
+                    if not isinstance(entry, dict):
+                        continue
                     entry['group'] = group_index
                     all_step_results.append(entry)
+                # A successful transport response alone is not proof that the
+                # browser replayed every action. Older or interrupted recorder
+                # processes may return ok=true with missing/partial step_results;
+                # fail closed so generation validation cannot report a false pass.
+                result_error = ''
+                if not isinstance(resp, dict) or not resp.get('ok'):
+                    result_error = (resp.get('error') if isinstance(resp, dict) else '') or '录制器未确认本组步骤执行成功'
+                elif group_step_count == 0:
+                    result_error = f'第 {group_index} 组没有可验证的 UI 操作步骤'
+                elif resp_state.get('failed'):
+                    result_error = resp_state.get('error') or f'第 {group_index} 组步骤执行失败'
+                elif len(group_results) != len(steps):
+                    result_error = (
+                        f'第 {group_index} 组回放结果不完整：预期 {len(steps)} 条，'
+                        f'实际 {len(group_results)} 条'
+                    )
+                elif any(str(entry.get('status') or '').lower() not in {'success', 'pass', 'passed'}
+                         for entry in group_results if isinstance(entry, dict)):
+                    result_error = f'第 {group_index} 组存在未通过的步骤结果'
+                elif any(not isinstance(entry, dict) for entry in group_results):
+                    result_error = f'第 {group_index} 组包含无效的步骤结果'
                 logger.info(
                     '[recorder-exec] 第 %d 组完成 ok=%s failed=%s',
-                    group_index, resp.get('ok'), resp_state.get('failed'),
+                    group_index,
+                    resp.get('ok') if isinstance(resp, dict) else False,
+                    resp_state.get('failed') if isinstance(resp_state, dict) else None,
                 )
-                if not resp.get('ok') or resp_state.get('failed'):
+                if result_error:
                     failed_steps += group_step_count
                     # 失败信息在 state.error（cmdRunSteps 失败时返回 ok:true + failed 标记，
                     # 保证 state.step_results 能随响应带回）
-                    message = resp_state.get('error') or f'第 {group_index} 组步骤执行失败'
+                    message = result_error
                     if kind != 'page_steps' and args.get('explore_failure'):
                         # 浏览器已经重新启动并执行到失败步骤，此时读取真实页面状态：
                         # 不点击、不输入、不改写页面，只收集 URL/DOM 摘要/截图。
