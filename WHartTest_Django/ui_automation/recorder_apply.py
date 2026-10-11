@@ -335,6 +335,27 @@ def apply_recorded_actions(
                     pass
             continue
 
+        if action_type == 'select_filter_option':
+            selector = action.get('selector') or {}
+            element, created = _get_or_create_element(
+                page=page, user=user, action_type=action_type, selector=selector,
+            )
+            if created:
+                elements_created += 1
+            elif element is not None:
+                elements_updated += 1
+            UiPageStepsDetailed.objects.create(
+                page_step=page_step,
+                step_type=STEP_TYPE_ELEMENT,
+                element=element,
+                ope_key='select_filter_option',
+                ope_value={'value': str(action.get('value') or '')},
+                step_sort=next_sort,
+            )
+            next_sort += 1
+            steps_created += 1
+            continue
+
         if action_type == 'assert':
             mode = str(action.get('mode') or 'visible')
             ope_key = _ASSERT_KEY.get(mode, 'assert_visible')

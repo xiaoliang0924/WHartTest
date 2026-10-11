@@ -18,7 +18,7 @@ from ui_automation.models import (
     UiAuthState,
 )
 from ui_automation.serializers import UiPageStepsExecuteSerializer
-from ui_automation.generated_case_service import persist_generated_ui_testcase
+from ui_automation.generated_case_service import persist_generated_ui_testcase, _parse_payload
 from testcases.models import TestCase as FunctionalTestCase, TestCaseModule, TestCaseStep
 from file_management.models import FileAsset, FileManagementSetting, FileReference
 
@@ -76,6 +76,51 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
                 ],
             }],
         }
+
+    def test_generated_payload_rejects_readonly_combobox_click(self):
+        invalid = {
+            **self.payload,
+            "steps": [{
+                **self.payload["steps"][0],
+                "actions": [{
+                    "type": "click",
+                    "selector": {
+                        "name": "priority dropdown",
+                        "locator_type": "xpath",
+                        "locator_value": "//input[@role='combobox']",
+                    },
+                }],
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "只读 input"):
+            _parse_payload(invalid)
+
+    def test_filter_dropdown_selection_persists_as_verified_operation(self):
+        payload = {
+            **self.payload,
+            "steps": [{
+                **self.payload["steps"][0],
+                "actions": [{
+                    "type": "select_filter_option",
+                    "selector": {
+                        "name": "Priority filter",
+                        "locator_type": "css",
+                        "locator_value": '.filter-field:has(.filter-field-label:text-is("Priority")) .el-select',
+                    },
+                    "value": "High",
+                }],
+            }],
+        }
+        result = persist_generated_ui_testcase(
+            testcase_id=self.testcase.id,
+            project_id=self.project.id,
+            user_id=self.user.id,
+            payload=payload,
+        )
+        ui_case = UiTestCase.objects.get(pk=result["ui_test_case_id"])
+        detail = UiPageStepsDetailed.objects.get(page_step=ui_case.case_steps.get().page_step)
+        self.assertEqual(detail.ope_key, "select_filter_option")
+        self.assertEqual(detail.ope_value, {"value": "High"})
 
     def test_generated_case_is_saved_and_bound_with_password_redacted(self):
         result = persist_generated_ui_testcase(

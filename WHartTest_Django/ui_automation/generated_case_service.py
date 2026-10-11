@@ -24,10 +24,10 @@ MAX_PAYLOAD_BYTES = 200_000
 MAX_STEPS = 80
 MAX_ACTIONS = 500
 SUPPORTED_ACTIONS = {
-    "click", "fill", "check", "uncheck", "press", "goto", "wait",
+    "click", "fill", "check", "uncheck", "press", "goto", "wait", "select_filter_option",
     "wait_for_visible", "wait_for_ready", "assert",
 }
-LOCATOR_ACTIONS = {"click", "fill", "check", "uncheck", "press", "wait_for_visible"}
+LOCATOR_ACTIONS = {"click", "fill", "check", "uncheck", "press", "wait_for_visible", "select_filter_option"}
 VALID_ASSERTIONS = {
     "visible", "hidden", "enabled", "disabled", "checked", "text",
     "contain_text", "value", "count", "url", "title",
@@ -267,6 +267,15 @@ def _validate_date_fill_assertions(steps: list[dict[str, Any]]) -> None:
                 )
 
 
+
+def _is_readonly_combobox_selector(selector: Any) -> bool:
+    if not isinstance(selector, dict):
+        return False
+    locator = str(selector.get("locator_value") or "").lower()
+    compact = re.sub(r"\s+", "", locator)
+    return "input" in compact and "combobox" in compact and "role" in compact
+
+
 def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
     if isinstance(payload, str):
         if len(payload.encode("utf-8")) > MAX_PAYLOAD_BYTES:
@@ -323,6 +332,19 @@ def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(f"第 {index} 步的 {action_type} 操作缺少真实定位器。")
                 if selector.get("locator_type") not in {kind for kind, _ in UiElement.LOCATOR_TYPE_CHOICES}:
                     raise ValueError(f"第 {index} 步的定位类型无效。")
+                if action_type == "click" and _is_readonly_combobox_selector(selector):
+                    raise ValueError(
+                        f"第 {index} 步不能点击只读 input[role=combobox]；"
+                        "请点击 Element Plus 的 .el-select__wrapper，或使用 select_filter_option。"
+                    )
+            if action_type == "select_filter_option":
+                selector = action.get("selector") or {}
+                if ".el-select" not in str(selector.get("locator_value") or ""):
+                    raise ValueError(
+                        f"第 {index} 步的 select_filter_option 必须定位到页面实际观察到的 Element Plus .el-select。"
+                    )
+                if not str(action.get("value") or "").strip():
+                    raise ValueError(f"第 {index} 步的下拉选择缺少实际观察到的选项值。")
             if action_type == "assert" and action.get("mode", "visible") not in VALID_ASSERTIONS:
                 raise ValueError(f"第 {index} 步的断言类型无效。")
             if action_type == "assert" and action.get("mode", "visible") not in {"url", "title"}:

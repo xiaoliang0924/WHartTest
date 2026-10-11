@@ -2122,6 +2122,44 @@ async function runOneStep(page, step) {
       await clickTarget.click({ timeout: 15000 });
       return null;
     }
+    case 'select_filter_option': {
+      const select = locator;
+      const trigger = select.locator('.el-select__wrapper').first();
+      if (!(await trigger.count())) return 'Element Plus 下拉缺少可交互的 .el-select__wrapper';
+      const readShown = async () => {
+        const selected = select.locator(
+          '.el-select__selected-item, .el-select__selection-text, .el-select__placeholder',
+        ).first();
+        return String((await selected.innerText().catch(() => '')) ||
+          (await select.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+      };
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await page.keyboard.press('Escape').catch(() => {});
+        await trigger.click({ timeout: 5000 });
+        const dropdown = page
+          .locator('.el-select-dropdown.el-popper:visible, .el-select-dropdown:visible')
+          .last();
+        await dropdown.waitFor({ state: 'visible', timeout: 10000 });
+        const options = dropdown.locator('.el-select-dropdown__item:not(.is-disabled)');
+        let option = null;
+        for (let i = 0; i < await options.count(); i += 1) {
+          const candidate = options.nth(i);
+          const text = String(await candidate.innerText().catch(() => ''))
+            .replace(/\s+/g, ' ').trim();
+          if (text === inputValue.trim()) {
+            option = candidate;
+            break;
+          }
+        }
+        if (!option) throw new Error('可见下拉层中没有精确选项「' + inputValue + '」');
+        await option.waitFor({ state: 'visible', timeout: 5000 });
+        await option.click({ timeout: 5000 });
+        await page.waitForTimeout(250);
+        const shown = await readShown();
+        if (shown.includes(inputValue)) return null;
+      }
+      return '下拉未回填「' + inputValue + '」，当前显示「' + await readShown() + '」';
+    }
     case 'fill':
       await locator.fill(inputValue);
       return null;

@@ -1266,6 +1266,14 @@ async def _apply_safe_generated_ui_repair(
     locator_type = str(suggestion.get("suggested_locator_type") or "").strip()
     locator_value = str(suggestion.get("suggested_locator_value") or "").strip()
 
+    if failure_info.get("operation_type") == "click":
+        compact_locator = re.sub(r"\\s+", "", locator_value).lower()
+        if "input" in compact_locator and "combobox" in compact_locator and "role" in compact_locator:
+            return {
+                "status": "skipped",
+                "reason": "自动修复不能把只读 input[role=combobox] 设为点击目标；应选择 .el-select__wrapper 或 select_filter_option。",
+            }
+
     # Generated post-confirm assertions for the custom filter panel must scope
     # the selected value to the actual `.filter-field` container. This app uses
     # a div-based label/control layout, so LLM repairs that assume a native
