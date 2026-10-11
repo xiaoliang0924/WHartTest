@@ -1110,7 +1110,7 @@ async def _apply_safe_generated_ui_repair(
         )).lower()
         if (
             failure_info.get("operation_type") != "click"
-            or "not visible" not in error_text
+            or not ("not visible" in error_text or "timeout" in error_text)
             or "menuitem" not in locator_evidence
         ):
             return {"status": "skipped", "reason": "失败证据不能确认是隐藏菜单点击，未修改用例。"}
