@@ -276,6 +276,20 @@ def _is_readonly_combobox_selector(selector: Any) -> bool:
     return "input" in compact and "combobox" in compact and "role" in compact
 
 
+def _locator_dialect_error(locator_type: Any, locator_value: Any) -> str | None:
+    """Reject selectors whose syntax is incompatible with their declared engine."""
+    kind = str(locator_type or "").strip().lower()
+    value = str(locator_value or "").strip()
+    if kind == "xpath" and (
+        value.startswith((".", "#"))
+        or re.search(r":(?:visible|text-is|has-text|has|nth-match)\s*(?:\(|$)", value)
+    ):
+        return "选择器内容是 CSS/Playwright 语法，但定位类型标记为 XPath。"
+    if kind == "css" and value.startswith(("//", "./", "../", "(")):
+        return "选择器内容是 XPath 语法，但定位类型标记为 CSS。"
+    return None
+
+
 def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
     if isinstance(payload, str):
         if len(payload.encode("utf-8")) > MAX_PAYLOAD_BYTES:
@@ -332,6 +346,11 @@ def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(f"第 {index} 步的 {action_type} 操作缺少真实定位器。")
                 if selector.get("locator_type") not in {kind for kind, _ in UiElement.LOCATOR_TYPE_CHOICES}:
                     raise ValueError(f"第 {index} 步的定位类型无效。")
+                dialect_error = _locator_dialect_error(
+                    selector.get("locator_type"), selector.get("locator_value")
+                )
+                if dialect_error:
+                    raise ValueError(f"第 {index} 步定位器无效：{dialect_error}")
                 if action_type == "click" and _is_readonly_combobox_selector(selector):
                     raise ValueError(
                         f"第 {index} 步不能点击只读 input[role=combobox]；"

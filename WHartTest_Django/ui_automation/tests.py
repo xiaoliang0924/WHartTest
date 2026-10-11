@@ -95,6 +95,42 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
         with self.assertRaisesRegex(ValueError, "只读 input"):
             _parse_payload(invalid)
 
+    def test_generated_payload_rejects_css_selector_marked_as_xpath(self):
+        invalid = {
+            **self.payload,
+            "steps": [{
+                **self.payload["steps"][0],
+                "actions": [{
+                    "type": "click",
+                    "selector": {
+                        "name": "dropdown option",
+                        "locator_type": "xpath",
+                        "locator_value": '.el-select-dropdown:visible .el-select-dropdown__item:text-is("待处理")',
+                    },
+                }],
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "CSS/Playwright 语法"):
+            _parse_payload(invalid)
+
+    def test_generated_payload_rejects_xpath_selector_marked_as_css(self):
+        invalid = {
+            **self.payload,
+            "steps": [{
+                **self.payload["steps"][0],
+                "actions": [{
+                    "type": "click",
+                    "selector": {
+                        "name": "dropdown option",
+                        "locator_type": "css",
+                        "locator_value": "//div[@role='option']",
+                    },
+                }],
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "XPath 语法"):
+            _parse_payload(invalid)
+
     def test_filter_dropdown_selection_persists_as_verified_operation(self):
         payload = {
             **self.payload,

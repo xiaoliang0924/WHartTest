@@ -1317,6 +1317,10 @@ async def _apply_safe_generated_ui_repair(
     valid_locator_types = {value for value, _label in UiElement.LOCATOR_TYPE_CHOICES}
     if locator_type not in valid_locator_types or not locator_value:
         return {"status": "skipped", "reason": "AI 返回的定位器格式不安全，未自动修改用例。"}
+    from ui_automation.generated_case_service import _locator_dialect_error
+    dialect_error = _locator_dialect_error(locator_type, locator_value)
+    if dialect_error:
+        return {"status": "skipped", "reason": f"{dialect_error} 未自动写回，避免回放语法错误。"}
     if len(locator_value) > 4000:
         return {"status": "skipped", "reason": "AI 返回的定位器过长，未自动修改用例。"}
 
