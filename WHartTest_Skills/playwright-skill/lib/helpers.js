@@ -6556,6 +6556,106 @@ async function clickPageButton(page, name) {
 }
 
 /**
+ * Verify every visible row has the expected value in a named visible table column.
+ * Header and body are scoped to the same table. Missing or misaligned columns are
+ * reported as unverifiable instead of being mistaken for a product mismatch.
+ */
+async function assertTableColumnEquals(page, columnName, expectedValue) {
+  const normalize = (value) => String(value || '').replace(/\s+/g, '').trim();
+  const wantedColumn = normalize(columnName);
+  const wantedValue = normalize(expectedValue);
+  const report = (status, message, details = {}) => {
+    const prefix = status === 'pass' ? 'PASS' : status === 'fail' ? 'FAIL' : 'UNVERIFIABLE';
+    console.log(`RESULT=${prefix}: ${message}`);
+    return { status, message, ...details };
+  };
+  if (!wantedColumn || !wantedValue) {
+    return report('unverifiable', '表格列名或期望值为空，无法验证。');
+  }
+
+  const elementTables = page.locator('.el-table:visible');
+  const elementTableCount = await elementTables.count();
+  for (let tableIndex = 0; tableIndex < elementTableCount; tableIndex++) {
+    const table = elementTables.nth(tableIndex);
+    const headers = table.locator('.el-table__header-wrapper:not(.is-hidden) thead tr:last-child th');
+    const headerTexts = (await headers.allTextContents()).map((text) => String(text || '').trim());
+    const columnIndex = headerTexts.findIndex((text) => normalize(text).includes(wantedColumn));
+    if (columnIndex < 0) continue;
+
+    const rows = table.locator('.el-table__body-wrapper tbody tr:visible');
+    const rowCount = await rows.count();
+    if (!rowCount) {
+      return report('unverifiable', `表格存在「${columnName}」列，但当前没有可核对的数据行。`, { rowCount: 0 });
+    }
+    const actualValues = [];
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+      const cells = rows.nth(rowIndex).locator('td');
+      const cellCount = await cells.count();
+      if (cellCount !== headerTexts.length || columnIndex >= cellCount) {
+        return report(
+          'unverifiable',
+          `「${columnName}」表头与数据列无法可靠对齐（表头 ${headerTexts.length} 列，数据行 ${rowIndex + 1} 有 ${cellCount} 格）。`,
+          { rowCount, columnIndex, headerTexts },
+        );
+      }
+      actualValues.push((await cells.nth(columnIndex).innerText()).trim());
+    }
+    if (actualValues.some((value) => !value)) {
+      return report('unverifiable', `「${columnName}」列存在空单元格，无法确认筛选结果。`, { rowCount, columnIndex });
+    }
+    const mismatches = actualValues
+      .map((value, index) => ({ row: index + 1, value }))
+      .filter((item) => normalize(item.value) !== wantedValue);
+    if (mismatches.length) {
+      const samples = mismatches.slice(0, 5).map((item) => `第${item.row}行=${item.value}`).join('，');
+      return report('fail', `「${columnName}」列 ${mismatches.length}/${rowCount} 行不等于「${expectedValue}」：${samples}`, {
+        rowCount, columnIndex, mismatchCount: mismatches.length,
+      });
+    }
+    return report('pass', `已核对 ${rowCount} 行，「${columnName}」列均为「${expectedValue}」。`, { rowCount, columnIndex });
+  }
+
+  // Plain HTML tables are supported when the application does not use Element Plus.
+  const plainTables = page.locator('table:visible');
+  const plainTableCount = await plainTables.count();
+  for (let tableIndex = 0; tableIndex < plainTableCount; tableIndex++) {
+    const table = plainTables.nth(tableIndex);
+    const headers = table.locator('thead tr:last-child th');
+    const headerTexts = (await headers.allTextContents()).map((text) => String(text || '').trim());
+    const columnIndex = headerTexts.findIndex((text) => normalize(text).includes(wantedColumn));
+    if (columnIndex < 0) continue;
+    const rows = table.locator('tbody tr:visible');
+    const rowCount = await rows.count();
+    if (!rowCount) {
+      return report('unverifiable', `表格存在「${columnName}」列，但当前没有可核对的数据行。`, { rowCount: 0 });
+    }
+    const actualValues = [];
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+      const cells = rows.nth(rowIndex).locator('td');
+      const cellCount = await cells.count();
+      if (cellCount !== headerTexts.length || columnIndex >= cellCount) {
+        return report('unverifiable', `「${columnName}」表头与数据列无法可靠对齐。`, { rowCount, columnIndex });
+      }
+      actualValues.push((await cells.nth(columnIndex).innerText()).trim());
+    }
+    if (actualValues.some((value) => !value)) {
+      return report('unverifiable', `「${columnName}」列存在空单元格，无法确认筛选结果。`, { rowCount, columnIndex });
+    }
+    const mismatches = actualValues.map((value, index) => ({ row: index + 1, value }))
+      .filter((item) => normalize(item.value) !== wantedValue);
+    if (mismatches.length) {
+      const samples = mismatches.slice(0, 5).map((item) => `第${item.row}行=${item.value}`).join('，');
+      return report('fail', `「${columnName}」列 ${mismatches.length}/${rowCount} 行不等于「${expectedValue}」：${samples}`, {
+        rowCount, columnIndex, mismatchCount: mismatches.length,
+      });
+    }
+    return report('pass', `已核对 ${rowCount} 行，「${columnName}」列均为「${expectedValue}」。`, { rowCount, columnIndex });
+  }
+
+  return report('unverifiable', `当前可见表格没有「${columnName}」列，不能按列验证。`);
+}
+
+/**
  * 断言页面上出现可见文案。必填星号常是独立节点，不要用 getByText('字段*')。
  * 会忽略文案末尾的 *，并跳过隐藏节点。
  */
@@ -6990,6 +7090,7 @@ module.exports = {
   fillFilterField,
   clickPageButton,
   assertPageShows,
+  assertTableColumnEquals,
   clickRowAction,
   selectFormDropdownOption,
   selectFormDateRange,
