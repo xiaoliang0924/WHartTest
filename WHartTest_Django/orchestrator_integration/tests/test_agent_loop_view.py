@@ -1511,3 +1511,8 @@ class FilterAssertionInstructionRegressionTests(SimpleTestCase):
         self.assertIn("其他状态的造数工单不出现", MANUAL_TESTCASE_EXECUTION_HINT)
         self.assertIn("先核实每个造数工单号与状态的对应关系", MANUAL_TESTCASE_EXECUTION_HINT)
         self.assertIn("结果不可验证", MANUAL_TESTCASE_EXECUTION_HINT)
+
+    def test_table_assertions_map_columns_from_visible_headers(self):
+        self.assertIn("先读取当前表格可见的列头", MANUAL_TESTCASE_EXECUTION_HINT)
+        self.assertIn("禁止凭经验硬编码列序号", MANUAL_TESTCASE_EXECUTION_HINT)
+        self.assertIn("列表未展示该字段，无法按列验证", MANUAL_TESTCASE_EXECUTION_HINT)
