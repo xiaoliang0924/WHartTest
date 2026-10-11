@@ -2568,7 +2568,7 @@ def get_skill_tools(
              导航步骤必须以页面状态为准：如果该步骤开始前浏览器已经位于目标页面（当前 URL 的 origin+pathname 与目标页面一致），不要再保存菜单点击；将此步骤保存为基于实际 URL 的 assert mode=url（match=path），验证页面已到达即可。若确实需要点击导航，只能使用本次观察到的可见菜单项；定位到隐藏或重复 DOM 节点时，先限定到可见导航区域，不得通过 force click 或更换 XPath 掩盖可见性问题。
              重复文案定位必须优先使用可见且唯一的语义定位器；不要用 .first() 或固定序号掩盖重复匹配。执行器会在重复匹配中优先选择可见项，但用例仍应尽量限定到正确的导航区域。
              页面加载完成后优先使用 wait_for_ready 或 wait_for_visible，不要用固定 wait 代替页面状态等待。
-             组件交互必须保存“动作 + 状态断言”，不能只保存打开控件的点击：Element Plus 普通下拉应点击 .el-select__wrapper 和可见下拉层内的精确选项，禁止点击只读 input[role=combobox]，并断言筛选框回填值；弹窗只打开时必须使用 openFilterDialogField 点击字段真实的 + 触发器，禁止点击静态字段标签或猜 .el-form-item；弹窗多选须观察已选数量/勾选状态大于 0 后再点确定，helper 参数错误时必须修正签名，禁止用未经验证的原生 Playwright 定位绕过，关闭后用 assertFilterFieldShows 读取真实筛选字段核验所选项，禁止猜测 .el-form-item/.el-tag；日期范围须用 selectFormDateRange（可编辑控件）或实际日历点选（只读控件）完成起止日期，并断言两个输入值都已回填。定位和格式只使用本次观察到的内容。
+             组件交互必须保存“动作 + 状态断言”，不能只保存打开控件的点击：Element Plus 普通下拉应点击 .el-select__wrapper 和可见下拉层内的精确选项，禁止点击只读 input[role=combobox]，并断言筛选框回填值；弹窗只打开时必须使用 openFilterDialogField 点击字段真实的 + 触发器，禁止点击静态字段标签或猜 .el-form-item；弹窗多选须观察已选数量/勾选状态大于 0 后再点确定，helper 参数错误时必须修正签名，禁止用未经验证的原生 Playwright 定位绕过，关闭后用 assertFilterFieldShows 读取真实筛选字段核验所选项，禁止猜测 .el-form-item/.el-tag；日期范围须用 selectFormDateRange（可编辑控件）或实际日历点选（只读控件）完成起止日期，并断言两个输入值都已回填；禁止对日期框执行空 fill 后再断言具体日期，缺少真实值/选日证据时先完成并观察日期操作，不得留空或猜值。定位和格式只使用本次观察到的内容。
              对空列表结果，保留 assert mode=count、value=0；若观察到明确空态，先等待空态可见。禁止对数据行定位器添加 wait_for_visible，因为空列表中数据行应为零。
 
             所有动作和定位器必须来自本次执行观察，不得编造；不要包含密码、令牌或其他秘密。

@@ -160,6 +160,83 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
         self.assertFalse(UiPage.objects.exists())
         self.assertFalse(UiPageSteps.objects.exists())
 
+    def test_generation_rejects_empty_date_fill_with_concrete_date_assertion(self):
+        date_selector = {
+            'name': '创建日期开始日期输入框',
+            'locator_type': 'placeholder',
+            'locator_value': '开始日期',
+            'placeholder': '开始日期',
+        }
+        self.payload['steps'][0]['actions'] = [
+            {'type': 'fill', 'selector': date_selector, 'value': ''},
+            {'type': 'assert', 'mode': 'value', 'selector': date_selector, 'value': '2026-08-24'},
+        ]
+
+        with self.assertRaisesRegex(ValueError, '空 fill'):
+            persist_generated_ui_testcase(
+                testcase_id=self.testcase.id,
+                project_id=self.project.id,
+                user_id=self.user.id,
+                payload=self.payload,
+            )
+
+        self.assertFalse(UiTestCase.objects.exists())
+        self.assertFalse(UiPage.objects.exists())
+        self.assertFalse(UiPageSteps.objects.exists())
+
+    def test_generation_rejects_date_fill_assertion_across_step_groups(self):
+        date_selector = {
+            'name': '创建日期开始日期输入框',
+            'locator_type': 'placeholder',
+            'locator_value': '开始日期',
+            'placeholder': '开始日期',
+        }
+        self.payload['steps'] = [
+            {
+                'name': 'Clear date',
+                'functional_step_numbers': [1],
+                'url': 'https://example.test/list',
+                'actions': [{'type': 'fill', 'selector': date_selector, 'value': ''}],
+            },
+            {
+                'name': 'Assert date',
+                'functional_step_numbers': [1],
+                'url': 'https://example.test/list',
+                'actions': [{'type': 'assert', 'mode': 'value', 'selector': date_selector, 'value': '2026-08-24'}],
+            },
+        ]
+
+        with self.assertRaisesRegex(ValueError, '随后第 2 组'):
+            persist_generated_ui_testcase(
+                testcase_id=self.testcase.id,
+                project_id=self.project.id,
+                user_id=self.user.id,
+                payload=self.payload,
+            )
+
+        self.assertFalse(UiTestCase.objects.exists())
+
+    def test_generation_allows_observed_nonempty_date_fill_and_matching_assertion(self):
+        date_selector = {
+            'name': '创建日期开始日期输入框',
+            'locator_type': 'placeholder',
+            'locator_value': '开始日期',
+            'placeholder': '开始日期',
+        }
+        self.payload['steps'][0]['actions'] = [
+            {'type': 'fill', 'selector': date_selector, 'value': '2026-08-24'},
+            {'type': 'assert', 'mode': 'value', 'selector': date_selector, 'value': '2026-08-24'},
+        ]
+
+        result = persist_generated_ui_testcase(
+            testcase_id=self.testcase.id,
+            project_id=self.project.id,
+            user_id=self.user.id,
+            payload=self.payload,
+        )
+
+        self.assertEqual(result['status'], 'success')
+
     def test_generation_rejects_unmapped_functional_steps_before_saving(self):
         TestCaseStep.objects.create(
             test_case=self.testcase,

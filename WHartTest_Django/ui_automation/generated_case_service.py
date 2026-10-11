@@ -195,6 +195,78 @@ def bind_generated_ui_case_auth_state(
     }
 
 
+def _selector_text(selector: Any) -> str:
+    if not isinstance(selector, dict):
+        return ""
+    return " ".join(
+        str(selector.get(key) or "")
+        for key in ("name", "locator_value", "placeholder", "aria_label", "role")
+    ).strip().lower()
+
+
+def _date_field_role(selector: Any) -> str:
+    text = _selector_text(selector)
+    if re.search(r"开始|start", text):
+        return "start"
+    if re.search(r"结束|end", text):
+        return "end"
+    return "unknown"
+
+
+def _is_date_selector(selector: Any) -> bool:
+    return bool(re.search(r"日期|date|calendar", _selector_text(selector)))
+
+
+def _validate_date_fill_assertions(steps: list[dict[str, Any]]) -> None:
+    """Reject contradictory generated date actions across UI step groups."""
+    date_pattern = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$")
+    flattened = [
+        (step_index, action_index, action)
+        for step_index, step in enumerate(steps, 1)
+        for action_index, action in enumerate(step.get("actions") or [], 1)
+    ]
+    empty_date_fills = [
+        (step_index, action_index, action)
+        for step_index, action_index, action in flattened
+        if action.get("type") == "fill"
+        and not str(action.get("value") or "").strip()
+        and _is_date_selector(action.get("selector"))
+    ]
+    date_assertions = [
+        (step_index, action_index, action)
+        for step_index, action_index, action in flattened
+        if action.get("type") == "assert"
+        and action.get("mode", "visible") == "value"
+        and date_pattern.fullmatch(str(action.get("value") or "").strip())
+        and _is_date_selector(action.get("selector"))
+    ]
+    for fill_step, fill_index, fill_action in empty_date_fills:
+        fill_selector = fill_action.get("selector") or {}
+        fill_role = _date_field_role(fill_selector)
+        for assert_step, assert_index, assert_action in date_assertions:
+            if (assert_step, assert_index) <= (fill_step, fill_index):
+                continue
+            assert_selector = assert_action.get("selector") or {}
+            assert_role = _date_field_role(assert_selector)
+            same_semantic_field = (
+                fill_role == assert_role and fill_role != "unknown"
+            ) or (
+                fill_role == assert_role == "unknown"
+                and _selector_text(fill_selector) == _selector_text(assert_selector)
+            )
+            if same_semantic_field:
+                field_name = str(
+                    fill_selector.get("name")
+                    or fill_selector.get("placeholder")
+                    or "日期输入框"
+                ).strip()
+                raise ValueError(
+                    f"第 {fill_step} 组对日期字段「{field_name}」执行了空 fill，"
+                    f"随后第 {assert_step} 组却断言日期为「{assert_action.get('value')}」。"
+                    "请保留实际日期值；只读日期框必须记录日历选日操作，不能用空 fill 代替。"
+                )
+
+
 def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
     if isinstance(payload, str):
         if len(payload.encode("utf-8")) > MAX_PAYLOAD_BYTES:
@@ -277,6 +349,7 @@ def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
                         raise ValueError
                 except (TypeError, ValueError):
                     raise ValueError(f"第 {index} 步的页面就绪等待超时时间无效。")
+    _validate_date_fill_assertions(steps)
     if count > MAX_ACTIONS:
         raise ValueError(f"操作过多，最多支持 {MAX_ACTIONS} 个。")
     return payload
