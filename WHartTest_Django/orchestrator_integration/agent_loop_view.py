@@ -974,6 +974,46 @@ async def _validate_generated_ui_case(
 MAX_GENERATED_UI_REPAIR_ATTEMPTS = 2
 
 
+def _promote_hidden_current_route_navigation(diagnosis: Dict[str, Any]) -> bool:
+    """Use machine evidence to repair a hidden redundant menu click without LLM guesswork."""
+    evidence = diagnosis.get("evidence") or {}
+    error = str(evidence.get("error_message") or "").lower()
+    if (
+        evidence.get("mapping_status") != "resolved"
+        or evidence.get("operation_type") != "click"
+        or not evidence.get("element_id")
+        or "not visible" not in error
+        or "menuitem" not in error
+    ):
+        return False
+    try:
+        actual = urlsplit(str(evidence.get("actual_url") or "").strip())
+        target = urlsplit(str(evidence.get("page_url") or "").strip())
+    except Exception:
+        return False
+    if not (
+        actual.scheme and actual.netloc and actual.path
+        and target.scheme and target.netloc and target.path
+        and actual.scheme.lower() == target.scheme.lower()
+        and actual.netloc.lower() == target.netloc.lower()
+        and (actual.path.rstrip("/") or "/") == (target.path.rstrip("/") or "/")
+    ):
+        return False
+
+    # The current page already matches the failed navigation step's target.
+    # The hidden menu click is redundant; replace it with a route assertion.
+    diagnosis["root_cause_type"] = "SCRIPT_DEFECT"
+    diagnosis["healing_suggestion"] = {
+        **(diagnosis.get("healing_suggestion") or {}),
+        "can_self_heal": True,
+        "repair_type": "navigation_assertion",
+        "element_id": evidence.get("element_id"),
+        "current_locator_value": evidence.get("locator_value") or "",
+        "explanation": "回放证据确认目标路由已到达，隐藏菜单点击是冗余动作；改为验证当前路由。",
+    }
+    return True
+
+
 async def _apply_safe_generated_ui_repair(
     *, project_id: int, ui_test_case_id: int, diagnosis: Dict[str, Any], attempt: int
 ) -> Dict[str, Any]:
@@ -1427,6 +1467,7 @@ async def _repair_generated_ui_case_after_failure(
             attempts.append({"attempt": attempt, "status": "failed", "reason": f"AI 分析失败：{str(exc)[:500]}"})
             break
 
+        _promote_hidden_current_route_navigation(diagnosis)
         try:
             repair = await _apply_safe_generated_ui_repair(
                 project_id=int(project_id),

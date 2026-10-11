@@ -38,6 +38,7 @@ from ..agent_loop_view import (
     _map_ui_script_results_to_testcase_steps,
     _testcase_bound_ui_timeout_seconds,
     _mcp_tool_load_timeout_seconds,
+    _promote_hidden_current_route_navigation,
 )
 from ..builtin_tools.skill_tools import (
     _is_retryable_case_tool_error,
@@ -305,6 +306,49 @@ class GeneratedUiCaseFollowupTests(SimpleTestCase):
 
         self.assertEqual(result["status"], "failed")
         self.assertIn("浏览器操作证据", result["message"])
+
+
+class HiddenNavigationRepairEvidenceTests(SimpleTestCase):
+    def test_promotes_hidden_menu_click_when_target_route_is_already_open(self):
+        diagnosis = {
+            "root_cause_type": "SCRIPT_DEFECT",
+            "healing_suggestion": {
+                "can_self_heal": True,
+                "repair_type": "locator",
+                "element_id": 999,
+            },
+            "evidence": {
+                "mapping_status": "resolved",
+                "operation_type": "click",
+                "element_id": 732,
+                "locator_value": "工单总览",
+                "actual_url": "https://test.example/work-order/dashboard?from=list",
+                "page_url": "https://test.example/work-order/dashboard",
+                "error_message": 'locator resolved to <li role="menuitem">; element is not visible',
+            },
+        }
+
+        self.assertTrue(_promote_hidden_current_route_navigation(diagnosis))
+        suggestion = diagnosis["healing_suggestion"]
+        self.assertEqual(suggestion["repair_type"], "navigation_assertion")
+        self.assertEqual(suggestion["element_id"], 732)
+
+    def test_does_not_promote_when_current_route_differs_from_target(self):
+        diagnosis = {
+            "root_cause_type": "SCRIPT_DEFECT",
+            "healing_suggestion": {"repair_type": "locator"},
+            "evidence": {
+                "mapping_status": "resolved",
+                "operation_type": "click",
+                "element_id": 732,
+                "actual_url": "https://test.example/work-order/dashboard",
+                "page_url": "https://test.example/work-order/tickets",
+                "error_message": "role=menuitem element is not visible",
+            },
+        }
+
+        self.assertFalse(_promote_hidden_current_route_navigation(diagnosis))
+        self.assertEqual(diagnosis["healing_suggestion"]["repair_type"], "locator")
 
 
 class ScriptOnlyResultMappingTests(SimpleTestCase):
