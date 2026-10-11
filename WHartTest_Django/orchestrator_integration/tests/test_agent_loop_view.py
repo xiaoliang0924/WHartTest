@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import time
@@ -32,6 +33,7 @@ from ..agent_loop_view import (
     _normalize_uploaded_image_base64_list,
     _prepare_agent_loop_human_message,
     _build_ui_generation_observations,
+    _normalize_generated_ui_payload,
     _force_save_generated_ui_case,
     _run_and_stream_remaining_helper_steps,
     _extract_testcase_step_from_tool_call,
@@ -184,6 +186,74 @@ class HitlToolSelectionTests(SimpleTestCase):
 
 
 class GeneratedUiCaseFollowupTests(SimpleTestCase):
+    def test_helper_dropdown_action_expands_only_from_matching_observed_trace(self):
+        payload = {"steps": [{"functional_step_numbers": [4], "actions": [{
+            "type": "select_filter_option", "field_label": "工单状态", "option_text": "待处理",
+        }]}]}
+        actions = [
+            {"type": "click", "selector": {"locator_type": "css", "locator_value": ".observed-select"}},
+            {"type": "click", "selector": {"locator_type": "text", "locator_value": "待处理"}},
+            {"type": "assert", "mode": "contain_text", "value": "待处理",
+             "selector": {"locator_type": "css", "locator_value": ".observed-select"}},
+        ]
+        trace = {"version": 1, "kind": "select_filter_option", "field_label": "工单状态",
+                 "option_text": "待处理", "actions": actions}
+
+        normalized = _normalize_generated_ui_payload(json.dumps(payload, ensure_ascii=False), [trace])
+
+        self.assertEqual(json.loads(normalized)["steps"][0]["actions"], actions)
+        with self.assertRaisesRegex(ValueError, "没有对应的成功浏览器交互轨迹"):
+            _normalize_generated_ui_payload(json.dumps(payload, ensure_ascii=False), [])
+
+    def test_followup_persists_model_dropdown_action_from_helper_trace(self):
+        actions = [
+            {"type": "click", "selector": {"locator_type": "css", "locator_value": ".observed-trigger"}},
+            {"type": "click", "selector": {"locator_type": "css", "locator_value": ".observed-option"}},
+            {"type": "assert", "mode": "contain_text", "value": "待处理",
+             "selector": {"locator_type": "css", "locator_value": ".observed-select"}},
+        ]
+        payload = {"steps": [{"functional_step_numbers": [4], "actions": [{
+            "type": "select_filter_option", "field_label": "工单状态", "option_text": "待处理",
+        }]}]}
+
+        class SaveTool:
+            name = "save_generated_ui_testcase"
+
+            async def ainvoke(self, args):
+                self.saved_payload = json.loads(args["payload_json"])
+                return '{"status":"success","ui_test_case_id":321}'
+
+        class BoundModel:
+            async def ainvoke(self, _messages):
+                return AIMessage(content="", tool_calls=[{
+                    "name": "save_generated_ui_testcase",
+                    "args": {"payload_json": json.dumps(payload, ensure_ascii=False)},
+                    "id": "save-ui-trace",
+                }])
+
+        class FakeModel:
+            def bind_tools(self, _tools, **_kwargs):
+                return BoundModel()
+
+        trace = {"version": 1, "kind": "select_filter_option", "field_label": "工单状态",
+                 "option_text": "待处理", "actions": actions}
+        messages = [
+            AIMessage(content="", tool_calls=[{
+                "name": "execute_skill_script", "args": {"command": "helpers.selectFormDropdownOption(...)"},
+                "id": "browser-call",
+            }]),
+            ToolMessage(content=f"UI_ACTION_TRACE={json.dumps(trace, ensure_ascii=False)}",
+                        tool_call_id="browser-call", name="execute_skill_script"),
+        ]
+        saver = SaveTool()
+
+        result = async_to_sync(_force_save_generated_ui_case)(
+            llm=FakeModel(), tools=[saver], messages=messages,
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(saver.saved_payload["steps"][0]["actions"], actions)
+
     def test_followup_forces_save_tool_using_only_observed_browser_evidence(self):
         class SaveTool:
             name = "save_generated_ui_testcase"
@@ -217,7 +287,12 @@ class GeneratedUiCaseFollowupTests(SimpleTestCase):
                 "id": "browser-call-1",
             }]),
             ToolMessage(
-                content="RESULT=PASS: 页面返回成功",
+                content=(
+                    'RESULT=PASS: 页面返回成功\n'
+                    'UI_ACTION_TRACE={"version":1,"kind":"select_filter_option",'
+                    '"field_label":"工单状态","option_text":"待处理","actions":[]}\n'
+                    + ('执行输出 ' * 8_000)
+                ),
                 tool_call_id="browser-1",
                 name="execute_skill_script",
             ),
@@ -234,7 +309,8 @@ class GeneratedUiCaseFollowupTests(SimpleTestCase):
         self.assertEqual(model.kwargs["tool_choice"], "required")
         prompt_text = "\n".join(str(message.content) for message in model.bound.messages)
         self.assertIn("getByRole", prompt_text)
-        self.assertIn("RESULT=PASS", prompt_text)
+        self.assertIn('"kind": "select_filter_option"', prompt_text)
+        self.assertIn("UI_ACTION_TRACE", prompt_text)
 
 
     def test_successful_fast_finish_generates_and_persists_ui_binding(self):

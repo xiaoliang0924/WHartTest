@@ -665,9 +665,71 @@ async def _run_testcase_with_bound_ui_script(
             consumer._recorder_exec_task = None
 
 
+def _extract_ui_action_traces(messages) -> list[dict[str, Any]]:
+    """Read successful structured interaction evidence emitted by browser helpers."""
+    traces = []
+    for message in messages or []:
+        if type(message).__name__ != "ToolMessage" or getattr(message, "name", "") != "execute_skill_script":
+            continue
+        content = getattr(message, "content", "")
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False, default=str)
+        for line in content.splitlines():
+            marker = "UI_ACTION_TRACE="
+            marker_index = line.find(marker)
+            if marker_index < 0:
+                continue
+            try:
+                trace = json.loads(line[marker_index + len(marker):].strip())
+            except (TypeError, ValueError):
+                continue
+            if isinstance(trace, dict) and trace.get("version") == 1:
+                traces.append(trace)
+    return traces
+
+
+def _normalize_generated_ui_payload(payload_json: str, traces: list[dict[str, Any]]) -> str:
+    """Expand helper-level dropdown actions into replayable steps using observed locators."""
+    try:
+        payload = json.loads(payload_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("生成模型返回的 UI 用例 JSON 无效。") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("steps"), list):
+        raise ValueError("生成模型返回的 UI 用例缺少步骤列表。")
+
+    trace_by_option = {}
+    for trace in traces:
+        if trace.get("kind") != "select_filter_option":
+            continue
+        key = (str(trace.get("field_label") or "").strip(), str(trace.get("option_text") or "").strip())
+        if all(key) and isinstance(trace.get("actions"), list) and trace["actions"]:
+            trace_by_option[key] = trace["actions"]
+
+    for step_index, step in enumerate(payload["steps"], 1):
+        if not isinstance(step, dict) or not isinstance(step.get("actions"), list):
+            continue
+        normalized_actions = []
+        for action in step["actions"]:
+            if not isinstance(action, dict) or action.get("type") not in {"select_filter_option", "select_option"}:
+                normalized_actions.append(action)
+                continue
+            field = str(action.get("field_label") or action.get("field") or action.get("label") or "").strip()
+            option = str(action.get("option_text") or action.get("option") or action.get("value") or "").strip()
+            traced_actions = trace_by_option.get((field, option))
+            if not traced_actions:
+                raise ValueError(
+                    f"第 {step_index} 步的下拉操作「{field or '未命名字段'} / {option or '未命名选项'}」"
+                    "没有对应的成功浏览器交互轨迹，不能安全转换为回放步骤。"
+                )
+            normalized_actions.extend(traced_actions)
+        step["actions"] = normalized_actions
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _build_ui_generation_observations(messages, *, max_chars: int = 80_000) -> str:
     """Keep only this run's browser execution evidence for the UI-case save pass."""
     chunks = []
+    traces = _extract_ui_action_traces(messages)
     for message in messages or []:
         message_type = type(message).__name__
         if message_type == "HumanMessage":
@@ -688,8 +750,12 @@ def _build_ui_generation_observations(messages, *, max_chars: int = 80_000) -> s
                 content = json.dumps(content, ensure_ascii=False, default=str)
             if content.strip():
                 chunks.append(f"[浏览器操作结果与页面观察]\n{content[-12_000:]}")
-    transcript = "\n\n".join(chunks)
-    return transcript[-max_chars:]
+    transcript = "\n\n".join(chunks)[-max_chars:]
+    if traces:
+        trace_block = "[浏览器 helper 实际交互轨迹；仅在 helper 已完成动作并核验状态后产生]\n"
+        trace_block += json.dumps(traces[-200:], ensure_ascii=False)
+        transcript = f"{transcript}\n\n{trace_block}" if transcript else trace_block
+    return transcript
 
 
 def _has_browser_execution_evidence(messages) -> bool:
@@ -720,6 +786,7 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
     if not _has_browser_execution_evidence(messages):
         return {"status": "failed", "message": "本次执行没有 Playwright 浏览器操作证据，不能安全生成 UI 用例。"}
     observations = _build_ui_generation_observations(messages)
+    action_traces = _extract_ui_action_traces(messages)
     if not observations:
         return {"status": "failed", "message": "本次执行没有可用的浏览器操作记录，无法安全生成 UI 用例。"}
 
@@ -736,7 +803,8 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
         "只有当功能步骤明确要求验证该精确编号时才可使用。应等待稳定页面结构，并由后续文本/行断言验证当前查询结果。"
         "导航步骤必须检查当前页面状态：如果该步骤开始时 URL 的 origin+pathname 已与目标页面一致，不要生成冗余菜单点击，改为保存基于本次实际 URL 的 assert mode=url、match=path；"
         "若必须点击导航，只能保存本次观察到的可见菜单项。定位到隐藏菜单节点时不得使用 force click 或单纯替换 XPath，应限定可见导航区域；没有可见目标时保留失败，不要伪造通过。"
-        "对于 Element Plus 普通下拉，若实际脚本通过 selectFormDropdownOption 选择，保存动作时点击可见的 .el-select__wrapper，再点击可见下拉层中的精确选项；禁止把只读 input[role=combobox] 作为 click 目标。选择后必须保存对筛选框已显示目标值的断言。"
+        "普通下拉操作若有 UI_ACTION_TRACE，必须优先按 trace.actions 原样保存；trace 由 helper 在实际操作且读回目标值后输出，禁止重猜或改写定位器。模型产出的 select_filter_option/select_option 语义动作会由保存前处理按匹配轨迹展开。"
+        "对于 Element Plus 普通下拉，若脚本通过 selectFormDropdownOption 选择但没有对应 UI_ACTION_TRACE，不得只凭 helper 名称臆造 .el-select 定位器；如实报告缺少可持久化证据。"
         "对于弹窗多选，必须把打开弹窗、点击真实选项行、确认作为独立且有序的实际动作；只有观察到弹窗已选数量大于 0 或选中标记后才保存确认动作。关闭后断言筛选字段已显示所选项：限定到页面实际观察到的字段容器及其标签/控件结构，不能假设标签是原生 label，也不能猜 .el-tag 或 following-sibling DOM 层级；自定义筛选面板应依据真实 .filter-field 与 .filter-field-label 结构定位。查询后不要再定位已关闭弹窗中的选项；若没有结果行，依据页面实际显示的空结果状态和仍保留的筛选值验收。对于本系统工单列表的工单类型弹窗筛选，触发器是真实 .filter-field 容器内的 .add-icon；若需保存为元素定位，使用 XPath //*[contains(@class,'filter-field')][.//*[contains(@class,'filter-field-label') and normalize-space()='工单类型']]//*[contains(@class,'add-icon')]，禁止推测 .el-icon-plus 或点击只读 input[role=combobox]；其他字段也必须按当前 DOM 观察确定对应的真实触发器。"
         "对于日期范围，必须保存选择实际目标起止日期的动作，并分别断言起始与结束输入值；只打开日历不算完成选择。若实际执行使用 selectFormDateRange，应保存真实观察到的输入值校验；若用日历选择，则定位日期面板中的完整年月与日期。日期格式与定位器必须来自本次页面观察，不得猜测。"
         "任何控件操作如果没有可验证的回填值/选中状态证据，不得保存为成功步骤；应保留失败或说明证据不足。"
@@ -763,6 +831,13 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
     args = call.get("args") or {}
     if not isinstance(args, dict) or not args.get("payload_json"):
         return {"status": "failed", "message": "生成模型未提供有效的 UI 用例内容。"}
+    try:
+        args = dict(args)
+        args["payload_json"] = _normalize_generated_ui_payload(
+            args["payload_json"], action_traces
+        )
+    except ValueError as exc:
+        return {"status": "failed", "message": str(exc)}
     try:
         raw_result = await save_tool.ainvoke(args)
         result = json.loads(raw_result) if isinstance(raw_result, str) else raw_result

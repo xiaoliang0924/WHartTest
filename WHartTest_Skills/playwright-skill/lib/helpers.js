@@ -2186,6 +2186,8 @@ async function ensureFilterPanelVisible(page, panelText = '筛选条件') {
 async function selectFormDropdownOption(page, labelText, optionText) {
   await ensureFilterPanelVisible(page);
   let select = null;
+  let traceSelectSelector = '';
+  const cssText = (value) => JSON.stringify(String(value));
 
   const filterField = page
     .locator('.filter-field')
@@ -2193,6 +2195,7 @@ async function selectFormDropdownOption(page, labelText, optionText) {
     .first();
   if ((await filterField.count()) > 0) {
     select = filterField.locator('.el-select').first();
+    traceSelectSelector = `div.filter-field:has(.filter-field-label:text-is(${cssText(labelText)})) .el-select`;
   }
 
   if (!select || (await select.count()) === 0) {
@@ -2203,6 +2206,7 @@ async function selectFormDropdownOption(page, labelText, optionText) {
     }).first();
     if ((await formItem.count()) > 0) {
       select = formItem.locator('.el-select').first();
+      traceSelectSelector = `div.el-form-item:has(label:text-is(${cssText(labelText)}), .el-form-item__label:text-is(${cssText(labelText)})) .el-select`;
     }
   }
 
@@ -2211,6 +2215,8 @@ async function selectFormDropdownOption(page, labelText, optionText) {
       has: page.getByText(labelText, { exact: true }),
     }).first();
     select = labeled.locator('.el-select').first();
+    // The broad fallback helps execution but is not precise enough to persist.
+    traceSelectSelector = '';
   }
 
   await select.waitFor({ state: 'visible', timeout: 15000 });
@@ -2272,6 +2278,32 @@ async function selectFormDropdownOption(page, labelText, optionText) {
 
     const shown = await readShown();
     if (shown.includes(String(optionText))) {
+      if (traceSelectSelector) {
+        const triggerSelector = (await selectTrigger.count()) > 0
+          ? `${traceSelectSelector} .el-select__wrapper`
+          : traceSelectSelector;
+        const trace = {
+          version: 1,
+          kind: 'select_filter_option',
+          field_label: String(labelText),
+          option_text: String(optionText),
+          component: 'Element Plus .el-select',
+          evidence: 'Emitted only after the visible field and option were operated and the selected value was read back.',
+          actions: [
+            { type: 'click', selector: {
+              name: `${labelText} 下拉框`, locator_type: 'css', locator_value: triggerSelector,
+            } },
+            { type: 'click', selector: {
+              name: `${labelText} 选项 ${optionText}`, locator_type: 'css',
+              locator_value: `.el-select-dropdown:visible .el-select-dropdown__item:not(.is-disabled):text-is(${cssText(optionText)})`,
+            } },
+            { type: 'assert', mode: 'contain_text', value: String(optionText), selector: {
+              name: `${labelText} 当前选中值`, locator_type: 'css', locator_value: traceSelectSelector,
+            } },
+          ],
+        };
+        console.log(`UI_ACTION_TRACE=${JSON.stringify(trace)}`);
+      }
       console.log(`RESULT=PASS: 下拉「${labelText}」已选中「${optionText}」`);
       return true;
     }
