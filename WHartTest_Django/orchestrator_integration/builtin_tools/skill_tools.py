@@ -982,6 +982,19 @@ def _collect_skill_artifacts(
     return collected
 
 
+def unsafe_global_table_selector(command: str) -> str | None:
+    """Reject page-wide table fragments that also capture calendar/popover tables."""
+    pattern = re.compile(
+        r'''(?:\bpage\s*\.\s*(?:locator|\$\$eval|\$eval|\$\$|\$)|\bdocument\s*\.\s*(?:querySelectorAll|querySelector))\s*\(\s*\\?(['"])(.*?)\\?\1''',
+        re.DOTALL,
+    )
+    for match in pattern.finditer(command or ''):
+        selector = match.group(2).strip()
+        if re.match(r'^(?:table(?::visible)?\s+)?(?:thead|tbody|tr|td|th)(?=\s|:|$)', selector) or re.fullmatch(r'table(?::visible)?', selector):
+            return selector
+    return None
+
+
 _FAILURE_REMINDER = (
     "\n\n【必须输出完整测试报告】这是用例步骤未通过。"
     "请立即在对话中输出完整报告，不要等待用户追问，格式如下：\n"
@@ -1017,6 +1030,7 @@ _RETRY_REMINDER = (
     "禁止把不同状态的工单号一起要求出现在筛选结果。没有状态列时查明确徽章/详情/只读数据证据，"
     "不得从摘要或主题里的状态词推断；不可观测就报告结果不可验证。"
     "弹窗多选先读取真实选项名，再用 helpers.selectDialogMultiSelect(page, 字段标签, 完整选项名)；拆分步骤严格传 selectFilterDialogOption(page, 字段标签, 完整选项名)，确认后用 assertFilterFieldShows 核验真实字段回填。"
+    "列表列值校验必须用 helpers.assertTableColumnEquals(page, 列名, 期望值)，检查 status；unverifiable 表示定位或数据证据不足，不能当作业务不一致或通过。禁止全页面 tbody/thead/tr/td 取值，日历也含这些节点。"
     "禁止 getByText 点表格里的状态文字。"
     "断言区块/字段用 helpers.assertPageShows(page, ['基本信息', '工单类型'])，"
     "禁止 getByText('字段*')（必填星号是独立节点）。"
@@ -1721,6 +1735,16 @@ def get_skill_tools(
         logger.info(
             f"[execute_skill_script] skill_name={skill_name}, command={command}"
         )
+
+        if current_test_case_id and skill_name == "playwright-skill":
+            unsafe_selector = unsafe_global_table_selector(command)
+            if unsafe_selector:
+                return (
+                    f"错误: 全页面表格定位器 {unsafe_selector!r} 会混入日期面板、弹窗或其他表格。"
+                    "按列校验请调用 helpers.assertTableColumnEquals(page, 列名, 期望值)，"
+                    "检查返回的 status；非 pass 时停止并报告原因，不得无条件输出 RESULT=PASS。"
+                    "多个目标表格时传入第四个参数 {tableSelector: 实测唯一表格定位器}。"
+                )
 
         _case_exec_blocked_skills = frozenset({"playwright-cli", "browser-use"})
         if current_test_case_id and skill_name in _case_exec_blocked_skills:

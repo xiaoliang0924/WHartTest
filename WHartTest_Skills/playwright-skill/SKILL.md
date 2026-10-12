@@ -87,3 +87,10 @@ node run.js "await helpers.loginStep1(page);"
 - 步骤只要求打开多选弹窗时，用 `openFilterDialogField(page, 字段标签)`；不要点击静态标签。步骤要求选项时，用 `selectDialogMultiSelect` 或按步骤拆分为 `openFilterDialogField`、`selectFilterDialogOption`、`confirmFilterDialog`。
 - 字段标签和输入框 placeholder 可能有文案差异。先用 `describePageForAI(page)` 查看当前页面实际字段；例如用例写“工单编号”，页面可能显示“搜索工单号…”。`fillFilterField` 会做常见别名匹配；如果仍找不到，应报告页面实际可见字段和原始定位错误，不要猜 placeholder，也不要归因成“缺失业务”。
 - 失败报告要保留触发失败的原始步骤和控件错误。后续步骤因前一步失败未执行时，标记“未执行”，不要把超时改写为后续步骤“缺失业务”。
+
+### 表格列值验收
+
+使用 `helpers.assertTableColumnEquals(page, '工单类型', '人工报价')` 校验目标业务表格。
+检查返回的 `status`；`fail` 是实际列值不一致，`unverifiable` 是列缺失、空结果、多个目标表格或列对齐不可靠，均不能继续报告通过。
+存在多个同列名表格时，传入 `{tableSelector: 实际观察到的唯一表格定位器}` 作为第四个参数。
+禁止全页面 `thead th`、`tbody tr`、`td:nth-child(...)` 取值，日期面板和弹窗也包含表格节点。

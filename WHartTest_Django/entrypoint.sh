@@ -79,6 +79,9 @@ if [ -f "$PLAYWRIGHT_HELPERS_OVERRIDE" ] && [ -f "$PLAYWRIGHT_HELPERS_TARGET" ];
   if [ -f "$PLAYWRIGHT_HELPERS_BUNDLED" ] && grep -q 'function completeTicketActionForStep(' "$PLAYWRIGHT_HELPERS_BUNDLED"; then
     python /app/scripts/merge_complete_runtime_helper.py "$PLAYWRIGHT_HELPERS_BUNDLED" "$PLAYWRIGHT_HELPERS_OVERRIDE"
   fi
+  if [ -f "$PLAYWRIGHT_HELPERS_BUNDLED" ] && grep -q 'async function assertTableColumnEquals(' "$PLAYWRIGHT_HELPERS_BUNDLED"; then
+    python /app/scripts/merge_table_runtime_helper.py "$PLAYWRIGHT_HELPERS_BUNDLED" "$PLAYWRIGHT_HELPERS_OVERRIDE"
+  fi
   echo "Applying playwright helpers.js runtime override..."
   cp -a "$PLAYWRIGHT_HELPERS_OVERRIDE" "$PLAYWRIGHT_HELPERS_TARGET"
 fi

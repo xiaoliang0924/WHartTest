@@ -16,7 +16,7 @@ function collection(items) {
   };
 }
 function cell(text) {
-  return { innerText: async () => text };
+  return { innerText: async () => text, isVisible: async () => true };
 }
 function tableStub(headers, rowCells) {
   const rows = rowCells.map((cells) => ({

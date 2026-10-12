@@ -6592,99 +6592,69 @@ async function clickPageButton(page, name) {
  * Header and body are scoped to the same table. Missing or misaligned columns are
  * reported as unverifiable instead of being mistaken for a product mismatch.
  */
-async function assertTableColumnEquals(page, columnName, expectedValue) {
-  const normalize = (value) => String(value || '').replace(/\s+/g, '').trim();
+async function assertTableColumnEquals(page, columnName, expectedValue, options = {}) {
+  const normalize = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const wantedColumn = normalize(columnName);
   const wantedValue = normalize(expectedValue);
   const report = (status, message, details = {}) => {
-    const prefix = status === 'pass' ? 'PASS' : status === 'fail' ? 'FAIL' : 'UNVERIFIABLE';
-    console.log(`RESULT=${prefix}: ${message}`);
+    console.log(`RESULT=${status === 'pass' ? 'PASS' : status === 'fail' ? 'FAIL' : 'UNVERIFIABLE'}: ${message}`);
     return { status, message, ...details };
   };
-  if (!wantedColumn || !wantedValue) {
-    return report('unverifiable', '表格列名或期望值为空，无法验证。');
+  if (!wantedColumn || !wantedValue) return report('unverifiable', '表格列名或期望值为空，无法验证。');
+  let scope = page;
+  if (options.tableSelector) {
+    scope = page.locator(options.tableSelector);
+    if (await scope.count() !== 1 || !await scope.isVisible()) {
+      return report('unverifiable', '指定的目标表格不唯一或不可见。');
+    }
   }
-
-  const elementTables = page.locator('.el-table:visible');
-  const elementTableCount = await elementTables.count();
-  for (let tableIndex = 0; tableIndex < elementTableCount; tableIndex++) {
-    const table = elementTables.nth(tableIndex);
-    const headers = table.locator('.el-table__header-wrapper:not(.is-hidden) thead tr:last-child th');
-    const headerTexts = (await headers.allTextContents()).map((text) => String(text || '').trim());
-    const columnIndex = headerTexts.findIndex((text) => normalize(text).includes(wantedColumn));
-    if (columnIndex < 0) continue;
-
-    const rows = table.locator('.el-table__body-wrapper tbody tr:visible');
-    const rowCount = await rows.count();
-    if (!rowCount) {
-      return report('unverifiable', `表格存在「${columnName}」列，但当前没有可核对的数据行。`, { rowCount: 0 });
+  const candidates = [];
+  const collect = async (tables, elementPlus) => {
+    for (let i = 0; i < await tables.count(); i++) {
+      const table = tables.nth(i);
+      const headers = table.locator(elementPlus
+        ? '.el-table__header-wrapper:not(.is-hidden) thead tr:last-child th'
+        : 'thead tr:last-child th');
+      const headerTexts = (await headers.allTextContents()).map(normalize);
+      const indices = headerTexts.flatMap((text, index) => text === wantedColumn ? [index] : []);
+      if (!indices.length) continue;
+      candidates.push({ table, elementPlus, headerTexts, indices });
     }
-    const actualValues = [];
-    for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-      const cells = rows.nth(rowIndex).locator('td');
-      const cellCount = await cells.count();
-      if (cellCount !== headerTexts.length || columnIndex >= cellCount) {
-        return report(
-          'unverifiable',
-          `「${columnName}」表头与数据列无法可靠对齐（表头 ${headerTexts.length} 列，数据行 ${rowIndex + 1} 有 ${cellCount} 格）。`,
-          { rowCount, columnIndex, headerTexts },
-        );
-      }
-      actualValues.push((await cells.nth(columnIndex).innerText()).trim());
-    }
-    if (actualValues.some((value) => !value)) {
-      return report('unverifiable', `「${columnName}」列存在空单元格，无法确认筛选结果。`, { rowCount, columnIndex });
-    }
-    const mismatches = actualValues
-      .map((value, index) => ({ row: index + 1, value }))
-      .filter((item) => normalize(item.value) !== wantedValue);
-    if (mismatches.length) {
-      const samples = mismatches.slice(0, 5).map((item) => `第${item.row}行=${item.value}`).join('，');
-      return report('fail', `「${columnName}」列 ${mismatches.length}/${rowCount} 行不等于「${expectedValue}」：${samples}`, {
-        rowCount, columnIndex, mismatchCount: mismatches.length,
-      });
-    }
-    return report('pass', `已核对 ${rowCount} 行，「${columnName}」列均为「${expectedValue}」。`, { rowCount, columnIndex });
+  };
+  if (options.tableSelector) {
+    await collect({ count: async () => 1, nth: () => scope }, await scope.evaluate(el => el.classList.contains('el-table')));
+  } else {
+    await collect(page.locator('.el-table:visible'), true);
+    await collect(page.locator('table:visible:not(.el-table__header):not(.el-table__body)'), false);
   }
-
-  // Plain HTML tables are supported when the application does not use Element Plus.
-  const plainTables = page.locator('table:visible');
-  const plainTableCount = await plainTables.count();
-  for (let tableIndex = 0; tableIndex < plainTableCount; tableIndex++) {
-    const table = plainTables.nth(tableIndex);
-    const headers = table.locator('thead tr:last-child th');
-    const headerTexts = (await headers.allTextContents()).map((text) => String(text || '').trim());
-    const columnIndex = headerTexts.findIndex((text) => normalize(text).includes(wantedColumn));
-    if (columnIndex < 0) continue;
-    const rows = table.locator('tbody tr:visible');
-    const rowCount = await rows.count();
-    if (!rowCount) {
-      return report('unverifiable', `表格存在「${columnName}」列，但当前没有可核对的数据行。`, { rowCount: 0 });
-    }
-    const actualValues = [];
-    for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-      const cells = rows.nth(rowIndex).locator('td');
-      const cellCount = await cells.count();
-      if (cellCount !== headerTexts.length || columnIndex >= cellCount) {
-        return report('unverifiable', `「${columnName}」表头与数据列无法可靠对齐。`, { rowCount, columnIndex });
-      }
-      actualValues.push((await cells.nth(columnIndex).innerText()).trim());
-    }
-    if (actualValues.some((value) => !value)) {
-      return report('unverifiable', `「${columnName}」列存在空单元格，无法确认筛选结果。`, { rowCount, columnIndex });
-    }
-    const mismatches = actualValues.map((value, index) => ({ row: index + 1, value }))
-      .filter((item) => normalize(item.value) !== wantedValue);
-    if (mismatches.length) {
-      const samples = mismatches.slice(0, 5).map((item) => `第${item.row}行=${item.value}`).join('，');
-      return report('fail', `「${columnName}」列 ${mismatches.length}/${rowCount} 行不等于「${expectedValue}」：${samples}`, {
-        rowCount, columnIndex, mismatchCount: mismatches.length,
-      });
-    }
-    return report('pass', `已核对 ${rowCount} 行，「${columnName}」列均为「${expectedValue}」。`, { rowCount, columnIndex });
+  if (candidates.length !== 1) {
+    return report('unverifiable', candidates.length
+      ? `多个可见表格含「${columnName}」列，请明确指定目标表格。`
+      : `当前可见表格没有「${columnName}」列，不能按列验证。`);
   }
-
-  return report('unverifiable', `当前可见表格没有「${columnName}」列，不能按列验证。`);
+  const { table, elementPlus, headerTexts, indices } = candidates[0];
+  if (indices.length !== 1) return report('unverifiable', `目标表格中「${columnName}」列不唯一。`);
+  const columnIndex = indices[0];
+  const rows = table.locator(elementPlus ? '.el-table__body-wrapper tbody tr:visible' : 'tbody tr:visible');
+  const rowCount = await rows.count();
+  if (!rowCount) return report('unverifiable', `表格存在「${columnName}」列，但当前没有可核对的数据行。`, { rowCount });
+  const actualValues = [];
+  for (let i = 0; i < rowCount; i++) {
+    const cells = rows.nth(i).locator('td');
+    if (await cells.count() !== headerTexts.length) {
+      return report('unverifiable', `「${columnName}」表头与第${i + 1}行数据列无法可靠对齐。`, { rowCount, columnIndex });
+    }
+    const cell = cells.nth(columnIndex);
+    if (!await cell.isVisible()) return report('unverifiable', `第${i + 1}行「${columnName}」单元格不可见。`);
+    actualValues.push(normalize(await cell.innerText()));
+  }
+  if (actualValues.some(value => !value)) return report('unverifiable', `「${columnName}」列存在空单元格，无法确认筛选结果。`);
+  const mismatches = actualValues.map((value, i) => ({ row: i + 1, value })).filter(item => item.value !== wantedValue);
+  if (mismatches.length) {
+    const samples = mismatches.slice(0, 5).map(item => `第${item.row}行=${item.value}`).join('，');
+    return report('fail', `「${columnName}」列 ${mismatches.length}/${rowCount} 行不等于「${expectedValue}」：${samples}`, { rowCount, columnIndex, mismatchCount: mismatches.length });
+  }
+  return report('pass', `已核对 ${rowCount} 行，「${columnName}」列均为「${expectedValue}」。`, { rowCount, columnIndex });
 }
 
 /**
