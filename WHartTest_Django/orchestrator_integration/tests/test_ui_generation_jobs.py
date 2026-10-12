@@ -178,7 +178,7 @@ class GenerationJobTests(TransactionTestCase):
         from langgraph_integration.models import LLMConfig
         from langchain_core.messages import HumanMessage, ToolMessage
         config = LLMConfig.objects.create(config_name='Background fixture', name='fixture',
-            api_url='http://unused.invalid/v1')
+            api_url='http://unused.invalid/v1', provider='anthropic')
         state = enqueue_generation(self.record.pk, llm_config_id=config.pk)
         messages = [HumanMessage(content='Isolated functional execution evidence')]
         final_evidence = ToolMessage(content='RESULT=PASS: final browser step', tool_call_id='final-step')
@@ -195,6 +195,7 @@ class GenerationJobTests(TransactionTestCase):
             self.assertEqual(kwargs['test_case_id'], self.case.pk)
             self.assertEqual(kwargs['user'].pk, self.user.pk)
             self.assertTrue(kwargs['background'])
+            self.assertEqual(kwargs['provider'], 'anthropic')
             self.assertIn('save_generated_ui_testcase', [tool.name for tool in kwargs['tools']])
             await kwargs['on_stage']('validating')
             return {'status': 'success', 'message': 'UI 用例已生成并通过回放验证'}
