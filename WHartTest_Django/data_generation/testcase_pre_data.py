@@ -2070,6 +2070,36 @@ def _build_message_suffix(
     if snapshot:
         lines.append('- 数据快照:')
         lines.append(json.dumps(snapshot, ensure_ascii=False, indent=2))
+    status_fixture_specs = (
+        ('pendingAssign', 'pending_assign', '待分配'),
+        ('pendingProcess', 'pending_process', '待处理'),
+        ('processing', 'processing', '处理中'),
+        ('resolved', 'resolved', '已完成/已解决'),
+    )
+    status_fixtures = []
+    for prefix, fallback_status, ui_label in status_fixture_specs:
+        ticket_no = (
+            snapshot.get(f'statusFilter{prefix}TicketNo')
+            or snapshot.get(f'{prefix}TicketNo')
+        )
+        if not ticket_no:
+            continue
+        final_status = (
+            snapshot.get(f'statusFilter{prefix}TicketStatus')
+            or snapshot.get(f'{prefix}TicketStatus')
+            or fallback_status
+        )
+        status_fixtures.append((prefix, str(ticket_no), str(final_status), ui_label))
+    if status_fixtures:
+        lines.append('- 状态筛选样本最终状态映射（按工单号匹配，不要混用其他样本状态）:')
+        for prefix, ticket_no, status_code, ui_label in status_fixtures:
+            lines.append(
+                f'  - {prefix}TicketNo={ticket_no} -> 最终状态 {status_code}（页面选项「{ui_label}」）'
+            )
+        lines.append(
+            '若目标工单当前不在可见列表，禁止用通用字段 ticketStatus 推断该工单状态；'
+            '优先使用上述同一工单号对应的最终状态映射，再用页面查询结果核验。'
+        )
     automatic_assignment = snapshot.get('autoAssignment') if isinstance(snapshot, dict) else None
     if isinstance(automatic_assignment, dict):
         assignee_name = automatic_assignment.get('assigneeName') or '-'

@@ -68,16 +68,16 @@ def _status_filter_fixture_steps() -> List[Dict[str, Any]]:
         'assigneeRole': '{{assigneeRole}}',
     }
     fixtures = (
-        ('待分配', 'pendingAssign'),
-        ('待处理', 'pendingProcess'),
+        ('待分配', 'pendingAssign', 'pending_assign'),
+        ('待处理', 'pendingProcess', 'pending_process'),
         # Complete this conversation before starting the final processing
         # sample. The target system permits one active initiator conversation;
         # leaving a processing sample open would queue the next claim.
-        ('已完成', 'resolved'),
-        ('处理中', 'processing'),
+        ('已完成', 'resolved', 'resolved'),
+        ('处理中', 'processing', 'processing'),
     )
     steps: List[Dict[str, Any]] = []
-    for status_name, prefix in fixtures:
+    for status_name, prefix, _status_code in fixtures:
         ticket_id = f'{prefix}TicketId'
         ticket_no = f'{prefix}TicketNo'
         steps.append(
@@ -136,7 +136,22 @@ def _status_filter_fixture_steps() -> List[Dict[str, Any]]:
                     'value': '{{' + prefix + 'TicketNo}}',
                     'type': 0,
                 }
-                for _status_name, prefix in fixtures
+                for _status_name, prefix, _status_code in fixtures
+            ]
+            + [
+                {
+                    'key': f'statusFilter{prefix}TicketStatus',
+                    'value': status_code,
+                    'type': 0,
+                }
+                for _status_name, prefix, status_code in fixtures
+            ]
+            + [
+                {
+                    'key': 'ticketStatus',
+                    'value': 'processing',
+                    'type': 0,
+                }
             ],
         }
     )

@@ -811,6 +811,15 @@ class IntentRouterStateTests(DjangoTestCase):
             names.index('完成状态筛选样本：已完成'),
             names.index('领取状态筛选样本：处理中'),
         )
+        public_data = next(
+            step for step in template['steps'] if step.get('type') == 'set_public_data'
+        )
+        public_items = {item['key']: item['value'] for item in public_data['items']}
+        self.assertEqual(public_items['statusFilterpendingAssignTicketStatus'], 'pending_assign')
+        self.assertEqual(public_items['statusFilterpendingProcessTicketStatus'], 'pending_process')
+        self.assertEqual(public_items['statusFilterprocessingTicketStatus'], 'processing')
+        self.assertEqual(public_items['statusFilterresolvedTicketStatus'], 'resolved')
+        self.assertEqual(public_items['ticketStatus'], 'processing')
         for step in created:
             summary = step['variables'].get('summary') or ''
             # 模板字面量或渲染后都不应超过 20（无 timestamp）。
@@ -1832,6 +1841,40 @@ class TestcasePreDataResolverTests(DjangoTestCase):
         self.assertNotIn('fillFilterField', suffix)
         self.assertNotIn('clickRowAction', suffix)
         self.assertNotIn("'审批'", suffix)
+
+    def test_message_suffix_uses_per_ticket_final_status_mapping(self):
+        from data_generation.testcase_pre_data import (
+            PreDataResolution,
+            _build_message_suffix,
+        )
+
+        run = DataGenerationRun(
+            plan=None,
+            status=DataGenerationRun.STATUS_SUCCESS,
+            output_snapshot={
+                'ticketNo': '2026101240278012',
+                # This generic value is stale after the processing fixture is claimed.
+                'ticketStatus': 'pending_process',
+                'statusFilterprocessingTicketNo': '2026101240278012',
+                'statusFilterprocessingTicketStatus': 'processing',
+            },
+            step_logs=[],
+        )
+        resolution = PreDataResolution(
+            plan=None,
+            template_key='biz_prepare_status_filter_data',
+            input_params={},
+            default_environment_id=None,
+            source='inferred',
+            fail_fast=False,
+        )
+        suffix = _build_message_suffix(
+            run,
+            resolution,
+            case_text='工单状态筛选后查询目标工单，并校验列表状态',
+        )
+        self.assertIn('2026101240278012 -> 最终状态 processing（页面选项「处理中」）', suffix)
+        self.assertIn('禁止用通用字段 ticketStatus 推断', suffix)
 
     def test_execution_hints_require_stable_login_and_unique_navigation(self):
         from data_generation.testcase_pre_data import (
