@@ -1055,6 +1055,34 @@ def _with_failure_reminder(output: str, *, skill_name: str) -> str:
         return output
     if "【必须输出完整测试报告】" in output or "【脚本错误，请修正后重试】" in output:
         return output
+    # Shared UI helpers already perform an action and read the value back. Some
+    # generated scripts then append a second, hand-written read using the
+    # application's unrelated legacy `.el-form-item` structure. If that
+    # duplicate read times out, preserve the helper's concrete proof so the
+    # model can continue with the next testcase step instead of retrying the
+    # stale locator until the run expires.
+    has_verified_dropdown_trace = False
+    for trace_match in re.finditer(r"UI_ACTION_TRACE=(\{[^\n]*\})", output or ""):
+        try:
+            trace = json.loads(trace_match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if trace.get("kind") == "select_filter_option":
+            has_verified_dropdown_trace = True
+            break
+    if (
+        has_verified_dropdown_trace
+        and re.search(r"RESULT=PASS:\s*下拉", output or "")
+        and re.search(r"Timeout\s+\d+ms exceeded", output or "", re.IGNORECASE)
+        and re.search(r"el-form-item", output or "", re.IGNORECASE)
+        and re.search(r"inputValue\s*\(|\.input\s*\(", output or "", re.IGNORECASE)
+    ):
+        return (
+            f"{output.rstrip()}\n\n"
+            "【步骤已通过】通用下拉 helper 已实际选择选项并读回目标值；"
+            "后续超时来自对旧 `.el-form-item` 结构的重复只读核验。"
+            "保留 helper 的成功证据，不要重试该旧定位器，继续执行下一测试步骤。"
+        )
     if re.search(r"RESULT=PASS:\s*步骤\d+", output or ""):
         if _contains_any(output, _ASSERTION_FAIL_MARKERS) or "locator.waitFor: Timeout" in output:
             return (

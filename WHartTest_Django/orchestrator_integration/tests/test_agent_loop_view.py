@@ -1615,6 +1615,43 @@ class SkillFailureReminderTests(SimpleTestCase):
         self.assertIn("脚本错误，请修正后重试", output)
         self.assertNotIn("【步骤已通过】", output)
 
+    def test_verified_dropdown_trace_survives_duplicate_legacy_locator_timeout(self):
+        trace = {
+            "version": 1,
+            "kind": "select_filter_option",
+            "field_label": "工单状态",
+            "option_text": "处理中",
+            "component": "Element Plus .el-select",
+            "evidence": "visible field read back the selected value",
+        }
+        output = _with_failure_reminder(
+            "UI_ACTION_TRACE=" + json.dumps(trace, ensure_ascii=False) + "\n"
+            "RESULT=PASS: 下拉「工单状态」已选中「处理中」\n"
+            "locator.inputValue: Timeout 15000ms exceeded\n"
+            "waiting for locator('.el-form-item').locator('input[readonly]').inputValue()",
+            skill_name="playwright-skill",
+        )
+        self.assertIn("【步骤已通过】", output)
+        self.assertIn("继续执行下一测试步骤", output)
+        self.assertNotIn("脚本错误，请修正后重试", output)
+
+    def test_unrelated_timeout_after_verified_dropdown_is_not_ignored(self):
+        trace = {
+            "version": 1,
+            "kind": "select_filter_option",
+            "field_label": "工单状态",
+            "option_text": "处理中",
+        }
+        output = _with_failure_reminder(
+            "UI_ACTION_TRACE=" + json.dumps(trace, ensure_ascii=False) + "\n"
+            "RESULT=PASS: 下拉「工单状态」已选中「处理中」\n"
+            "locator.click: Timeout 15000ms exceeded\n"
+            "waiting for locator('.el-button--primary')",
+            skill_name="playwright-skill",
+        )
+        self.assertNotIn("【步骤已通过】", output)
+        self.assertIn("脚本错误，请修正后重试", output)
+
     def test_missing_file_on_whart_test_appends_retry_then_report_reminder(self):
         output = _with_failure_reminder(
             "文件不存在: /tmp/case_1520_step1.png",
