@@ -1558,7 +1558,7 @@ function _guessMimeType(name) {
 }
 
 /** 按平台执行器同款映射构建 Playwright locator（支持 iframe 链式定位） */
-function _locatorFromParts(container, type, value) {
+function _locatorFromParts(container, type, value, locatorOptions = {}) {
   let loc = null;
   switch (type) {
     case 'xpath':
@@ -1575,6 +1575,12 @@ function _locatorFromParts(container, type, value) {
       break;
     case 'role':
       loc = container.getByRole(value);
+      break;
+    case 'role_name':
+      loc = container.getByRole(locatorOptions.role || 'button', {
+        name: locatorOptions.name || value,
+        exact: locatorOptions.exact !== false,
+      });
       break;
     case 'placeholder':
       loc = container.getByPlaceholder(value);
@@ -1663,8 +1669,8 @@ async function resolveLocatorWithFallback(page, selector, log, options = {}) {
     }
   }
   const candidates = [];
-  const push = (t, v, idx) => {
-    if (v && String(v).trim()) candidates.push([t, String(v), idx]);
+  const push = (t, v, idx, locatorOptions = null) => {
+    if (v && String(v).trim()) candidates.push([t, String(v), idx, locatorOptions]);
   };
   push(selector.locator_type || 'xpath', selector.locator_value, selector.locator_index);
   push(selector.locator_type_2, selector.locator_value_2, selector.locator_index_2);
@@ -1685,16 +1691,30 @@ async function resolveLocatorWithFallback(page, selector, log, options = {}) {
   }
   if (!candidates.length) return null;
 
+  // Text locators are substring matches by default in Playwright. When the saved
+  // element metadata says this target is a button, prefer an exact accessible
+  // button-name match before the raw text locator. This avoids clicking prose
+  // such as “详情处理” when the intended control is the row button “处理”.
+  const elementDescription = String(
+    selector.description || selector.element_name || selector.name || ''
+  );
+  const textCandidate = candidates.find(([type]) => type === 'text');
+  if (textCandidate && /按钮|button/i.test(elementDescription)) {
+    candidates.unshift(['role_name', textCandidate[1], textCandidate[2], {
+      role: 'button', name: textCandidate[1], exact: true,
+    }]);
+  }
+
   let locator = null;
   let usedIndex = 0;
   for (let i = 0; i < candidates.length; i++) {
-    const [t, v, idx] = candidates[i];
+    const [t, v, idx, locatorOptions] = candidates[i];
     // Count assertions must target the whole matching collection and allow
     // zero matches. Applying locator_index or requiring visibility here makes
     // assert_count(expected=0) impossible and turns it into a visibility wait.
     let cand = options.countMode
-      ? _locatorFromParts(container, t, v)
-      : _applyLocatorIndex(_locatorFromParts(container, t, v), idx);
+      ? _locatorFromParts(container, t, v, locatorOptions || {})
+      : _applyLocatorIndex(_locatorFromParts(container, t, v, locatorOptions || {}), idx);
     try {
       if (options.countMode) {
         await cand.count();
@@ -2012,7 +2032,15 @@ async function runOneStep(page, step) {
   }
 
   // 定位器降级链（与执行器一致）：主定位严格冲突/失效自动切备用
-  const sel = step.element || step.selector;
+  const rawSelector = step.element || step.selector;
+  const sel = rawSelector ? {
+    ...rawSelector,
+    description: rawSelector.description
+      || step.element_name
+      || (step.ope_value && step.ope_value.description)
+      || step.description
+      || '',
+  } : rawSelector;
   const isCountAssertion = opeKey === 'assert_count';
   const resolved = await resolveLocatorWithFallback(page, sel, (m) => {
     console.log('[run_steps] ' + m);
