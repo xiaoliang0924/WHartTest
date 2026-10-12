@@ -982,6 +982,71 @@ def _collect_skill_artifacts(
     return collected
 
 
+def verified_filter_step_script(step: dict, preceding_steps: list[dict]) -> Optional[str]:
+    """Build known filter operations from explicit functional-step expectations."""
+    description = str(step.get('description') or '')
+    expected = str(step.get('expected_result') or '')
+    number = int(step['step_number'])
+    quote = r'[「【“\"]([^」】”\"]+)[」】”\"]'
+    field = None
+    for earlier in reversed(preceding_steps):
+        text = str(earlier.get('description') or '')
+        if '筛选' in text and ('点击' in text or '选择' in text):
+            names = re.findall(quote, text)
+            if names:
+                field = names[-1]
+                break
+    action = None
+    if field and '弹窗' in description and re.search(r'勾选|选中', description):
+        names = re.findall(quote, description)
+        if len(names) == 1:
+            action = f'await helpers.selectFilterDialogOption(page, {json.dumps(field, ensure_ascii=False)}, {json.dumps(names[0], ensure_ascii=False)});'
+    elif field and '弹窗' in description and '确定' in description:
+        selection = next((item for item in reversed(preceding_steps)
+            if '弹窗' in str(item.get('description') or '') and re.search(r'勾选|选中', str(item.get('description') or ''))), None)
+        names = re.findall(quote, str(selection.get('description') or '')) if selection else []
+        if len(names) == 1:
+            action = (
+                f'await helpers.confirmFilterDialog(page, {json.dumps(field, ensure_ascii=False)}); '
+                f'if (!await helpers.assertFilterFieldShows(page, {json.dumps(field, ensure_ascii=False)}, {json.dumps(names[0], ensure_ascii=False)})) '
+                f'throw new Error("步骤{number} 筛选值未回填");'
+            )
+    elif '列表' in description and '列' in description:
+        columns = re.findall(quote, description)
+        target = re.search(r'均(?:为|是)\s*' + quote, expected)
+        if len(columns) == 1 and target:
+            action = (
+                f'const verification = await helpers.assertTableColumnEquals(page, {json.dumps(columns[0], ensure_ascii=False)}, {json.dumps(target.group(1), ensure_ascii=False)}); '
+                f'if (verification.status !== "pass") throw new Error("步骤{number} " + verification.message);'
+            )
+    if action is None:
+        return None
+    return action + f' await helpers.screenshotCaseStep(page, {number}); console.log("RESULT=PASS: 步骤{number} 已按功能预期核验目标状态");'
+
+
+def verified_filter_step_command(testcase_id, step_number, command):
+    if not testcase_id or not step_number:
+        return command
+    # Screenshot-only calls are not authorization to perform an operation.
+    executable = re.sub(r'(?:await\s+)?helpers\.screenshotCaseStep\s*\(\s*page\s*,\s*\d+\s*\)\s*;?', '', command or '')
+    if not re.search(r'helpers\.(?:selectFilterDialogOption|selectDialogMultiSelect|confirmFilterDialog|clickPageButton|assertFilterFieldShows|assertTableColumnEquals)|\.\s*(?:click|check|evaluate|evaluateAll|count|allTextContents|isChecked|getAttribute|isVisible|innerText|textContent)\s*\(|RESULT=(?:PASS|FAIL)', executable):
+        return command
+    from testcases.models import TestCaseStep
+    steps = list(TestCaseStep.objects.filter(test_case_id=testcase_id,
+        step_number__lte=step_number).order_by('step_number').values('step_number', 'description', 'expected_result'))
+    current = next((item for item in steps if item['step_number'] == step_number), None)
+    if current is None:
+        return command
+    script = verified_filter_step_script(current, [item for item in steps if item['step_number'] < step_number])
+    if script is None:
+        return command
+    import shlex
+    # The tool output must include what actually ran so generation cannot use
+    # an LLM's discarded locator as execution evidence.
+    script = 'console.log("[VERIFIED_STEP_SCRIPT] " + ' + json.dumps(script, ensure_ascii=False) + '); ' + script
+    return 'node run.js ' + shlex.quote(script)
+
+
 def unsafe_global_table_selector(command: str) -> str | None:
     """Reject page-wide table fragments that also capture calendar/popover tables."""
     pattern = re.compile(
@@ -1737,6 +1802,7 @@ def get_skill_tools(
         )
 
         if current_test_case_id and skill_name == "playwright-skill":
+            command = verified_filter_step_command(current_test_case_id, testcase_step, command)
             unsafe_selector = unsafe_global_table_selector(command)
             if unsafe_selector:
                 return (

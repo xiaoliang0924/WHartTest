@@ -747,6 +747,9 @@ def _build_ui_generation_observations(messages, *, max_chars: int = 80_000) -> s
     """Keep only this run's browser execution evidence for the UI-case save pass."""
     chunks = []
     traces = _extract_ui_action_traces(messages)
+    normalized_calls = {getattr(message, "tool_call_id", None) for message in messages or []
+                        if type(message).__name__ == "ToolMessage"
+                        and "[VERIFIED_STEP_SCRIPT]" in str(getattr(message, "content", ""))}
     for message in messages or []:
         message_type = type(message).__name__
         if message_type == "HumanMessage":
@@ -756,6 +759,8 @@ def _build_ui_generation_observations(messages, *, max_chars: int = 80_000) -> s
         elif message_type == "AIMessage":
             for call in getattr(message, "tool_calls", []) or []:
                 if call.get("name") != "execute_skill_script":
+                    continue
+                if call.get("id") in normalized_calls:
                     continue
                 args = call.get("args") or {}
                 command = args.get("command") or args.get("script") or ""

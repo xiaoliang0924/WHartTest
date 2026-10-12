@@ -2621,6 +2621,20 @@ async function listFilterDialogOptions(page, fieldLabel, options = {}) {
  * ⚠️ optionName 必须是弹窗里真实存在的名称。写错时本函数**不会**抛出裸的 TimeoutError，
  * 而是列出弹窗中全部可选项 + 最接近的一个，避免上层靠猜名字反复重试。
  */
+async function readFilterDialogSelection(row) {
+  return row.evaluate(el => {
+    for (const attr of ['aria-selected', 'aria-checked']) {
+      const value = el.getAttribute(attr);
+      if (value === 'true' || value === 'false') return value === 'true';
+    }
+    const input = el.matches('input[type="checkbox"]') ? el : el.querySelector('input[type="checkbox"]');
+    if (input) return input.checked;
+    if (el.matches('.is-selected, .is-checked') || el.querySelector('.el-checkbox.is-checked, [aria-checked="true"]')) return true;
+    if (el.matches('.picker-item') || el.querySelector('.el-checkbox')) return false;
+    return null;
+  });
+}
+
 async function selectFilterDialogOption(page, fieldLabel, optionName, options = {}) {
   if (!String(fieldLabel || '').trim() || !String(optionName || '').trim() || String(optionName).trim() === 'undefined') {
     throw new Error(
@@ -2638,10 +2652,10 @@ async function selectFilterDialogOption(page, fieldLabel, optionName, options = 
     await page.waitForTimeout(600);
   }
 
-  const row = dialog
-    .locator('.picker-item, .el-table__row, li, .el-tree-node')
-    .filter({ hasText: String(optionName) })
-    .first();
+  const possibleRows = dialog.locator('.picker-item, .el-table__row, li, .el-tree-node');
+  const wantedName = String(optionName).replace(/\s+/g, ' ').trim();
+  const row = possibleRows.filter({ has: page.getByText(wantedName, { exact: true }) });
+  if (await row.count() > 1) throw new Error(`[selectFilterDialogOption] 选项「${optionName}」匹配多个行，不能猜测选择目标`);
 
   try {
     await row.waitFor({ state: 'visible', timeout: options.timeout || 8000 });
@@ -2662,47 +2676,26 @@ async function selectFilterDialogOption(page, fieldLabel, optionName, options = 
     );
   }
 
-  const confirmButton = dialog
-    .locator('.picker-footer button, .el-dialog__footer button')
-    .filter({ hasText: options.confirmName || /确定/ })
-    .first();
-  const selectedCount = async () => {
-    const text = String(await confirmButton.innerText().catch(() => ''));
-    const match = text.match(/[（(]\s*(\d+)\s*[）)]/);
-    return match ? Number(match[1]) : null;
-  };
-  const beforeCount = await selectedCount();
-  await row.scrollIntoViewIfNeeded().catch(() => {});
-  const checkbox = row.locator('.el-checkbox').first();
-  if ((await checkbox.count()) > 0) {
-    await checkbox.click();
+  const before = await readFilterDialogSelection(row);
+  if (before === true) {
+    console.log(`[selectFilterDialogOption]「${optionName}」已选中，保持选中状态`);
+    return dialog;
+  }
+  if (before === null) throw new Error(`[selectFilterDialogOption] 无法可靠识别「${optionName}」的勾选状态，未盲目点击`);
+  await row.scrollIntoViewIfNeeded();
+  const checkbox = row.locator('input[type="checkbox"]');
+  if (await checkbox.count() === 1 && await checkbox.isVisible()) {
+    await checkbox.check();
   } else {
     await row.click();
   }
-  const selectedState = row.locator(
-    '.el-checkbox.is-checked, [aria-checked="true"], [aria-selected="true"], .is-selected',
-  ).first();
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + (options.selectionTimeout || 3000);
   let confirmed = false;
   while (Date.now() < deadline) {
-    if (await selectedState.count().catch(() => 0)) {
-      confirmed = await selectedState.isVisible().catch(() => true);
-      if (confirmed) break;
-    }
-    const afterCount = await selectedCount();
-    if (beforeCount !== null && afterCount !== null && afterCount > beforeCount) {
-      confirmed = true;
-      break;
-    }
+    if (await readFilterDialogSelection(row) === true) { confirmed = true; break; }
     await page.waitForTimeout(100);
   }
-  if (!confirmed && beforeCount !== null) {
-    const afterCount = await selectedCount();
-    confirmed = afterCount > beforeCount;
-  }
-  if (!confirmed) {
-    throw new Error(`[selectFilterDialogOption] 点击「${optionName}」后未观察到选中状态`);
-  }
+  if (!confirmed) throw new Error(`[selectFilterDialogOption] 点击「${optionName}」后目标选项行仍未选中`);
   console.log(`[selectFilterDialogOption] 已勾选「${optionName}」`);
   return dialog;
 }
@@ -2736,11 +2729,7 @@ async function confirmFilterDialog(page, fieldLabel, options = {}) {
   if (selectedCount && Number(selectedCount[1]) === 0) {
     throw new Error(`[confirmFilterDialog] 弹窗「${fieldLabel}」显示已选 0 项，不能确认`);
   }
-  try {
-    await btn.click({ timeout: 8000 });
-  } catch (_) {
-    await btn.click({ timeout: 5000, force: true });
-  }
+  await btn.click({ timeout: 8000 });
   await page.waitForTimeout(500);
   await dialog.waitFor({ state: 'hidden', timeout: 5000 });
   console.log('[confirmFilterDialog] 已点击弹窗「确定」');
