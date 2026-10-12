@@ -34,7 +34,7 @@ const path = require('path');
 const readline = require('readline');
 const Module = require('module');
 const { execSync } = require('child_process');
-const { assertLocatorCount } = require('./step_assertions');
+const { assertLocatorCount, matchesPageUrl } = require('./step_assertions');
 const { loginWithCredentials } = require('./environment_login');
 
 // ---------------------------------------------------------------------------
@@ -1783,21 +1783,14 @@ async function waitForPageCondition(page, condition, expected, options = {}) {
   const mode = String(options.mode || 'exact');
   try {
     if (condition === 'url') {
-      const target = _normalizePageUrl(expected, mode);
+      // contains 是子串匹配，保留期望 URL 的尾斜杠：
+      // /tickets/ 应匹配 /tickets/123，但不能误匹配列表页 /tickets。
+      const target = mode === 'contains'
+        ? new URL(String(expected), page.url()).href
+        : _normalizePageUrl(expected, mode);
       await page.waitForFunction(
-        ({ targetUrl, targetMode }) => {
-          try {
-            const current = new URL(window.location.href);
-            current.pathname = current.pathname.replace(/\/+$/, '') || '/';
-            const currentValue = targetMode === 'path'
-              ? `${current.origin}${current.pathname}`
-              : current.href;
-            return currentValue === targetUrl;
-          } catch (_) {
-            return false;
-          }
-        },
-        { targetUrl: target, targetMode: mode },
+        matchesPageUrl,
+        { expectedUrl: target, mode },
         { timeout },
       );
       return;

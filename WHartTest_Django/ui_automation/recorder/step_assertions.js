@@ -29,4 +29,19 @@ async function assertLocatorCount(locator, expectedValue, options = {}) {
   return actual;
 }
 
-module.exports = { parseExpectedCount, assertLocatorCount };
+
+function matchesPageUrl({ expectedUrl, mode = 'exact' }) {
+  const current = new URL(window.location.href);
+  const expected = new URL(String(expectedUrl), current.href);
+  const normalizePath = (url) => {
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+    return url;
+  };
+  if (mode === 'contains') return current.href.includes(expected.href);
+  normalizePath(current);
+  normalizePath(expected);
+  if (mode === 'path') return `${current.origin}${current.pathname}` === `${expected.origin}${expected.pathname}`;
+  return current.href === expected.href;
+}
+
+module.exports = { parseExpectedCount, assertLocatorCount, matchesPageUrl };
