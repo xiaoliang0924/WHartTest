@@ -1675,3 +1675,8 @@ class FilterAssertionInstructionRegressionTests(SimpleTestCase):
         self.assertIn("先读取当前表格可见的列头", MANUAL_TESTCASE_EXECUTION_HINT)
         self.assertIn("禁止凭经验硬编码列序号", MANUAL_TESTCASE_EXECUTION_HINT)
         self.assertIn("列表未展示该字段，无法按列验证", MANUAL_TESTCASE_EXECUTION_HINT)
+
+    def test_negative_button_assertions_are_scoped_and_diagnostics_match(self):
+        self.assertIn("负向断言必须检查目标控件本身", MANUAL_TESTCASE_EXECUTION_HINT)
+        self.assertIn("页面任意位置的 `getByText()` 文案命中不代表按钮存在", MANUAL_TESTCASE_EXECUTION_HINT)
+        self.assertIn("失败信息必须报告触发判定的同一组定位器和计数", MANUAL_TESTCASE_EXECUTION_HINT)
