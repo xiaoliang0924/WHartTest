@@ -324,6 +324,58 @@ class GeneratedUiCaseFollowupTests(SimpleTestCase):
         self.assertEqual(len(tool.payloads), 2)
         self.assertIn("请修正后再次调用保存工具一次", model.bound.prompts[1][-1].content)
 
+    def test_missing_save_tool_call_gets_retried_with_explicit_feedback(self):
+        payload = {"steps": [{
+            "functional_step_numbers": [1],
+            "actions": [{"type": "assert", "mode": "url", "value": "/tickets"}],
+        }]}
+
+        class SaveTool:
+            name = "save_generated_ui_testcase"
+
+            async def ainvoke(self, _args):
+                return '{"status":"success","ui_test_case_id":323}'
+
+        class BoundModel:
+            def __init__(self):
+                self.prompts = []
+
+            async def ainvoke(self, messages):
+                self.prompts.append(messages)
+                if len(self.prompts) == 1:
+                    return AIMessage(content="我将整理本次执行结果。")
+                return AIMessage(content="", tool_calls=[{
+                    "name": "save_generated_ui_testcase",
+                    "args": {"payload_json": json.dumps(payload)},
+                    "id": "save-ui-retry",
+                }])
+
+        class FakeModel:
+            def __init__(self):
+                self.bound = BoundModel()
+
+            def bind_tools(self, _tools, **_kwargs):
+                return self.bound
+
+        model = FakeModel()
+        result = async_to_sync(_force_save_generated_ui_case)(
+            llm=model,
+            tools=[SaveTool()],
+            messages=[
+                AIMessage(content="", tool_calls=[{
+                    "name": "execute_skill_script", "args": {"command": "await page.goto('/tickets')"},
+                    "id": "browser-call",
+                }]),
+                ToolMessage(content="RESULT=PASS: URL=/tickets", tool_call_id="browser-call",
+                            name="execute_skill_script"),
+            ],
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["ui_test_case_id"], 323)
+        self.assertEqual(len(model.bound.prompts), 2)
+        self.assertIn("没有调用 save_generated_ui_testcase", model.bound.prompts[1][-1].content)
+
     def test_followup_forces_save_tool_using_only_observed_browser_evidence(self):
         class SaveTool:
             name = "save_generated_ui_testcase"

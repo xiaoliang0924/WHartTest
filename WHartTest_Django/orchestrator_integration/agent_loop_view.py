@@ -817,7 +817,11 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
     tool_choice = "any" if provider == "anthropic" else "required"
     bound_model = llm.bind_tools([save_tool], tool_choice=tool_choice)
     feedback = None
-    for attempt in range(2):
+    # Keep generation resilient to provider/model responses that omit the
+    # forced tool call or violate one of the save-time invariants. Two bounded
+    # corrections are enough to recover transient format drift without
+    # looping indefinitely or replaying browser actions.
+    for attempt in range(3):
         try:
             prompt_messages = [system, human]
             if feedback:
@@ -832,10 +836,23 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
         calls = getattr(response, "tool_calls", []) or []
         call = next((item for item in calls if item.get("name") == "save_generated_ui_testcase"), None)
         if call is None:
-            return {"status": "failed", "message": "生成模型未调用 UI 用例保存工具。"}
+            if attempt < 2:
+                feedback = (
+                    "上一次响应没有调用 save_generated_ui_testcase，因此没有创建或绑定 UI 用例。"
+                    "请只根据本次提供的浏览器执行证据构造完整 payload_json，并立即调用唯一可用的保存工具；"
+                    "不要只输出说明文字，不要调用浏览器或其他工具。"
+                )
+                continue
+            return {"status": "failed", "message": "生成模型连续 3 次未调用 UI 用例保存工具。"}
         args = call.get("args") or {}
         if not isinstance(args, dict) or not args.get("payload_json"):
-            return {"status": "failed", "message": "生成模型未提供有效的 UI 用例内容。"}
+            if attempt < 2:
+                feedback = (
+                    "上一次保存工具调用没有提供 payload_json。请基于本次浏览器执行证据，"
+                    "补齐包含 name、description、url、steps 的 JSON 字符串后再次调用保存工具。"
+                )
+                continue
+            return {"status": "failed", "message": "生成模型连续 3 次未提供有效的 UI 用例内容。"}
         try:
             args = dict(args)
             args["payload_json"] = _normalize_generated_ui_payload(
@@ -857,7 +874,7 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
             result.get("status") == "failed"
             and "环境认证" in message
             and "只能保存登录成功的断言" in message
-            and attempt == 0
+            and attempt < 2
         ):
             feedback = (
                 f"保存工具拒绝了刚才的 payload：{message}。请修正后再次调用保存工具一次。"
