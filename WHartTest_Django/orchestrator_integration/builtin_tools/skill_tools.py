@@ -1043,7 +1043,8 @@ def verified_filter_step_command(testcase_id, step_number, command):
     import shlex
     # The tool output must include what actually ran so generation cannot use
     # an LLM's discarded locator as execution evidence.
-    script = 'console.log("[VERIFIED_STEP_SCRIPT] " + ' + json.dumps(script, ensure_ascii=False) + '); ' + script
+    action_source = script.rsplit(' await helpers.screenshotCaseStep(', 1)[0]
+    script += ' console.log("[VERIFIED_STEP_SCRIPT] " + ' + json.dumps(action_source, ensure_ascii=False) + ');'
     return 'node run.js ' + shlex.quote(script)
 
 

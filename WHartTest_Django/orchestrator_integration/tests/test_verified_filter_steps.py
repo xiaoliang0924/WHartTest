@@ -56,3 +56,5 @@ class FilterCommandIntegrationTests(TestCase):
         self.assertIn('selectFilterDialogOption', command)
         self.assertIn('[VERIFIED_STEP_SCRIPT]', command)
         self.assertNotIn('.el-checkbox', command)
+        self.assertEqual(command.count('RESULT=PASS:'), 1)
+        self.assertLess(command.index('selectFilterDialogOption'), command.index('[VERIFIED_STEP_SCRIPT]'))
