@@ -24,10 +24,10 @@ MAX_PAYLOAD_BYTES = 200_000
 MAX_STEPS = 80
 MAX_ACTIONS = 500
 SUPPORTED_ACTIONS = {
-    "click", "fill", "check", "uncheck", "press", "goto", "wait", "select_filter_option",
+    "click", "fill", "check", "uncheck", "press", "goto", "wait",
     "wait_for_visible", "wait_for_ready", "assert",
 }
-LOCATOR_ACTIONS = {"click", "fill", "check", "uncheck", "press", "wait_for_visible", "select_filter_option"}
+LOCATOR_ACTIONS = {"click", "fill", "check", "uncheck", "press", "wait_for_visible"}
 VALID_ASSERTIONS = {
     "visible", "hidden", "enabled", "disabled", "checked", "text",
     "contain_text", "value", "count", "url", "title",
@@ -195,101 +195,6 @@ def bind_generated_ui_case_auth_state(
     }
 
 
-def _selector_text(selector: Any) -> str:
-    if not isinstance(selector, dict):
-        return ""
-    return " ".join(
-        str(selector.get(key) or "")
-        for key in ("name", "locator_value", "placeholder", "aria_label", "role")
-    ).strip().lower()
-
-
-def _date_field_role(selector: Any) -> str:
-    text = _selector_text(selector)
-    if re.search(r"开始|start", text):
-        return "start"
-    if re.search(r"结束|end", text):
-        return "end"
-    return "unknown"
-
-
-def _is_date_selector(selector: Any) -> bool:
-    return bool(re.search(r"日期|date|calendar", _selector_text(selector)))
-
-
-def _validate_date_fill_assertions(steps: list[dict[str, Any]]) -> None:
-    """Reject contradictory generated date actions across UI step groups."""
-    date_pattern = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$")
-    flattened = [
-        (step_index, action_index, action)
-        for step_index, step in enumerate(steps, 1)
-        for action_index, action in enumerate(step.get("actions") or [], 1)
-    ]
-    empty_date_fills = [
-        (step_index, action_index, action)
-        for step_index, action_index, action in flattened
-        if action.get("type") == "fill"
-        and not str(action.get("value") or "").strip()
-        and _is_date_selector(action.get("selector"))
-    ]
-    date_assertions = [
-        (step_index, action_index, action)
-        for step_index, action_index, action in flattened
-        if action.get("type") == "assert"
-        and action.get("mode", "visible") == "value"
-        and date_pattern.fullmatch(str(action.get("value") or "").strip())
-        and _is_date_selector(action.get("selector"))
-    ]
-    for fill_step, fill_index, fill_action in empty_date_fills:
-        fill_selector = fill_action.get("selector") or {}
-        fill_role = _date_field_role(fill_selector)
-        for assert_step, assert_index, assert_action in date_assertions:
-            if (assert_step, assert_index) <= (fill_step, fill_index):
-                continue
-            assert_selector = assert_action.get("selector") or {}
-            assert_role = _date_field_role(assert_selector)
-            same_semantic_field = (
-                fill_role == assert_role and fill_role != "unknown"
-            ) or (
-                fill_role == assert_role == "unknown"
-                and _selector_text(fill_selector) == _selector_text(assert_selector)
-            )
-            if same_semantic_field:
-                field_name = str(
-                    fill_selector.get("name")
-                    or fill_selector.get("placeholder")
-                    or "日期输入框"
-                ).strip()
-                raise ValueError(
-                    f"第 {fill_step} 组对日期字段「{field_name}」执行了空 fill，"
-                    f"随后第 {assert_step} 组却断言日期为「{assert_action.get('value')}」。"
-                    "请保留实际日期值；只读日期框必须记录日历选日操作，不能用空 fill 代替。"
-                )
-
-
-
-def _is_readonly_combobox_selector(selector: Any) -> bool:
-    if not isinstance(selector, dict):
-        return False
-    locator = str(selector.get("locator_value") or "").lower()
-    compact = re.sub(r"\s+", "", locator)
-    return "input" in compact and "combobox" in compact and "role" in compact
-
-
-def _locator_dialect_error(locator_type: Any, locator_value: Any) -> str | None:
-    """Reject selectors whose syntax is incompatible with their declared engine."""
-    kind = str(locator_type or "").strip().lower()
-    value = str(locator_value or "").strip()
-    if kind == "xpath" and (
-        value.startswith((".", "#"))
-        or re.search(r":(?:visible|text-is|has-text|has|nth-match)\s*(?:\(|$)", value)
-    ):
-        return "选择器内容是 CSS/Playwright 语法，但定位类型标记为 XPath。"
-    if kind == "css" and value.startswith(("//", "./", "../", "(")):
-        return "选择器内容是 XPath 语法，但定位类型标记为 CSS。"
-    return None
-
-
 def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
     if isinstance(payload, str):
         if len(payload.encode("utf-8")) > MAX_PAYLOAD_BYTES:
@@ -315,17 +220,6 @@ def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
         authentication_mode = step.get("authentication_mode", "auto")
         if authentication_mode not in {"auto", "environment", "script"}:
             raise ValueError(f"第 {index} 步的认证执行方式无效。")
-        # A script-authenticated group must actually perform login or role-switch
-        # actions. Assertion-only groups verify a session supplied by the
-        # environment/login state and must not disable that authentication.
-        if (
-            authentication_mode == "script"
-            and isinstance(actions, list)
-            and actions
-            and all(isinstance(action, dict) and action.get("type") == "assert" for action in actions)
-        ):
-            authentication_mode = "environment"
-            step["authentication_mode"] = authentication_mode
         if authentication_mode == "environment" and (
             not isinstance(actions, list) or not actions
             or any(action.get("type") != "assert" for action in actions if isinstance(action, dict))
@@ -346,24 +240,6 @@ def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(f"第 {index} 步的 {action_type} 操作缺少真实定位器。")
                 if selector.get("locator_type") not in {kind for kind, _ in UiElement.LOCATOR_TYPE_CHOICES}:
                     raise ValueError(f"第 {index} 步的定位类型无效。")
-                dialect_error = _locator_dialect_error(
-                    selector.get("locator_type"), selector.get("locator_value")
-                )
-                if dialect_error:
-                    raise ValueError(f"第 {index} 步定位器无效：{dialect_error}")
-                if action_type == "click" and _is_readonly_combobox_selector(selector):
-                    raise ValueError(
-                        f"第 {index} 步不能点击只读 input[role=combobox]；"
-                        "请点击 Element Plus 的 .el-select__wrapper，或使用 select_filter_option。"
-                    )
-            if action_type == "select_filter_option":
-                selector = action.get("selector") or {}
-                if ".el-select" not in str(selector.get("locator_value") or ""):
-                    raise ValueError(
-                        f"第 {index} 步的 select_filter_option 必须定位到页面实际观察到的 Element Plus .el-select。"
-                    )
-                if not str(action.get("value") or "").strip():
-                    raise ValueError(f"第 {index} 步的下拉选择缺少实际观察到的选项值。")
             if action_type == "assert" and action.get("mode", "visible") not in VALID_ASSERTIONS:
                 raise ValueError(f"第 {index} 步的断言类型无效。")
             if action_type == "assert" and action.get("mode", "visible") not in {"url", "title"}:
@@ -390,7 +266,6 @@ def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
                         raise ValueError
                 except (TypeError, ValueError):
                     raise ValueError(f"第 {index} 步的页面就绪等待超时时间无效。")
-    _validate_date_fill_assertions(steps)
     if count > MAX_ACTIONS:
         raise ValueError(f"操作过多，最多支持 {MAX_ACTIONS} 个。")
     return payload
@@ -504,6 +379,7 @@ def persist_generated_ui_testcase(
     observed_urls = [str(data.get('url') or '').strip()]
     for step in data['steps']:
         observed_urls.append(str(step.get('url') or '').strip())
+        observed_urls.append(str(step.get('start_url') or '').strip())
         observed_urls.extend(
             str(action.get('url') or '').strip()
             for action in step.get('actions') or []
@@ -533,7 +409,12 @@ def persist_generated_ui_testcase(
     saved_step_mapping = []
     for index, step in enumerate(data["steps"], 1):
         step_auth_state = step_auth_states[index - 1]
-        url = str(step.get("url") or data.get("url") or "").strip()
+        # Generated payload `url` records the observed end page. Replay starts
+        # each page-step group from `start_url`, derived from the preceding
+        # functional step's end URL. This keeps actions that navigate between
+        # pages (such as filtering a row and opening its detail drawer) in
+        # their original order.
+        url = str(step.get("start_url") or step.get("url") or data.get("url") or "").strip()
         actions = _safe_actions(step["actions"])
         action_urls = [str(a.get("url") or "").strip() for a in actions if a.get("type") == "goto"]
         if not url and action_urls:

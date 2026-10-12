@@ -705,9 +705,25 @@ def _normalize_generated_ui_payload(payload_json: str, traces: list[dict[str, An
         if all(key) and isinstance(trace.get("actions"), list) and trace["actions"]:
             trace_by_option[key] = trace["actions"]
 
+    previous_end_url = ""
     for step_index, step in enumerate(payload["steps"], 1):
         if not isinstance(step, dict) or not isinstance(step.get("actions"), list):
             continue
+        # The model reports the observed end page for each functional step.
+        # Recorder groups need their entry page, which is the preceding step's
+        # observed end page. Preserve both so cross-route actions replay in the
+        # same order as the original browser execution.
+        end_url = str(step.get("url") or "").strip()
+        goto_urls = [
+            str(action.get("url") or "").strip()
+            for action in step["actions"]
+            if isinstance(action, dict) and action.get("type") == "goto"
+            and str(action.get("url") or "").strip()
+        ]
+        if previous_end_url:
+            step["start_url"] = previous_end_url
+        else:
+            step["start_url"] = str(step.get("start_url") or end_url).strip()
         normalized_actions = []
         for action in step["actions"]:
             if not isinstance(action, dict) or action.get("type") not in {"select_filter_option", "select_option"}:
@@ -723,6 +739,7 @@ def _normalize_generated_ui_payload(payload_json: str, traces: list[dict[str, An
                 )
             normalized_actions.extend(traced_actions)
         step["actions"] = normalized_actions
+        previous_end_url = end_url or (goto_urls[-1] if goto_urls else previous_end_url)
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -796,7 +813,8 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
         "忽略登录密码、令牌等秘密，不要复述秘密。"
         "现在必须调用唯一可用工具 save_generated_ui_testcase 一次，"
         "传入 payload_json JSON 字符串，包含 name、description、url、steps。"
-        "每个功能测试步骤对应一个 UI step，动作按实际观察顺序记录；"
+        "每个功能测试步骤对应一个 UI step，动作按实际观察顺序记录；step.url 填该功能步骤完成后实际观察到的页面 URL；"
+        "保存前会根据上一功能步骤的结束 URL 推导该组开始 URL，禁止为省略前置动作而直接从步骤结束页开始回放。"
         "每个 step 可指定 authentication_mode：auto（默认协调环境认证）、environment（环境已负责认证，该组只能保存真实登录成功断言）、script（必须由脚本执行登录或角色切换）。"
         "不要把登录表单填写动作放到登录后的业务页面；多账号切换不得省略或用同一环境账号替代。"
         "不要把页面结果行中观察到的长数字编号、UUID 等动态业务数据保存为 wait_for_visible 或普通存在性断言的定位器；"

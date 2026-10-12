@@ -186,6 +186,22 @@ class HitlToolSelectionTests(SimpleTestCase):
 
 
 class GeneratedUiCaseFollowupTests(SimpleTestCase):
+    def test_generated_groups_start_on_previous_step_end_route(self):
+        payload = {
+            "steps": [
+                {"url": "https://example.test/work-order/tickets", "actions": [{"type": "click"}]},
+                {"url": "https://example.test/work-order/tickets/123", "actions": [{"type": "click"}]},
+                {"url": "https://example.test/work-order/tickets/123", "actions": [{"type": "assert"}]},
+            ],
+        }
+
+        normalized = json.loads(_normalize_generated_ui_payload(json.dumps(payload), []))
+
+        self.assertEqual(normalized["steps"][0]["start_url"], "https://example.test/work-order/tickets")
+        self.assertEqual(normalized["steps"][1]["start_url"], "https://example.test/work-order/tickets")
+        self.assertEqual(normalized["steps"][1]["url"], "https://example.test/work-order/tickets/123")
+        self.assertEqual(normalized["steps"][2]["start_url"], "https://example.test/work-order/tickets/123")
+
     def test_helper_dropdown_action_expands_only_from_matching_observed_trace(self):
         payload = {"steps": [{"functional_step_numbers": [4], "actions": [{
             "type": "select_filter_option", "field_label": "工单状态", "option_text": "待处理",
