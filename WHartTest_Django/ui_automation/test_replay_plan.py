@@ -67,3 +67,24 @@ class AuthenticationReplayPlanTests(unittest.TestCase):
             first_group=False, bound_authentication=True,
         )
         self.assertEqual(result, assertions)
+
+
+class DelegatedNavigationReplayTests(unittest.TestCase):
+    setUp = AuthenticationReplayPlanTests.setUp
+    plan = AuthenticationReplayPlanTests.plan
+
+    def test_navigation_only_login_keeps_success_evidence(self):
+        steps = [self.steps[0], {'detail_id': 16, 'ope_key': 'wait_for_ready'}, self.steps[-1]]
+        self.assertEqual(self.plan(steps), steps[1:])
+
+    def test_navigation_only_login_does_not_hide_business_click(self):
+        with self.assertRaises(ValueError):
+            self.plan([self.steps[0], self.steps[3], self.steps[-1]])
+
+    def test_navigation_only_later_role_login_is_not_skipped(self):
+        with self.assertRaises(ValueError):
+            self.plan([self.steps[0], self.steps[-1]], first=False)
+
+    def test_navigation_without_success_assertion_is_not_skipped(self):
+        with self.assertRaises(ValueError):
+            self.plan([self.steps[0], {'ope_key': 'wait_for_ready'}])

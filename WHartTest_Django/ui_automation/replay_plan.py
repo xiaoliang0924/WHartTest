@@ -102,6 +102,17 @@ def prepare_authenticated_group(steps: list[dict], *, mode: str, login_profile: 
     # not evidence that the case is switching to another account. A recorded
     # non-empty account must still match exactly.
     delegated_credentials = not account_value and password_value == '${{password}}'
+    # Older generated login groups delegate all credential entry to the
+    # environment, leaving only the login navigation and success checks.
+    # Accept this only in the first, independent authentication group.
+    delegated_navigation = (
+        first_group and len(login_gotos) == 1
+        and steps[0] is login_gotos[0]
+        and bool(post_login_assertions)
+        and all(s.get('ope_key') in {'goto', 'wait', 'wait_for_ready'}
+                or str(s.get('ope_key') or '').startswith('assert_') for s in steps)
+        and len([s for s in steps if s.get('ope_key') == 'goto']) == 1
+    )
     pure_login = (
         first_group and len(login_gotos) == 1 and len(passwords) == 1
         and len(fills) == 2 and len(accounts) == 1 and len(clicks) == 1
@@ -116,7 +127,7 @@ def prepare_authenticated_group(steps: list[dict], *, mode: str, login_profile: 
             or delegated_credentials
         )
     )
-    if not pure_login:
+    if not (pure_login or delegated_navigation):
         raise ValueError('脚本登录流程与环境自动登录重复或账号不一致；请明确选择脚本认证，或将独立登录组改为环境认证后的成功断言。')
     # Preserve the observed expectations and their database references. The
     # environment login's own result records the credential submission.
