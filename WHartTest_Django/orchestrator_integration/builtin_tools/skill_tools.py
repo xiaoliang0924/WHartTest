@@ -2612,11 +2612,18 @@ def get_skill_tools(
             try:
                 from ui_automation.generated_case_service import persist_generated_ui_testcase
 
+                from testcases.models import TestCaseRunRecord
+                refresh_from_passed_run = bool(current_chat_session_id and
+                    TestCaseRunRecord.objects.filter(
+                        testcase_id=int(current_test_case_id),
+                        session_id=current_chat_session_id, status="pass",
+                    ).exists())
                 result = persist_generated_ui_testcase(
                     testcase_id=int(current_test_case_id),
                     project_id=int(current_project_id),
                     user_id=int(current_user_id),
                     payload=payload_json,
+                    refresh_failed_generated=refresh_from_passed_run,
                 )
                 logger.info(
                     "[save_generated_ui_testcase] testcase=%s ui_case=%s created=%s",

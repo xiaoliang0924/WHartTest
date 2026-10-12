@@ -67,7 +67,7 @@ def _auth_state_match_score(base_url: str, observed_url: str) -> int:
 
 
 def _resolve_active_auth_state(
-    *, project_id: int, observed_urls: list[str]
+    *, project_id: int, observed_urls: list[str], account_identity: str | None = None
 ) -> UiAuthState | None:
     """Find the enabled login state belonging to the observed environment."""
     urls = [str(url or '').strip() for url in observed_urls if str(url or '').strip()]
@@ -80,6 +80,12 @@ def _resolve_active_auth_state(
             is_active=True,
         ).select_related('env_config').order_by('-updated_at', '-id')
     )
+    if account_identity:
+        candidates = [state for state in candidates
+                      if state.env_config.login_username == account_identity]
+    else:
+        candidates = [state for state in candidates
+                      if not (state.env_config.extra_config or {}).get('account_scoped_auth')]
     best = None
     best_score = -1
     for auth_state in candidates:
@@ -173,9 +179,13 @@ def bind_generated_ui_case_auth_state(
         for step in case_steps
         if step.page_step and step.page_step.page
     ]
+    from testcases.models import TestCaseStep
+    identities = _distinct_account_identities(TestCaseStep.objects.filter(
+        test_case__ui_test_case_id=ui_case.id).only('description', 'expected_result'))
     auth_state = _resolve_active_auth_state(
         project_id=ui_case.project_id,
         observed_urls=observed_urls,
+        account_identity=next(iter(identities)) if len(identities) == 1 else None,
     )
     if auth_state is None:
         return {'status': 'not_available', 'bound_count': 0}
@@ -416,6 +426,13 @@ def _safe_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sanitized
 
 
+def can_refresh_failed_generated_case(case) -> bool:
+    """Only failed AI-generated cases can be replaced; preserve manual bindings."""
+    return bool(case and case.status == 3 and case.name.endswith('（AI生成）')
+                and case.module.name == 'AI 自动生成'
+                and (case.result_data or {}).get('generation_validation'))
+
+
 @transaction.atomic
 def persist_generated_ui_testcase(
     *,
@@ -423,6 +440,7 @@ def persist_generated_ui_testcase(
     project_id: int,
     user_id: int,
     payload: str | dict[str, Any],
+    refresh_failed_generated: bool = False,
 ) -> dict[str, Any]:
     """Create a UI case from observed actions and bind it to the functional case."""
     from django.contrib.auth import get_user_model
@@ -433,10 +451,11 @@ def persist_generated_ui_testcase(
     data = _parse_payload(payload)
     # Lock only the functional testcase row. ``ui_test_case`` is nullable, so
     # PostgreSQL rejects a plain FOR UPDATE over its LEFT OUTER JOIN.
-    testcase = TestCase.objects.select_for_update(of=("self",)).select_related("ui_test_case").get(
+    testcase = TestCase.objects.select_for_update(of=("self",)).select_related("ui_test_case__module").get(
         pk=testcase_id, project_id=project_id
     )
-    if testcase.ui_test_case_id:
+    if testcase.ui_test_case_id and not (refresh_failed_generated and
+            can_refresh_failed_generated_case(testcase.ui_test_case)):
         return {
             "status": "success",
             "ui_test_case_id": testcase.ui_test_case_id,
@@ -509,9 +528,11 @@ def persist_generated_ui_testcase(
             for action in step.get('actions') or []
             if action.get('type') == 'goto'
         )
+    account_identities = _distinct_account_identities(functional_steps)
     generated_auth_state = _resolve_active_auth_state(
         project_id=project_id,
         observed_urls=observed_urls,
+        account_identity=next(iter(account_identities)) if len(account_identities) == 1 else None,
     )
     step_auth_states = [
         _resolve_generated_step_auth_state(
@@ -522,6 +543,12 @@ def persist_generated_ui_testcase(
         for step in data["steps"]
     ]
     account_identities = _distinct_account_identities(functional_steps)
+    if len(account_identities) == 1 and any(
+        step.get('authentication_mode', 'auto') != 'script' and (
+            state is None or state.env_config.login_username not in account_identities
+        ) for step, state in zip(data['steps'], step_auth_states)
+    ):
+        raise ValueError('缺少与功能用例账号一致的环境登录态；请为该账号配置认证，不能复用其他账号的默认环境。')
     bound_auth_state_ids = {state.id for state in step_auth_states if state is not None}
     if len(account_identities) > 1 and len(bound_auth_state_ids) < len(account_identities):
         raise ValueError(

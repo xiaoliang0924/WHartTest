@@ -1704,7 +1704,15 @@ async def _finalize_generated_ui_case(
             test_case_id,
         )
 
-    if not ui_case_id and record and record.status == "pass":
+    refresh_failed_generated = False
+    if ui_case_id and record and record.status == "pass":
+        from ui_automation.generated_case_service import can_refresh_failed_generated_case
+        from ui_automation.models import UiTestCase
+        refresh_failed_generated = await sync_to_async(lambda: can_refresh_failed_generated_case(
+            UiTestCase.objects.select_related("module").filter(
+                pk=ui_case_id, project_id=int(project_id)).first()
+        ))()
+    if (not ui_case_id or refresh_failed_generated) and record and record.status == "pass":
         generated = await _force_save_generated_ui_case(
             llm=llm,
             tools=tools,
@@ -1743,6 +1751,9 @@ async def _finalize_generated_ui_case(
             )
         if reported_ui_case_id and not ui_case_id and not generation_error:
             generation_error = "保存工具报告成功，但数据库中未查到绑定记录。"
+
+    if refresh_failed_generated and not reported_ui_case_id:
+        ui_case_id = None
 
     validation = {"status": "skipped", "message": "未进行回放验证。"}
     if ui_case_id and user is not None:
