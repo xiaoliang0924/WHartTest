@@ -35,6 +35,7 @@ const readline = require('readline');
 const Module = require('module');
 const { execSync } = require('child_process');
 const { assertLocatorCount, matchesPageUrl } = require('./step_assertions');
+const { roleLocator } = require('./role_locator');
 const { loginWithCredentials } = require('./environment_login');
 
 // ---------------------------------------------------------------------------
@@ -1574,7 +1575,7 @@ function _locatorFromParts(container, type, value, locatorOptions = {}) {
       loc = container.getByText(value);
       break;
     case 'role':
-      loc = container.getByRole(value);
+      loc = roleLocator(container, value);
       break;
     case 'role_name':
       loc = container.getByRole(locatorOptions.role || 'button', {

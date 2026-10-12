@@ -3,6 +3,12 @@
 # 确保脚本在任何命令失败时退出
 set -e
 
+# docker compose run backend <command> must be a one-shot process. Otherwise
+# tests/migrations silently start another production worker on the same queue.
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+
 # 1. 数据库迁移
 echo "Applying database migrations..."
 python manage.py migrate --noinput
