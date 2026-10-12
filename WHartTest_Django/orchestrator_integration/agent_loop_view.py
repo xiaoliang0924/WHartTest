@@ -812,41 +812,62 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
         "禁止再次操作浏览器或调用其他工具。"
     ))
     human = HumanMessage(content="以下是本次已通过执行的原始证据，请据此保存 UI 自动化用例：\n\n" + observations)
-    try:
-        # Anthropic Messages API calls this forced-tool mode "any"; OpenAI
-        # compatible APIs use "required". Both force the sole save tool.
-        tool_choice = "any" if provider == "anthropic" else "required"
-        bound_model = llm.bind_tools([save_tool], tool_choice=tool_choice)
-        response = await asyncio.wait_for(bound_model.ainvoke([system, human]), timeout=180)
-    except asyncio.TimeoutError:
-        return {"status": "failed", "message": "生成模型在 180 秒内未返回，可使用本次执行记录重试生成。"}
-    except Exception as exc:
-        logger.exception("UI testcase generation follow-up model call failed")
-        return {"status": "failed", "message": f"生成模型调用失败：{str(exc)[:500]}"}
+    # Anthropic Messages API calls this forced-tool mode "any"; OpenAI
+    # compatible APIs use "required". Both force the sole save tool.
+    tool_choice = "any" if provider == "anthropic" else "required"
+    bound_model = llm.bind_tools([save_tool], tool_choice=tool_choice)
+    feedback = None
+    for attempt in range(2):
+        try:
+            prompt_messages = [system, human]
+            if feedback:
+                prompt_messages.append(HumanMessage(content=feedback))
+            response = await asyncio.wait_for(bound_model.ainvoke(prompt_messages), timeout=180)
+        except asyncio.TimeoutError:
+            return {"status": "failed", "message": "生成模型在 180 秒内未返回，可使用本次执行记录重试生成。"}
+        except Exception as exc:
+            logger.exception("UI testcase generation follow-up model call failed")
+            return {"status": "failed", "message": f"生成模型调用失败：{str(exc)[:500]}"}
 
-    calls = getattr(response, "tool_calls", []) or []
-    call = next((item for item in calls if item.get("name") == "save_generated_ui_testcase"), None)
-    if call is None:
-        return {"status": "failed", "message": "生成模型未调用 UI 用例保存工具。"}
-    args = call.get("args") or {}
-    if not isinstance(args, dict) or not args.get("payload_json"):
-        return {"status": "failed", "message": "生成模型未提供有效的 UI 用例内容。"}
-    try:
-        args = dict(args)
-        args["payload_json"] = _normalize_generated_ui_payload(
-            args["payload_json"], action_traces
-        )
-    except ValueError as exc:
-        return {"status": "failed", "message": str(exc)}
-    try:
-        raw_result = await save_tool.ainvoke(args)
-        result = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
-        if not isinstance(result, dict):
-            return {"status": "failed", "message": "UI 用例保存工具返回格式无效。"}
+        calls = getattr(response, "tool_calls", []) or []
+        call = next((item for item in calls if item.get("name") == "save_generated_ui_testcase"), None)
+        if call is None:
+            return {"status": "failed", "message": "生成模型未调用 UI 用例保存工具。"}
+        args = call.get("args") or {}
+        if not isinstance(args, dict) or not args.get("payload_json"):
+            return {"status": "failed", "message": "生成模型未提供有效的 UI 用例内容。"}
+        try:
+            args = dict(args)
+            args["payload_json"] = _normalize_generated_ui_payload(
+                args["payload_json"], action_traces
+            )
+        except ValueError as exc:
+            return {"status": "failed", "message": str(exc)}
+        try:
+            raw_result = await save_tool.ainvoke(args)
+            result = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+            if not isinstance(result, dict):
+                return {"status": "failed", "message": "UI 用例保存工具返回格式无效。"}
+        except Exception as exc:
+            logger.exception("UI testcase generation follow-up save failed")
+            return {"status": "failed", "message": f"UI 用例保存失败：{str(exc)[:500]}"}
+
+        message = str(result.get("message") or "")
+        if (
+            result.get("status") == "failed"
+            and "环境认证" in message
+            and "只能保存登录成功的断言" in message
+            and attempt == 0
+        ):
+            feedback = (
+                f"保存工具拒绝了刚才的 payload：{message}。请修正后再次调用保存工具一次。"
+                "对 authentication_mode=environment 的步骤，actions 必须全部是基于本次观察证据的登录成功断言；"
+                "删除该步骤中的登录表单填写、登录按钮点击及其他非断言动作。"
+                "可以使用浏览器结果中实际观察到的登录后 URL 做 url 断言，不得猜测 URL 或新增未观察到的定位器。"
+            )
+            continue
         return result
-    except Exception as exc:
-        logger.exception("UI testcase generation follow-up save failed")
-        return {"status": "failed", "message": f"UI 用例保存失败：{str(exc)[:500]}"}
+    return {"status": "failed", "message": "UI 用例经一次认证步骤修正后仍未能保存。"}
 
 
 async def _validate_generated_ui_case(

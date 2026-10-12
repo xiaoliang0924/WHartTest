@@ -254,6 +254,76 @@ class GeneratedUiCaseFollowupTests(SimpleTestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(saver.saved_payload["steps"][0]["actions"], actions)
 
+    def test_environment_auth_validation_gets_one_corrective_save_attempt(self):
+        invalid_payload = {"steps": [{
+            "authentication_mode": "environment",
+            "functional_step_numbers": [1],
+            "actions": [{"type": "click", "selector": {
+                "locator_type": "role", "locator_value": "button[name='登录']",
+            }}],
+        }]}
+        corrected_payload = {"steps": [{
+            "authentication_mode": "environment",
+            "functional_step_numbers": [1],
+            "actions": [{"type": "assert", "mode": "url", "match": "contains",
+                         "value": "/work-order/tickets"}],
+        }]}
+
+        class SaveTool:
+            name = "save_generated_ui_testcase"
+
+            def __init__(self):
+                self.payloads = []
+
+            async def ainvoke(self, args):
+                self.payloads.append(json.loads(args["payload_json"]))
+                if len(self.payloads) == 1:
+                    return json.dumps({
+                        "status": "failed",
+                        "message": "第 1 步由环境认证，只能保存登录成功的断言。",
+                    }, ensure_ascii=False)
+                return '{"status":"success","ui_test_case_id":322}'
+
+        class BoundModel:
+            def __init__(self):
+                self.prompts = []
+
+            async def ainvoke(self, messages):
+                self.prompts.append(messages)
+                payload = invalid_payload if len(self.prompts) == 1 else corrected_payload
+                return AIMessage(content="", tool_calls=[{
+                    "name": "save_generated_ui_testcase",
+                    "args": {"payload_json": json.dumps(payload, ensure_ascii=False)},
+                    "id": f"save-ui-auth-{len(self.prompts)}",
+                }])
+
+        class FakeModel:
+            def __init__(self):
+                self.bound = BoundModel()
+
+            def bind_tools(self, _tools, **_kwargs):
+                return self.bound
+
+        model = FakeModel()
+        tool = SaveTool()
+        messages = [
+            AIMessage(content="", tool_calls=[{
+                "name": "execute_skill_script", "args": {"command": "await helpers.loginStep1();"},
+                "id": "browser-login-call",
+            }]),
+            ToolMessage(content="RESULT=PASS: 登录成功，当前 URL=https://example.test/work-order/tickets",
+                        tool_call_id="browser-login-call", name="execute_skill_script"),
+        ]
+
+        result = async_to_sync(_force_save_generated_ui_case)(
+            llm=model, tools=[tool], messages=messages,
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["ui_test_case_id"], 322)
+        self.assertEqual(len(tool.payloads), 2)
+        self.assertIn("请修正后再次调用保存工具一次", model.bound.prompts[1][-1].content)
+
     def test_followup_forces_save_tool_using_only_observed_browser_evidence(self):
         class SaveTool:
             name = "save_generated_ui_testcase"
