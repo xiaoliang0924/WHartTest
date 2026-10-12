@@ -18,7 +18,7 @@ from ui_automation.models import (
     UiAuthState,
 )
 from ui_automation.serializers import UiPageStepsExecuteSerializer
-from ui_automation.generated_case_service import persist_generated_ui_testcase
+from ui_automation.generated_case_service import persist_generated_ui_testcase, _parse_payload
 from testcases.models import TestCase as FunctionalTestCase, TestCaseModule, TestCaseStep
 from file_management.models import FileAsset, FileManagementSetting, FileReference
 
@@ -77,6 +77,87 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
             }],
         }
 
+    def test_generated_payload_rejects_readonly_combobox_click(self):
+        invalid = {
+            **self.payload,
+            "steps": [{
+                **self.payload["steps"][0],
+                "actions": [{
+                    "type": "click",
+                    "selector": {
+                        "name": "priority dropdown",
+                        "locator_type": "xpath",
+                        "locator_value": "//input[@role='combobox']",
+                    },
+                }],
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "只读 input"):
+            _parse_payload(invalid)
+
+    def test_generated_payload_rejects_css_selector_marked_as_xpath(self):
+        invalid = {
+            **self.payload,
+            "steps": [{
+                **self.payload["steps"][0],
+                "actions": [{
+                    "type": "click",
+                    "selector": {
+                        "name": "dropdown option",
+                        "locator_type": "xpath",
+                        "locator_value": '.el-select-dropdown:visible .el-select-dropdown__item:text-is("待处理")',
+                    },
+                }],
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "CSS/Playwright 语法"):
+            _parse_payload(invalid)
+
+    def test_generated_payload_rejects_xpath_selector_marked_as_css(self):
+        invalid = {
+            **self.payload,
+            "steps": [{
+                **self.payload["steps"][0],
+                "actions": [{
+                    "type": "click",
+                    "selector": {
+                        "name": "dropdown option",
+                        "locator_type": "css",
+                        "locator_value": "//div[@role='option']",
+                    },
+                }],
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "XPath 语法"):
+            _parse_payload(invalid)
+
+    def test_filter_dropdown_selection_persists_as_verified_operation(self):
+        payload = {
+            **self.payload,
+            "steps": [{
+                **self.payload["steps"][0],
+                "actions": [{
+                    "type": "select_filter_option",
+                    "selector": {
+                        "name": "Priority filter",
+                        "locator_type": "css",
+                        "locator_value": '.filter-field:has(.filter-field-label:text-is("Priority")) .el-select',
+                    },
+                    "value": "High",
+                }],
+            }],
+        }
+        result = persist_generated_ui_testcase(
+            testcase_id=self.testcase.id,
+            project_id=self.project.id,
+            user_id=self.user.id,
+            payload=payload,
+        )
+        ui_case = UiTestCase.objects.get(pk=result["ui_test_case_id"])
+        detail = UiPageStepsDetailed.objects.get(page_step=ui_case.case_steps.get().page_step)
+        self.assertEqual(detail.ope_key, "select_filter_option")
+        self.assertEqual(detail.ope_value, {"value": "High"})
+
     def test_generated_case_is_saved_and_bound_with_password_redacted(self):
         result = persist_generated_ui_testcase(
             testcase_id=self.testcase.id,
@@ -111,17 +192,26 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
         group = UiTestCase.objects.get(id=result['ui_test_case_id']).case_steps.get().page_step
         self.assertEqual(group.authentication_mode, 'script')
 
-    def test_generated_page_uses_step_entry_url_for_replay(self):
-        self.payload['steps'][0]['start_url'] = 'https://example.test/work-order/tickets'
-        self.payload['steps'][0]['url'] = 'https://example.test/work-order/tickets/123'
-
+    def test_assertion_only_script_auth_uses_environment_authentication(self):
+        self.payload['steps'][0]['authentication_mode'] = 'script'
+        self.payload['steps'][0]['actions'] = [self.payload['steps'][0]['actions'][-1]]
         result = persist_generated_ui_testcase(
             testcase_id=self.testcase.id, project_id=self.project.id,
             user_id=self.user.id, payload=self.payload,
         )
-
         group = UiTestCase.objects.get(id=result['ui_test_case_id']).case_steps.get().page_step
-        self.assertEqual(group.page.url, 'https://example.test/work-order/tickets')
+        self.assertEqual(group.authentication_mode, 'environment')
+        self.assertEqual(list(group.step_details.values_list('ope_key', flat=True)), ['assert_url'])
+
+    def test_generated_page_uses_step_entry_url_for_replay(self):
+        self.payload["steps"][0]["start_url"] = "https://example.test/work-order/tickets"
+        self.payload["steps"][0]["url"] = "https://example.test/work-order/tickets/123"
+        result = persist_generated_ui_testcase(
+            testcase_id=self.testcase.id, project_id=self.project.id,
+            user_id=self.user.id, payload=self.payload,
+        )
+        group = UiTestCase.objects.get(id=result["ui_test_case_id"]).case_steps.get().page_step
+        self.assertEqual(group.page.url, "https://example.test/work-order/tickets")
 
     def test_environment_authentication_rejects_repeated_form_actions(self):
         self.payload['steps'][0]['authentication_mode'] = 'environment'
@@ -160,6 +250,83 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
         self.assertFalse(UiTestCase.objects.exists())
         self.assertFalse(UiPage.objects.exists())
         self.assertFalse(UiPageSteps.objects.exists())
+
+    def test_generation_rejects_empty_date_fill_with_concrete_date_assertion(self):
+        date_selector = {
+            'name': '创建日期开始日期输入框',
+            'locator_type': 'placeholder',
+            'locator_value': '开始日期',
+            'placeholder': '开始日期',
+        }
+        self.payload['steps'][0]['actions'] = [
+            {'type': 'fill', 'selector': date_selector, 'value': ''},
+            {'type': 'assert', 'mode': 'value', 'selector': date_selector, 'value': '2026-08-24'},
+        ]
+
+        with self.assertRaisesRegex(ValueError, '空 fill'):
+            persist_generated_ui_testcase(
+                testcase_id=self.testcase.id,
+                project_id=self.project.id,
+                user_id=self.user.id,
+                payload=self.payload,
+            )
+
+        self.assertFalse(UiTestCase.objects.exists())
+        self.assertFalse(UiPage.objects.exists())
+        self.assertFalse(UiPageSteps.objects.exists())
+
+    def test_generation_rejects_date_fill_assertion_across_step_groups(self):
+        date_selector = {
+            'name': '创建日期开始日期输入框',
+            'locator_type': 'placeholder',
+            'locator_value': '开始日期',
+            'placeholder': '开始日期',
+        }
+        self.payload['steps'] = [
+            {
+                'name': 'Clear date',
+                'functional_step_numbers': [1],
+                'url': 'https://example.test/list',
+                'actions': [{'type': 'fill', 'selector': date_selector, 'value': ''}],
+            },
+            {
+                'name': 'Assert date',
+                'functional_step_numbers': [1],
+                'url': 'https://example.test/list',
+                'actions': [{'type': 'assert', 'mode': 'value', 'selector': date_selector, 'value': '2026-08-24'}],
+            },
+        ]
+
+        with self.assertRaisesRegex(ValueError, '随后第 2 组'):
+            persist_generated_ui_testcase(
+                testcase_id=self.testcase.id,
+                project_id=self.project.id,
+                user_id=self.user.id,
+                payload=self.payload,
+            )
+
+        self.assertFalse(UiTestCase.objects.exists())
+
+    def test_generation_allows_observed_nonempty_date_fill_and_matching_assertion(self):
+        date_selector = {
+            'name': '创建日期开始日期输入框',
+            'locator_type': 'placeholder',
+            'locator_value': '开始日期',
+            'placeholder': '开始日期',
+        }
+        self.payload['steps'][0]['actions'] = [
+            {'type': 'fill', 'selector': date_selector, 'value': '2026-08-24'},
+            {'type': 'assert', 'mode': 'value', 'selector': date_selector, 'value': '2026-08-24'},
+        ]
+
+        result = persist_generated_ui_testcase(
+            testcase_id=self.testcase.id,
+            project_id=self.project.id,
+            user_id=self.user.id,
+            payload=self.payload,
+        )
+
+        self.assertEqual(result['status'], 'success')
 
     def test_generation_rejects_unmapped_functional_steps_before_saving(self):
         TestCaseStep.objects.create(
