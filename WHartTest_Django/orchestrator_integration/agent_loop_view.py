@@ -796,6 +796,34 @@ def _has_browser_execution_evidence(messages) -> bool:
     return False
 
 
+def _generated_ui_payload_from_response(response) -> Optional[str]:
+    """Extract a JSON testcase from model text or a legacy save-tool call.
+
+    Persistence is performed by the server after validation; generation no
+    longer depends on the model choosing to invoke a tool.
+    """
+    for call in getattr(response, "tool_calls", []) or []:
+        if call.get("name") != "save_generated_ui_testcase":
+            continue
+        args = call.get("args") or {}
+        payload = args.get("payload_json") if isinstance(args, dict) else None
+        if isinstance(payload, str) and payload.strip():
+            return payload
+
+    content = _stream_content_to_text(getattr(response, "content", ""))
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(content):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(content[index:])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, dict) and isinstance(value.get("steps"), list):
+            return json.dumps(value, ensure_ascii=False)
+    return None
+
+
 async def _force_save_generated_ui_case(*, llm, tools, messages, provider="openai_compatible") -> Dict[str, Any]:
     """Run a constrained second pass so generation is not left to the test agent's discretion."""
     save_tool = next(
@@ -816,8 +844,9 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
         "你负责把已成功的浏览器测试执行记录转成可复用 UI 自动化用例。"
         "只能根据提供的实际浏览器脚本和工具输出构造步骤，不得猜测定位器、页面或动作；"
         "忽略登录密码、令牌等秘密，不要复述秘密。"
-        "现在必须调用唯一可用工具 save_generated_ui_testcase 一次，"
-        "传入 payload_json JSON 字符串，包含 name、description、url、steps。"
+        "现在请直接输出一个完整 JSON 对象，字段为 name、description、url、steps；"
+        "不要调用工具、不要输出 Markdown 代码围栏或 JSON 以外的说明文字。"
+        "服务器会校验该 JSON 并负责保存及绑定用例。"
         "每个功能测试步骤对应一个 UI step，动作按实际观察顺序记录；step.url 填该功能步骤完成后实际观察到的页面 URL；"
         "保存前会根据上一功能步骤的结束 URL 推导该组开始 URL，禁止为省略前置动作而直接从步骤结束页开始回放。"
         "每个 step 可指定 authentication_mode：auto（默认协调环境认证）、environment（环境已负责认证，该组只能保存真实登录成功断言）、script（必须由脚本执行登录或角色切换）。"
@@ -835,10 +864,10 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
         "禁止再次操作浏览器或调用其他工具。"
     ))
     human = HumanMessage(content="以下是本次已通过执行的原始证据，请据此保存 UI 自动化用例：\n\n" + observations)
-    # Anthropic Messages API calls this forced-tool mode "any"; OpenAI
-    # compatible APIs use "required". Both force the sole save tool.
-    tool_choice = "any" if provider == "anthropic" else "required"
-    bound_model = llm.bind_tools([save_tool], tool_choice=tool_choice)
+    # Keep the schema available for provider compatibility, but do not force
+    # tool selection. The preferred response is plain JSON; the server invokes
+    # persistence itself so provider tool-call behavior cannot block saving.
+    bound_model = llm.bind_tools([save_tool], tool_choice="auto")
     feedback = None
     # Keep generation resilient to provider/model responses that omit the
     # forced tool call or violate one of the save-time invariants. Two bounded
@@ -856,31 +885,20 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
             logger.exception("UI testcase generation follow-up model call failed")
             return {"status": "failed", "message": f"生成模型调用失败：{str(exc)[:500]}"}
 
-        calls = getattr(response, "tool_calls", []) or []
-        call = next((item for item in calls if item.get("name") == "save_generated_ui_testcase"), None)
-        if call is None:
+        payload_json = _generated_ui_payload_from_response(response)
+        if not payload_json:
             if attempt < 2:
                 feedback = (
-                    "上一次响应没有调用 save_generated_ui_testcase，因此没有创建或绑定 UI 用例。"
-                    "请只根据本次提供的浏览器执行证据构造完整 payload_json，并立即调用唯一可用的保存工具；"
-                    "不要只输出说明文字，不要调用浏览器或其他工具。"
+                    "上一次响应没有返回可用的用例 JSON（也没有调用 save_generated_ui_testcase）。"
+                    "请只根据本次提供的浏览器执行证据，直接输出完整 JSON 对象，"
+                    "至少包含 name、description、url、steps；不要输出解释文字或调用浏览器。"
                 )
                 continue
-            return {"status": "failed", "message": "生成模型连续 3 次未调用 UI 用例保存工具。"}
-        args = call.get("args") or {}
-        if not isinstance(args, dict) or not args.get("payload_json"):
-            if attempt < 2:
-                feedback = (
-                    "上一次保存工具调用没有提供 payload_json。请基于本次浏览器执行证据，"
-                    "补齐包含 name、description、url、steps 的 JSON 字符串后再次调用保存工具。"
-                )
-                continue
-            return {"status": "failed", "message": "生成模型连续 3 次未提供有效的 UI 用例内容。"}
+            return {"status": "failed", "message": "生成模型连续 3 次未返回有效的 UI 用例 JSON。"}
         try:
-            args = dict(args)
-            args["payload_json"] = _normalize_generated_ui_payload(
-                args["payload_json"], action_traces
-            )
+            args = {"payload_json": _normalize_generated_ui_payload(
+                payload_json, action_traces
+            )}
         except ValueError as exc:
             return {"status": "failed", "message": str(exc)}
         try:
@@ -900,7 +918,7 @@ async def _force_save_generated_ui_case(*, llm, tools, messages, provider="opena
             and attempt < 2
         ):
             feedback = (
-                f"保存工具拒绝了刚才的 payload：{message}。请修正后再次调用保存工具一次。"
+                f"保存工具拒绝了刚才的 payload：{message}。请修正 JSON 后直接输出完整对象。"
                 "对 authentication_mode=environment 的步骤，actions 必须全部是基于本次观察证据的登录成功断言；"
                 "删除该步骤中的登录表单填写、登录按钮点击及其他非断言动作。"
                 "可以使用浏览器结果中实际观察到的登录后 URL 做 url 断言，不得猜测 URL 或新增未观察到的定位器。"

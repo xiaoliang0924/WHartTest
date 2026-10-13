@@ -338,7 +338,61 @@ class GeneratedUiCaseFollowupTests(SimpleTestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["ui_test_case_id"], 322)
         self.assertEqual(len(tool.payloads), 2)
-        self.assertIn("请修正后再次调用保存工具一次", model.bound.prompts[1][-1].content)
+        self.assertIn("请修正 JSON 后直接输出完整对象", model.bound.prompts[1][-1].content)
+
+    def test_plain_json_response_is_saved_without_model_tool_call(self):
+        payload = {
+            "name": "执行证据生成用例",
+            "description": "基于本次实际浏览器操作生成",
+            "url": "https://example.test/tickets",
+            "steps": [{
+                "functional_step_numbers": [1],
+                "actions": [{"type": "assert", "mode": "url", "value": "https://example.test/tickets"}],
+            }],
+        }
+
+        class SaveTool:
+            name = "save_generated_ui_testcase"
+
+            def __init__(self):
+                self.saved = None
+
+            async def ainvoke(self, args):
+                self.saved = json.loads(args["payload_json"])
+                return '{"status":"success","ui_test_case_id":324}'
+
+        class BoundModel:
+            async def ainvoke(self, _messages):
+                return AIMessage(content="```json\n" + json.dumps(payload) + "\n```")
+
+        class FakeModel:
+            def bind_tools(self, _tools, **kwargs):
+                self.kwargs = kwargs
+                self.bound = BoundModel()
+                return self.bound
+
+        saver = SaveTool()
+        model = FakeModel()
+        result = async_to_sync(_force_save_generated_ui_case)(
+            llm=model,
+            tools=[saver],
+            messages=[
+                AIMessage(content="", tool_calls=[{
+                    "name": "execute_skill_script",
+                    "args": {"command": "await page.goto('https://example.test/tickets')"},
+                    "id": "browser-call-json",
+                }]),
+                ToolMessage(content="RESULT=PASS: URL=https://example.test/tickets",
+                            tool_call_id="browser-call-json", name="execute_skill_script"),
+            ],
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["ui_test_case_id"], 324)
+        expected = json.loads(_normalize_generated_ui_payload(json.dumps(payload), []))
+        self.assertEqual(saver.saved, expected)
+        self.assertEqual(model.kwargs["tool_choice"], "auto")
+
 
     def test_missing_save_tool_call_gets_retried_with_explicit_feedback(self):
         payload = {"steps": [{
@@ -444,7 +498,7 @@ class GeneratedUiCaseFollowupTests(SimpleTestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["ui_test_case_id"], 321)
-        self.assertEqual(model.kwargs["tool_choice"], "required")
+        self.assertEqual(model.kwargs["tool_choice"], "auto")
         prompt_text = "\n".join(str(message.content) for message in model.bound.messages)
         self.assertIn("getByRole", prompt_text)
         self.assertIn('"kind": "select_filter_option"', prompt_text)
