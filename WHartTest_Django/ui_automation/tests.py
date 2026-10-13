@@ -113,6 +113,29 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
         with self.assertRaisesRegex(ValueError, "CSS/Playwright 语法"):
             _parse_payload(invalid)
 
+    def test_generated_payload_normalizes_element_plus_option_text_locator(self):
+        payload = {
+            **self.payload,
+            "steps": [{
+                **self.payload["steps"][0],
+                "actions": [{
+                    "type": "click",
+                    "selector": {
+                        "name": "status option",
+                        "locator_type": "css",
+                        "locator_value": '.el-select-dropdown:visible .el-select-dropdown__item:not(.is-disabled):text-is("待处理")',
+                    },
+                }],
+            }],
+        }
+
+        parsed = _parse_payload(payload)
+        selector = parsed["steps"][0]["actions"][0]["selector"]
+        self.assertEqual(selector["locator_type"], "xpath")
+        self.assertIn("el-select-dropdown__item", selector["locator_value"])
+        self.assertIn("normalize-space(.)='待处理'", selector["locator_value"])
+        self.assertIn("aria-hidden='true'", selector["locator_value"])
+
     def test_generated_payload_rejects_xpath_selector_marked_as_css(self):
         invalid = {
             **self.payload,

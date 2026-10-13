@@ -300,6 +300,40 @@ def _locator_dialect_error(locator_type: Any, locator_value: Any) -> str | None:
     return None
 
 
+def _normalize_select_option_locator(selector: dict[str, Any]) -> None:
+    """Use a DOM-stable XPath for generated Element Plus option text selectors.
+
+    Playwright CSS text pseudo-classes were intermittently returning zero
+    matches for visible teleported dropdown options in recorder replays. The
+    observed option DOM is an ``li.el-select-dropdown__item`` under the active
+    Element Plus popper, so normalize only that exact selector shape.
+    """
+    if str(selector.get("locator_type") or "").strip().lower() != "css":
+        return
+    value = str(selector.get("locator_value") or "").strip()
+    if ".el-select-dropdown" not in value or ".el-select-dropdown__item" not in value:
+        return
+    match = re.search(r""":text-is\("([^"\\]*)"\)|:text-is\('([^'\\]*)'\)""", value)
+    if not match:
+        return
+    option_text = match.group(1) if match.group(1) is not None else match.group(2)
+    if not option_text:
+        return
+    xpath_text = (
+        f"'{option_text}'" if "'" not in option_text else
+        f'"{option_text}"' if '"' not in option_text else
+        "concat(" + ', "\'", '.join(f"'{part}'" for part in option_text.split("'")) + ")"
+    )
+    selector["locator_type"] = "xpath"
+    selector["locator_value"] = (
+        "//div[contains(concat(' ',normalize-space(@class),' '),' el-popper ')]"
+        "[not(@aria-hidden='true')][not(contains(@style,'display: none'))]"
+        "//li[contains(concat(' ',normalize-space(@class),' '),' el-select-dropdown__item ')]"
+        "[not(contains(concat(' ',normalize-space(@class),' '),' is-disabled '))]"
+        f"[normalize-space(.)={xpath_text}]"
+    )
+
+
 def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
     if isinstance(payload, str):
         if len(payload.encode("utf-8")) > MAX_PAYLOAD_BYTES:
@@ -362,6 +396,7 @@ def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(f"第 {index} 步的 {action_type} 操作缺少真实定位器。")
                 if selector.get("locator_type") not in {kind for kind, _ in UiElement.LOCATOR_TYPE_CHOICES}:
                     raise ValueError(f"第 {index} 步的定位类型无效。")
+                _normalize_select_option_locator(selector)
                 dialect_error = _locator_dialect_error(
                     selector.get("locator_type"), selector.get("locator_value")
                 )
