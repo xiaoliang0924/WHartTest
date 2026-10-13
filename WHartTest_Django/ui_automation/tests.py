@@ -192,6 +192,21 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
         group = UiTestCase.objects.get(id=result['ui_test_case_id']).case_steps.get().page_step
         self.assertEqual(group.authentication_mode, 'script')
 
+    def test_navigation_only_script_auth_uses_environment_coordination(self):
+        parsed = _parse_payload({
+            "steps": [{
+                "authentication_mode": "script",
+                "actions": [
+                    {"type": "goto", "url": "https://example.test/tickets"},
+                    {"type": "wait_for_ready", "timeout": 10},
+                    {"type": "assert", "mode": "url", "value": "https://example.test/tickets"},
+                ],
+            }],
+        })
+        self.assertEqual(parsed["steps"][0]["authentication_mode"], "auto")
+        self.assertEqual([a["type"] for a in parsed["steps"][0]["actions"]],
+                         ["goto", "wait_for_ready", "assert"])
+
     def test_assertion_only_script_auth_uses_environment_authentication(self):
         self.payload['steps'][0]['authentication_mode'] = 'script'
         self.payload['steps'][0]['actions'] = [self.payload['steps'][0]['actions'][-1]]
