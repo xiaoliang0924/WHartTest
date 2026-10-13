@@ -221,6 +221,27 @@ class GeneratedUiCaseFollowupTests(SimpleTestCase):
         with self.assertRaisesRegex(ValueError, "没有对应的成功浏览器交互轨迹"):
             _normalize_generated_ui_payload(json.dumps(payload, ensure_ascii=False), [])
 
+    def test_normalizer_recovers_missing_field_only_from_unique_verified_trace(self):
+        actions = [{"type": "click", "selector": {
+            "name": "当前状态 下拉框", "locator_type": "css", "locator_value": ".observed-select",
+        }}]
+        payload = {"steps": [{"functional_step_numbers": [3], "actions": [{
+            "type": "select_filter_option", "option_text": "待处理",
+        }]}]}
+        trace = {"version": 1, "kind": "select_filter_option", "field_label": "当前状态",
+                 "option_text": "待处理", "actions": actions}
+
+        normalized = json.loads(_normalize_generated_ui_payload(
+            json.dumps(payload, ensure_ascii=False), [trace],
+        ))
+        self.assertEqual(normalized["steps"][0]["actions"], actions)
+
+        ambiguous = dict(trace, field_label="优先级")
+        with self.assertRaisesRegex(ValueError, "没有对应的成功浏览器交互轨迹"):
+            _normalize_generated_ui_payload(
+                json.dumps(payload, ensure_ascii=False), [trace, ambiguous],
+            )
+
     def test_followup_persists_model_dropdown_action_from_helper_trace(self):
         actions = [
             {"type": "click", "selector": {"locator_type": "css", "locator_value": ".observed-trigger"}},

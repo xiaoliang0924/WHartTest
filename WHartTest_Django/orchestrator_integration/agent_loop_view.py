@@ -698,12 +698,14 @@ def _normalize_generated_ui_payload(payload_json: str, traces: list[dict[str, An
         raise ValueError("生成模型返回的 UI 用例缺少步骤列表。")
 
     trace_by_option = {}
+    traces_by_value = {}
     for trace in traces:
         if trace.get("kind") != "select_filter_option":
             continue
         key = (str(trace.get("field_label") or "").strip(), str(trace.get("option_text") or "").strip())
         if all(key) and isinstance(trace.get("actions"), list) and trace["actions"]:
             trace_by_option[key] = trace["actions"]
+            traces_by_value.setdefault(key[1], []).append((key[0], trace["actions"]))
 
     previous_end_url = ""
     for step_index, step in enumerate(payload["steps"], 1):
@@ -732,6 +734,13 @@ def _normalize_generated_ui_payload(payload_json: str, traces: list[dict[str, An
             field = str(action.get("field_label") or action.get("field") or action.get("label") or "").strip()
             option = str(action.get("option_text") or action.get("option") or action.get("value") or "").strip()
             traced_actions = trace_by_option.get((field, option))
+            # Older or imperfect model responses sometimes omit the field
+            # label. Recover only when this option maps to exactly one observed,
+            # successful dropdown trace in the same run; never guess a locator.
+            if not traced_actions and not field:
+                matching_traces = traces_by_value.get(option, [])
+                if len(matching_traces) == 1:
+                    traced_actions = matching_traces[0][1]
             if not traced_actions:
                 raise ValueError(
                     f"第 {step_index} 步的下拉操作「{field or '未命名字段'} / {option or '未命名选项'}」"

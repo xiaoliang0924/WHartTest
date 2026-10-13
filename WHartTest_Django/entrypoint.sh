@@ -83,6 +83,9 @@ if [ -f "$PLAYWRIGHT_HELPERS_OVERRIDE" ] && [ -f "$PLAYWRIGHT_HELPERS_TARGET" ];
     python /app/scripts/merge_table_runtime_helper.py "$PLAYWRIGHT_HELPERS_BUNDLED" "$PLAYWRIGHT_HELPERS_OVERRIDE"
   fi
   python /app/scripts/merge_picker_runtime_helper.py "$PLAYWRIGHT_HELPERS_BUNDLED" "$PLAYWRIGHT_HELPERS_OVERRIDE"
+  if grep -q 'UI_ACTION_TRACE=' "$PLAYWRIGHT_HELPERS_BUNDLED"; then
+    python /app/scripts/merge_dropdown_runtime_helper.py "$PLAYWRIGHT_HELPERS_BUNDLED" "$PLAYWRIGHT_HELPERS_OVERRIDE"
+  fi
   echo "Applying playwright helpers.js runtime override..."
   cp -a "$PLAYWRIGHT_HELPERS_OVERRIDE" "$PLAYWRIGHT_HELPERS_TARGET"
 fi
