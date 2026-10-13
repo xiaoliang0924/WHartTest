@@ -1963,7 +1963,7 @@ async function dismissVersionNoticeBeforeClick(page) {
   if (!page) return false;
   try {
     const dialog = page
-      .locator('.el-overlay-dialog:visible, .el-dialog:visible, [role="dialog"]:visible')
+      .locator('.el-overlay-dialog:visible, .el-modal-dialog:visible, .el-dialog:visible, [role="dialog"]:visible')
       .filter({ hasText: /版本|更新/ })
       .last();
     if (!(await dialog.isVisible().catch(() => false))) return false;
@@ -1981,6 +1981,79 @@ async function dismissVersionNoticeBeforeClick(page) {
     // 弹窗若正在消失或页面已导航，不应阻断原回放步骤。
     return false;
   }
+}
+
+/**
+ * Resolve a dropdown's owning widget and clickable trigger across common UI kits.
+ * Selectors may point at a read-only inner input (Element Plus), the widget root,
+ * or an accessible combobox; keep replay resilient to wrapper/version changes.
+ */
+async function resolveDropdownWidget(locator) {
+  const isNativeSelect = await locator.evaluate((el) => el instanceof HTMLSelectElement).catch(() => false);
+  const nativeSelect = isNativeSelect ? locator : locator.locator('select').first();
+  if (isNativeSelect || await nativeSelect.count().catch(() => 0)) return { root: locator, nativeSelect };
+
+  const classTokens = ['el-select', 'ant-select', 'arco-select', 'n-base-selection', 'v-select', 'MuiSelect-select'];
+  const classTest = classTokens.map((token) =>
+    `contains(concat(" ", normalize-space(@class), " "), " ${token} ")`
+  ).join(' or ');
+  const root = locator.locator(`xpath=ancestor-or-self::*[${classTest}][1]`).first();
+  if (await root.count().catch(() => 0)) return { root, nativeSelect: null };
+  const accessibleRoot = locator
+    .locator('xpath=ancestor-or-self::*[@role="combobox" or @aria-haspopup="listbox"][1]')
+    .first();
+  if (await accessibleRoot.count().catch(() => 0)) return { root: accessibleRoot, nativeSelect: null };
+  return { root: locator, nativeSelect: null };
+}
+
+async function firstUsableDropdownTrigger(root, originalLocator) {
+  const selectors = [
+    '.el-select__wrapper', '.el-input__wrapper', '.ant-select-selector',
+    '.arco-select-view', '.n-base-selection', '.v-field',
+    '[role="combobox"]', 'select', 'button',
+  ];
+  for (const selector of selectors) {
+    const candidates = root.locator(selector);
+    for (let i = 0, count = await candidates.count().catch(() => 0); i < count; i += 1) {
+      const candidate = candidates.nth(i);
+      if (await candidate.isVisible().catch(() => false)
+          && await candidate.isEnabled().catch(() => true)) return candidate;
+    }
+  }
+  if (await originalLocator.isVisible().catch(() => false)
+      && await originalLocator.isEnabled().catch(() => true)) return originalLocator;
+  if (await root.isVisible().catch(() => false)
+      && await root.isEnabled().catch(() => true)) return root;
+  return null;
+}
+
+async function findDropdownOption(page, expectedText) {
+  const roleOptions = page.getByRole('option', { name: expectedText, exact: true });
+  for (let i = 0, count = await roleOptions.count().catch(() => 0); i < count; i += 1) {
+    const candidate = roleOptions.nth(i);
+    if (await candidate.isVisible().catch(() => false)
+        && await candidate.isEnabled().catch(() => true)) return candidate;
+  }
+
+  const selectors = [
+    '.el-select-dropdown__item:not(.is-disabled)',
+    '.ant-select-item-option:not(.ant-select-item-option-disabled)',
+    '.arco-select-option:not(.arco-select-option-disabled)',
+    '.n-base-select-option:not(.n-base-select-option--disabled)',
+    '.v-list-item[role="option"]:not([aria-disabled="true"])',
+    '[role="option"]:not([aria-disabled="true"])',
+  ].join(', ');
+  const options = page.locator(selectors);
+  for (let i = 0, count = await options.count().catch(() => 0); i < count; i += 1) {
+    const candidate = options.nth(i);
+    if (!await candidate.isVisible().catch(() => false)
+        || !await candidate.isEnabled().catch(() => true)) continue;
+    const text = String((await candidate.innerText().catch(() => ''))
+      || (await candidate.getAttribute('aria-label').catch(() => '')))
+      .replace(/\s+/g, ' ').trim();
+    if (text === expectedText) return candidate;
+  }
+  return null;
 }
 
 /** 执行一步平台步骤（ope_key 词汇表与执行器对齐），返回错误信息或 null */
@@ -2138,57 +2211,67 @@ async function runOneStep(page, step) {
       // visible interactive wrapper, preserving normal Playwright hit testing.
       let clickTarget = locator;
       const isReadonlyCombobox = await locator.evaluate((el) =>
-        el instanceof HTMLInputElement
-        && el.getAttribute('role') === 'combobox'
-        && el.hasAttribute('readonly')
-        && el.classList.contains('el-select__input')
+        el.getAttribute('role') === 'combobox'
+        && (el.hasAttribute('readonly') || el.getAttribute('aria-readonly') === 'true')
       ).catch(() => false);
       if (isReadonlyCombobox) {
-        const wrapper = locator.locator(
-          'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " el-select__wrapper ")][1]',
-        ).first();
-        if (await wrapper.count()) clickTarget = wrapper;
+        const { root } = await resolveDropdownWidget(locator);
+        const trigger = await firstUsableDropdownTrigger(root, locator);
+        if (trigger) clickTarget = trigger;
       }
       await clickTarget.click({ timeout: 15000 });
       return null;
     }
     case 'select_filter_option': {
-      const select = locator;
-      const trigger = select.locator('.el-select__wrapper').first();
-      if (!(await trigger.count())) return 'Element Plus 下拉缺少可交互的 .el-select__wrapper';
+      await dismissVersionNoticeBeforeClick(page);
+      const { root, nativeSelect } = await resolveDropdownWidget(locator);
+      const expected = inputValue.trim();
+
+      // Native HTML <select> is the most stable path; match the visible label.
+      if (nativeSelect) {
+        const options = await nativeSelect.locator('option').evaluateAll((items) =>
+          items.map((item) => ({ label: (item.label || item.textContent || '').trim(), value: item.value }))
+        );
+        const match = options.find((item) => item.label === expected);
+        if (!match) throw new Error('下拉中没有精确选项「' + expected + '」');
+        await nativeSelect.selectOption(match.value, { timeout: 5000 });
+        const selected = await nativeSelect.locator('option:checked').textContent().catch(() => '');
+        if (String(selected || '').trim() !== expected) {
+          throw new Error('下拉未回填「' + expected + '」，当前显示「' + String(selected || '').trim() + '」');
+        }
+        return null;
+      }
+
+      const trigger = await firstUsableDropdownTrigger(root, locator);
+      if (!trigger) return '无法识别可交互的下拉控件；定位器未找到可见且可用的触发区域';
       const readShown = async () => {
-        const selected = select.locator(
-          '.el-select__selected-item, .el-select__selection-text, .el-select__placeholder',
+        const selected = root.locator(
+          '.el-select__selected-item, .el-select__selection-text, .el-select__placeholder,' +
+          '.ant-select-selection-item, .arco-select-view-value, .n-base-selection-label,' +
+          '.v-select__selection-text, .v-field__input, .MuiSelect-select, [role="combobox"]',
         ).first();
-        return String((await selected.innerText().catch(() => '')) ||
-          (await select.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+        const value = await selected.inputValue().catch(() => '');
+        return String(value || (await selected.innerText().catch(() => ''))
+          || (await root.innerText().catch(() => ''))).replace(/\s+/g, ' ').trim();
       };
+
       for (let attempt = 0; attempt < 3; attempt += 1) {
         await page.keyboard.press('Escape').catch(() => {});
         await trigger.click({ timeout: 5000 });
-        const dropdown = page
-          .locator('.el-select-dropdown.el-popper:visible, .el-select-dropdown:visible')
-          .last();
-        await dropdown.waitFor({ state: 'visible', timeout: 10000 });
-        const options = dropdown.locator('.el-select-dropdown__item:not(.is-disabled)');
-        let option = null;
-        for (let i = 0; i < await options.count(); i += 1) {
-          const candidate = options.nth(i);
-          const text = String(await candidate.innerText().catch(() => ''))
-            .replace(/\s+/g, ' ').trim();
-          if (text === inputValue.trim()) {
-            option = candidate;
-            break;
+        const option = await findDropdownOption(page, expected);
+        if (!option) {
+          if (attempt < 2) {
+            await page.waitForTimeout(250);
+            continue;
           }
+          throw new Error('已打开下拉，但未找到可见、启用且文本完全匹配的选项「' + expected + '」');
         }
-        if (!option) throw new Error('可见下拉层中没有精确选项「' + inputValue + '」');
-        await option.waitFor({ state: 'visible', timeout: 5000 });
         await option.click({ timeout: 5000 });
         await page.waitForTimeout(250);
         const shown = await readShown();
-        if (shown.includes(inputValue)) return null;
+        if (shown === expected || shown.includes(expected)) return null;
       }
-      return '下拉未回填「' + inputValue + '」，当前显示「' + await readShown() + '」';
+      return '下拉未回填「' + expected + '」，当前显示「' + await readShown() + '」';
     }
     case 'fill':
       await locator.fill(inputValue);

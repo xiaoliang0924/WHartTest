@@ -18,7 +18,7 @@ from ui_automation.models import (
     UiAuthState,
 )
 from ui_automation.serializers import UiPageStepsExecuteSerializer
-from ui_automation.generated_case_service import persist_generated_ui_testcase, _parse_payload
+from ui_automation.generated_case_service import persist_generated_ui_testcase, _parse_payload, _is_supported_dropdown_selector
 from testcases.models import TestCase as FunctionalTestCase, TestCaseModule, TestCaseStep
 from file_management.models import FileAsset, FileManagementSetting, FileReference
 
@@ -76,6 +76,23 @@ class GeneratedUiTestCasePersistenceTests(TestCase):
                 ],
             }],
         }
+
+    def test_generated_dropdowns_accept_common_web_control_selectors(self):
+        supported = [
+            {"locator_type": "xpath", "locator_value": "//label[normalize-space()='状态']/following-sibling::div//input[@role='combobox']"},
+            {"locator_type": "css", "locator_value": ".ant-select"},
+            {"locator_type": "css", "locator_value": ".arco-select"},
+            {"locator_type": "css", "locator_value": ".n-base-selection"},
+            {"locator_type": "css", "locator_value": ".v-select"},
+            {"locator_type": "css", "locator_value": ".MuiSelect-select"},
+            {"locator_type": "css", "locator_value": "select[name='status']"},
+        ]
+        for selector in supported:
+            with self.subTest(selector=selector):
+                self.assertTrue(_is_supported_dropdown_selector(selector))
+        self.assertFalse(_is_supported_dropdown_selector(
+            {"locator_type": "css", "locator_value": ".unknown-control"}
+        ))
 
     def test_generated_payload_rejects_readonly_combobox_click(self):
         invalid = {

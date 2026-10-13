@@ -300,6 +300,27 @@ def _locator_dialect_error(locator_type: Any, locator_value: Any) -> str | None:
     return None
 
 
+def _is_supported_dropdown_selector(selector: Any) -> bool:
+    # Recognize observed native and custom dropdown targets from common UI kits.
+    if not isinstance(selector, dict):
+        return False
+    value = str(selector.get("locator_value") or "").strip().lower()
+    if not value:
+        return False
+    patterns = (
+        "role=combobox", "@role='combobox'", '@role="combobox"',
+        "aria-haspopup='listbox'", 'aria-haspopup="listbox"',
+        ".el-select", ".ant-select", ".arco-select", ".n-base-selection",
+        ".v-select", ".muiselect-select",
+    )
+    native_select_tag = re.search(r"(^|[\s>/])select(?=[#.\[:\s>]|$)", value)
+    role_combobox = (
+        str(selector.get("locator_type") or "").strip().lower() == "role"
+        and value == "combobox"
+    )
+    return bool(native_select_tag or role_combobox or any(pattern in value for pattern in patterns))
+
+
 def _normalize_select_option_locator(selector: dict[str, Any]) -> None:
     """Use a DOM-stable XPath for generated Element Plus option text selectors.
 
@@ -409,9 +430,10 @@ def _parse_payload(payload: str | dict[str, Any]) -> dict[str, Any]:
                     )
             if action_type == "select_filter_option":
                 selector = action.get("selector") or {}
-                if ".el-select" not in str(selector.get("locator_value") or ""):
+                if not _is_supported_dropdown_selector(selector):
                     raise ValueError(
-                        f"第 {index} 步的 select_filter_option 必须定位到页面实际观察到的 Element Plus .el-select。"
+                        f"第 {index} 步的 select_filter_option 必须定位到页面实际观察到的下拉控件"
+                        "（原生 select、combobox 或受支持的组件库下拉框）。"
                     )
                 if not str(action.get("value") or "").strip():
                     raise ValueError(f"第 {index} 步的下拉选择缺少实际观察到的选项值。")
