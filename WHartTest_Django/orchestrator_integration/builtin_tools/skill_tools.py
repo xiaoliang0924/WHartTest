@@ -987,6 +987,8 @@ def verified_filter_step_script(step: dict, preceding_steps: list[dict]) -> Opti
     description = str(step.get('description') or '')
     expected = str(step.get('expected_result') or '')
     number = int(step['step_number'])
+    if re.search(r'未|不|拒绝|禁止', expected):
+        return None
     quote = r'[「【“\"]([^」】”\"]+)[」】”\"]'
     field = None
     for earlier in reversed(preceding_steps):
@@ -1011,6 +1013,10 @@ def verified_filter_step_script(step: dict, preceding_steps: list[dict]) -> Opti
                 f'if (!await helpers.assertFilterFieldShows(page, {json.dumps(field, ensure_ascii=False)}, {json.dumps(names[0], ensure_ascii=False)})) '
                 f'throw new Error("步骤{number} 筛选值未回填");'
             )
+    elif field and '点击' in description and '查询' in description and ('查询' in expected or '刷新' in expected):
+        names = re.findall(quote, description)
+        if len(names) == 1:
+            action = f'await helpers.queryFilterResults(page, {json.dumps(names[0], ensure_ascii=False)});'
     elif '列表' in description and '列' in description:
         columns = re.findall(quote, description)
         target = re.search(r'均(?:为|是)\s*' + quote, expected)
@@ -1033,7 +1039,7 @@ def verified_filter_step_command(testcase_id, step_number, command):
         return command
     from testcases.models import TestCaseStep
     steps = list(TestCaseStep.objects.filter(test_case_id=testcase_id,
-        step_number__lte=step_number).order_by('step_number').values('step_number', 'description', 'expected_result'))
+        ).order_by('step_number').values('step_number', 'description', 'expected_result'))
     current = next((item for item in steps if item['step_number'] == step_number), None)
     if current is None:
         return command
@@ -1044,7 +1050,27 @@ def verified_filter_step_command(testcase_id, step_number, command):
     # The tool output must include what actually ran so generation cannot use
     # an LLM's discarded locator as execution evidence.
     action_source = script.rsplit(' await helpers.screenshotCaseStep(', 1)[0]
-    script += ' console.log("[VERIFIED_STEP_SCRIPT] " + ' + json.dumps(action_source, ensure_ascii=False) + ');'
+    if 'helpers.selectFilterDialogOption' in action_source:
+        remaining = [item for item in steps if item['step_number'] > step_number]
+        suffix = [verified_filter_step_script(item, [earlier for earlier in steps
+            if earlier['step_number'] < item['step_number']]) for item in remaining]
+        if len(suffix) == 3 and all(suffix) and all(name in code for name, code in zip(
+            ('confirmFilterDialog', 'queryFilterResults', 'assertTableColumnEquals'), suffix
+        )):
+            # These are contiguous, explicit, read-only filter goals. Complete
+            # the verified tail before returning to the model's next turn.
+            script = ' '.join([script, *suffix])
+            action_source = ' '.join(code.rsplit(' await helpers.screenshotCaseStep(', 1)[0]
+                                     for code in [verified_filter_step_script(current,
+                                         [item for item in steps if item['step_number'] < step_number]), *suffix])
+
+    # Persistent Playwright command extraction removes shell-level `\\"` escapes.
+    # Embedding JSON source directly in a JS string therefore corrupts nested
+    # quotes before AsyncFunction parses it. Keep the evidence marker readable,
+    # but transport the executed source as base64 so the payload has no quotes.
+    import base64
+    source_b64 = base64.b64encode(action_source.encode('utf-8')).decode('ascii')
+    script += ' console.log("[VERIFIED_STEP_SCRIPT] " + Buffer.from("' + source_b64 + '", "base64").toString("utf8"));'
     return 'node run.js ' + shlex.quote(script)
 
 
@@ -2503,6 +2529,7 @@ def get_skill_tools(
                     int(current_test_case_id), current_chat_session_id
                 )
             if resolved_skill == "playwright-skill" and case_step:
+                requested_command = verified_filter_step_command(current_test_case_id, case_step, requested_command)
                 mismatch = _cross_step_click_mismatch(
                     current_test_case_id, case_step, requested_command or ""
                 )

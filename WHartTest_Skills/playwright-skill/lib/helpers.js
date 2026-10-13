@@ -2621,6 +2621,44 @@ async function listFilterDialogOptions(page, fieldLabel, options = {}) {
  * ⚠️ optionName 必须是弹窗里真实存在的名称。写错时本函数**不会**抛出裸的 TimeoutError，
  * 而是列出弹窗中全部可选项 + 最接近的一个，避免上层靠猜名字反复重试。
  */
+async function queryFilterResults(page, buttonName = '查询') {
+  const buttons = page.getByRole('button', { name: buttonName, exact: true });
+  const visible = [];
+  for (let i = 0; i < await buttons.count(); i++) if (await buttons.nth(i).isVisible()) visible.push(buttons.nth(i));
+  if (visible.length !== 1) throw new Error(`查询按钮「${buttonName}」不唯一或不可见`);
+  const requests = [];
+  const requestErrors = [];
+  const collect = request => {
+    if (['xhr', 'fetch'].includes(request.resourceType())) {
+      requests.push((async () => {
+        const response = await request.response();
+        if (!response || response.status() >= 400) throw new Error('查询期间请求失败，不能确认列表刷新');
+        await response.finished();
+      })().catch(error => { requestErrors.push(error); }));
+    }
+  };
+  const paint = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  page.on('request', collect);
+  try {
+    await visible[0].click({ timeout: 8000 });
+    await paint();
+    const deadline = Date.now() + 15000;
+    let observed = -1;
+    while (observed !== requests.length) {
+      if (Date.now() > deadline) throw new Error('查询请求未稳定完成');
+      observed = requests.length;
+      let timer;
+      try {
+        await Promise.race([Promise.all(requests), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('查询响应超时')), Math.max(1, deadline - Date.now())); })]);
+      } finally { clearTimeout(timer); }
+      if (requestErrors.length) throw requestErrors[0];
+      await paint();
+    }
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('.el-loading-mask')).every(el => !el.getClientRects().length || getComputedStyle(el).visibility === 'hidden'), null, { timeout: 10000 });
+    await paint();
+  } finally { page.off('request', collect); }
+}
+
 async function readFilterDialogSelection(row) {
   return row.evaluate(el => {
     for (const attr of ['aria-selected', 'aria-checked']) {
@@ -7093,6 +7131,7 @@ module.exports = {
   openFilterDialogField,
   listFilterDialogOptions,
   selectFilterDialogOption,
+  queryFilterResults,
   confirmFilterDialog,
   assertFilterFieldShows,
   filterByFields,

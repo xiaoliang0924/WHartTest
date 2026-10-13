@@ -5,13 +5,18 @@ import sys
 
 def merge_picker(source, target):
     anchor = '/**\n * 确认弹窗后'
-    start = source.index('async function readFilterDialogSelection(')
+    start = source.index('async function queryFilterResults(')
     end = source.index(anchor, start)
-    target_start = target.find('async function readFilterDialogSelection(')
+    target_start = target.find('async function queryFilterResults(')
+    if target_start < 0:
+        target_start = target.find('async function readFilterDialogSelection(')
     if target_start < 0:
         target_start = target.index('async function selectFilterDialogOption(')
     target_end = target.index(anchor, target_start)
-    return target[:target_start] + source[start:end] + target[target_end:]
+    merged = target[:target_start] + source[start:end] + target[target_end:]
+    if '  queryFilterResults,\n' not in merged:
+        merged = merged.replace('  selectFilterDialogOption,\n', '  selectFilterDialogOption,\n  queryFilterResults,\n', 1)
+    return merged
 
 
 if __name__ == '__main__':
