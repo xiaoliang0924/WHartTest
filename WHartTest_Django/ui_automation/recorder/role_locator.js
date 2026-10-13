@@ -23,4 +23,24 @@ function roleLocator(container, expression) {
   return container.getByRole(match[1], { name, exact: typeof name === 'string' });
 }
 
-module.exports = { roleLocator };
+// Some applications append a live selection count to an otherwise stable
+// action label (for example, a button rendered as “确定（1）”). Keep the
+// configured exact locator first, but allow replay to try this narrowly
+// bounded variant if the exact accessible name is absent.
+function dynamicCountRoleLocator(expression) {
+  const match = /^button\[name=("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')\]$/.exec(String(expression).trim());
+  if (!match) return null;
+  let name;
+  try {
+    name = match[1].startsWith('"')
+      ? JSON.parse(match[1])
+      : match[1].slice(1, -1).replace(/\\(['\\])/g, '$1');
+  } catch (_) {
+    return null;
+  }
+  if (!name) return null;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return `button[name=/^${escaped}(?:\\s*[（(]\\s*\\d+\\s*[）)])?$/]`;
+}
+
+module.exports = { roleLocator, dynamicCountRoleLocator };

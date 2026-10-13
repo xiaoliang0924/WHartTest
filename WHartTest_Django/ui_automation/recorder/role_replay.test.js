@@ -30,7 +30,7 @@ test('real recorder named-role count assertions detect existing buttons', async 
   try {
     const started = await request('start', { url: 'about:blank', viewport: { width: 800, height: 600 } });
     assert.equal(started.ok, true, started.error);
-    const html = '<meta charset="utf-8"><button>发送图片</button><button>发送文件</button><button>价格表</button>';
+    const html = '<meta charset="utf-8"><button>发送图片</button><button>发送文件</button><button>价格表</button><button>确定（1）</button>';
     const good = await request('run_steps', { steps: [
       { ope_key: 'goto', ope_value: { url: 'data:text/html,' + encodeURIComponent(html) } },
       { ope_key: 'assert_count', ope_value: { expected: 1 },
@@ -39,6 +39,11 @@ test('real recorder named-role count assertions detect existing buttons', async 
         element: { locator_type: 'role', locator_value: 'button[name="发送文件"]' } },
     ] });
     assert.equal(good.state.failed, false, JSON.stringify(good.state.step_results.map(({ screenshot, ...step }) => step)));
+    const dynamicCount = await request('run_steps', { steps: [
+      { ope_key: 'click', element: { locator_type: 'role', locator_value: 'button[name="确定"]' } },
+    ] });
+    assert.equal(dynamicCount.state.failed, false,
+      JSON.stringify(dynamicCount.state.step_results.map(({ screenshot, ...step }) => step)));
     const bad = await request('run_steps', { steps: [
       { detail_id: 201, ope_key: 'assert_count', ope_value: { expected: 0 },
         element: { locator_type: 'role', locator_value: 'button[name=/价格表/i]' } },

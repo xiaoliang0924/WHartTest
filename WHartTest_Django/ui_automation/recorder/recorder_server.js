@@ -35,7 +35,7 @@ const readline = require('readline');
 const Module = require('module');
 const { execSync } = require('child_process');
 const { assertLocatorCount, matchesPageUrl } = require('./step_assertions');
-const { roleLocator } = require('./role_locator');
+const { roleLocator, dynamicCountRoleLocator } = require('./role_locator');
 const { loginWithCredentials } = require('./environment_login');
 
 // ---------------------------------------------------------------------------
@@ -1671,7 +1671,13 @@ async function resolveLocatorWithFallback(page, selector, log, options = {}) {
   }
   const candidates = [];
   const push = (t, v, idx, locatorOptions = null) => {
-    if (v && String(v).trim()) candidates.push([t, String(v), idx, locatorOptions]);
+    if (!v || !String(v).trim()) return;
+    const value = String(v);
+    candidates.push([t, value, idx, locatorOptions, false]);
+    if (t === 'role') {
+      const dynamicCountValue = dynamicCountRoleLocator(value);
+      if (dynamicCountValue) candidates.push(['role', dynamicCountValue, null, null, true]);
+    }
   };
   push(selector.locator_type || 'xpath', selector.locator_value, selector.locator_index);
   push(selector.locator_type_2, selector.locator_value_2, selector.locator_index_2);
@@ -1709,7 +1715,7 @@ async function resolveLocatorWithFallback(page, selector, log, options = {}) {
   let locator = null;
   let usedIndex = 0;
   for (let i = 0; i < candidates.length; i++) {
-    const [t, v, idx, locatorOptions] = candidates[i];
+    const [t, v, idx, locatorOptions, isDynamicCountFallback] = candidates[i];
     // Count assertions must target the whole matching collection and allow
     // zero matches. Applying locator_index or requiring visibility here makes
     // assert_count(expected=0) impossible and turns it into a visibility wait.
@@ -1726,7 +1732,9 @@ async function resolveLocatorWithFallback(page, selector, log, options = {}) {
       }
       // 首选等待元素可见，备用定位器用更短超时快速切换（同执行器 5s/2s）
       cand = await _pickVisibleCandidate(cand, i === 0 ? 5000 : 2000);
-      await cand.waitFor({ state: 'visible', timeout: i === 0 ? 5000 : 2000 });
+      const hasDynamicCountFallback = !isDynamicCountFallback
+        && candidates[i + 1] && candidates[i + 1][4];
+      await cand.waitFor({ state: 'visible', timeout: hasDynamicCountFallback ? 1500 : (i === 0 ? 5000 : 2000) });
       locator = cand;
       usedIndex = i;
       if (log) log(`定位器 ${i + 1} [${t}=${v}] 命中`);
